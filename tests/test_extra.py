@@ -357,3 +357,48 @@ async def test_v2_reply_drop_name_matching_and_temp_ban_expiry(db_session):
     bak = await SecurityBackupService.create_full_backup_zip(db_session, "manual", 999999)
     assert bak.file_size_bytes > 0
 
+
+@pytest.mark.asyncio
+async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
+    from models.v2_features import Auction
+    from services.auction_wishlist_service import AuctionWishlistService
+    from services.gameplay_service import GameplayService
+
+    await CardService.create_card(
+        db_session, "Chainsaw Hero", "Chainsaw Man", "https://x/csm.png", "Epic", 4000, media_type="Manga"
+    )
+    rows, total = await AdminService.get_v2_media_titles(db_session, media_type="Manga")
+    assert total >= 1
+    rep_id, title, cnt = rows[0]
+    assert isinstance(rep_id, int) and title == "Chainsaw Man" and cnt >= 1
+
+    # Single rank field edit + 1-click normalize
+    await GameplayService.save_rank_definitions(
+        db_session,
+        [
+            {"name": "Common", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
+            {"name": "Rare", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
+        ],
+    )
+    await GameplayService.update_single_rank_attr(db_session, 0, "chance", "70")
+    await GameplayService.normalize_rank_probabilities(db_session)
+    ranks = await GameplayService.get_rank_definitions(db_session)
+    assert sum(int(r.get("drop_probability", 0)) for r in ranks) == 100
+
+    # Auction cancel refunds highest bidder
+    bidder = await UserService.upsert_user(db_session, 9801, "aucb", "AucB")
+    await UserService.credit_coins(db_session, bidder.id, 3000, "test", "seed")
+    c = await CardService.create_card(db_session, "Cancel Auc", "Auc World", "https://x/ca.png", "Rare", 2000)
+    ok, _, auc = await AuctionWishlistService.create_auction(db_session, c.id, 500, 3, 999999, min_step=50)
+    assert ok and auc is not None
+    ok_b, _ = await AuctionWishlistService.place_bid(db_session, auc.id, bidder, 800)
+    assert ok_b
+    await db_session.refresh(bidder)
+    assert bidder.locked_coins == 800
+
+    ok_can, _ = await AuctionWishlistService.admin_cancel_auction(db_session, auc.id)
+    assert ok_can is True
+    await db_session.refresh(bidder)
+    row = await db_session.get(Auction, auc.id)
+    assert row.status == "cancelled" and bidder.locked_coins == 0
+

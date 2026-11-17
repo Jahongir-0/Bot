@@ -224,6 +224,96 @@ class AuctionWishlistService:
             return True, f"✅ Stavka qabul qilindi: {amount:,} 🪙!"
 
     @staticmethod
+    async def _finalize_single_auction(session: AsyncSession, auc: Auction) -> None:
+        card = await session.get(Card, auc.card_id)
+        if auc.highest_bidder_id is None or auc.bid_count == 0:
+            auc.status = "no_bids"
+            auc.finalized = True
+            if auc.user_card_id:
+                uc = await session.get(UserCard, auc.user_card_id)
+                if uc:
+                    uc.is_locked = False
+                    uc.card_state = "OWNED"
+            elif card:
+                card.card_state = "AVAILABLE"
+            return
+
+        winner_id = auc.highest_bidder_id
+        price = int(auc.current_price)
+        await session.execute(
+            update(User)
+            .where(User.id == winner_id)
+            .values(
+                locked_coins=func.greatest(0, User.locked_coins - price),
+                auction_wins=User.auction_wins + 1,
+                updated_at=utcnow(),
+            )
+        )
+        winner = await session.get(User, winner_id)
+        session.add(
+            CoinTransaction(
+                user_id=winner_id,
+                amount=-price,
+                balance_after=winner.coins if winner else 0,
+                tx_type="auction_win",
+                description=f"Auction #{auc.id} won",
+                reference_id=f"auction:{auc.id}",
+            )
+        )
+
+        if auc.seller_user_id:
+            await UserService.credit_coins(
+                session,
+                auc.seller_user_id,
+                price,
+                "auction_sale",
+                f"Auction #{auc.id} sold",
+                reference_id=f"auction_sale:{auc.id}",
+            )
+
+        if auc.user_card_id:
+            uc = await session.get(UserCard, auc.user_card_id)
+            if uc:
+                uc.user_id = winner_id
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+                uc.acquired_via = "auction"
+            await UserService.recompute_card_counts(session, winner_id, add_xp=50)
+            if auc.seller_user_id:
+                await UserService.recompute_card_counts(session, auc.seller_user_id)
+        else:
+            try:
+                async with session.begin_nested():
+                    uc = UserCard(user_id=winner_id, card_id=auc.card_id, acquired_via="auction", card_state="OWNED")
+                    session.add(uc)
+                    await session.flush()
+                    uc.serial_number = 10000 + uc.id
+                await UserService.recompute_card_counts(session, winner_id, add_xp=50)
+            except IntegrityError:
+                pass
+            if card:
+                card.card_state = "OWNED"
+
+        auc.status = "ended"
+        auc.finalized = True
+        await AuctionWishlistService.record_history(
+            session,
+            auc.card_id,
+            "auction_won",
+            from_user_id=auc.seller_user_id,
+            to_user_id=winner_id,
+            price=price,
+            details={"auction_id": auc.id},
+        )
+        await CommunityService.notify_user(
+            session,
+            winner_id,
+            "auction",
+            "🏆 Auksionda g‘olib bo‘ldingiz!",
+            f"Siz {card.character_name if card else 'karta'} ni {price:,} 🪙 ga yutib oldingiz!",
+        )
+
+    @staticmethod
     async def finalize_expired_auctions(session: AsyncSession) -> int:
         now = utcnow()
         due = list(
@@ -237,100 +327,57 @@ class AuctionWishlistService:
         )
         done = 0
         for auc in due:
-            card = await session.get(Card, auc.card_id)
-            if auc.highest_bidder_id is None or auc.bid_count == 0:
-                auc.status = "no_bids"
-                auc.finalized = True
-                if auc.user_card_id:
-                    uc = await session.get(UserCard, auc.user_card_id)
-                    if uc:
-                        uc.is_locked = False
-                        uc.card_state = "OWNED"
-                elif card:
-                    card.card_state = "AVAILABLE"
-                done += 1
-                continue
-
-            winner_id = auc.highest_bidder_id
-            price = int(auc.current_price)
-            # G'olib locked_coins dan yechamiz (hisobdan chiqarish)
-            await session.execute(
-                update(User)
-                .where(User.id == winner_id)
-                .values(
-                    locked_coins=func.greatest(0, User.locked_coins - price),
-                    auction_wins=User.auction_wins + 1,
-                    updated_at=utcnow(),
-                )
-            )
-            winner = await session.get(User, winner_id)
-            session.add(
-                CoinTransaction(
-                    user_id=winner_id,
-                    amount=-price,
-                    balance_after=winner.coins if winner else 0,
-                    tx_type="auction_win",
-                    description=f"Auction #{auc.id} won",
-                    reference_id=f"auction:{auc.id}",
-                )
-            )
-
-            # Sotuvchi bo'lsa unga coin o'tkazamiz
-            if auc.seller_user_id:
-                await UserService.credit_coins(
-                    session,
-                    auc.seller_user_id,
-                    price,
-                    "auction_sale",
-                    f"Auction #{auc.id} sold",
-                    reference_id=f"auction_sale:{auc.id}",
-                )
-
-            # Kartani g'olibga berish
-            if auc.user_card_id:
-                uc = await session.get(UserCard, auc.user_card_id)
-                if uc:
-                    uc.user_id = winner_id
-                    uc.is_locked = False
-                    uc.card_state = "OWNED"
-                    uc.acquired_via = "auction"
-                await UserService.recompute_card_counts(session, winner_id, add_xp=50)
-                if auc.seller_user_id:
-                    await UserService.recompute_card_counts(session, auc.seller_user_id)
-            else:
-                try:
-                    async with session.begin_nested():
-                        uc = UserCard(user_id=winner_id, card_id=auc.card_id, acquired_via="auction", card_state="OWNED")
-                        session.add(uc)
-                        await session.flush()
-                        uc.serial_number = 10000 + uc.id
-                    await UserService.recompute_card_counts(session, winner_id, add_xp=50)
-                except IntegrityError:
-                    pass
-                if card:
-                    card.card_state = "OWNED"
-
-            auc.status = "ended"
-            auc.finalized = True
-            await AuctionWishlistService.record_history(
-                session,
-                auc.card_id,
-                "auction_won",
-                from_user_id=auc.seller_user_id,
-                to_user_id=winner_id,
-                price=price,
-                details={"auction_id": auc.id},
-            )
-            await CommunityService.notify_user(
-                session,
-                winner_id,
-                "auction",
-                "🏆 Auksionda g‘olib bo‘ldingiz!",
-                f"Siz {card.character_name if card else 'karta'} ni {price:,} 🪙 ga yutib oldingiz!",
-            )
+            await AuctionWishlistService._finalize_single_auction(session, auc)
             done += 1
         await session.flush()
         return done
+
+    @staticmethod
+    async def admin_finalize_auction(session: AsyncSession, auction_id: int) -> Tuple[bool, str]:
+        auc = await session.get(Auction, auction_id)
+        if auc is None or auc.status != "active":
+            return False, "Faol auksion topilmadi."
+        await AuctionWishlistService._finalize_single_auction(session, auc)
+        await session.flush()
+        return True, "🏁 Auksion muddatidan oldin yakunlandi!"
+
+    @staticmethod
+    async def admin_cancel_auction(session: AsyncSession, auction_id: int) -> Tuple[bool, str]:
+        auc = await session.get(Auction, auction_id)
+        if auc is None or auc.status != "active":
+            return False, "Faol auksion topilmadi."
+        if auc.highest_bidder_id and auc.bid_count > 0:
+            refund_amt = int(auc.current_price)
+            await session.execute(
+                update(User)
+                .where(User.id == auc.highest_bidder_id)
+                .values(
+                    coins=User.coins + refund_amt,
+                    locked_coins=func.greatest(0, User.locked_coins - refund_amt),
+                    updated_at=utcnow(),
+                )
+            )
+            await CommunityService.notify_user(
+                session,
+                auc.highest_bidder_id,
+                "auction",
+                "❌ Auksion bekor qilindi",
+                f"Auksion #{auc.id} admin tomonidan bekor qilindi. {refund_amt:,} 🪙 balansingizga qaytarildi.",
+            )
+        if auc.user_card_id:
+            uc = await session.get(UserCard, auc.user_card_id)
+            if uc:
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+        else:
+            card = await session.get(Card, auc.card_id)
+            if card:
+                card.card_state = "AVAILABLE"
+                card.is_available = True
+        auc.status = "cancelled"
+        auc.finalized = True
+        await session.flush()
+        return True, "❌ Auksion bekor qilindi va stavkalar qaytarildi."
 
     # ------------------------------------------------------------------
     # Wishlist

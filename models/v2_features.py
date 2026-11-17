@@ -59,6 +59,9 @@ class ForcedChannel(Base, TimestampMixin):
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="Telegram Channel")
     invite_link: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    channel_type: Mapped[str] = mapped_column(String(24), nullable=False, default="telegram")  # telegram|group|external
+    sub_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="vip")  # daily|subscribers|vip
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     target_subscribers: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     current_subscribers: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -71,7 +74,7 @@ class Quiz(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # active|ended
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # scheduled|active|ended
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     reward_coins: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
@@ -79,6 +82,10 @@ class Quiz(Base, TimestampMixin):
     reward_card_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("cards.id", ondelete="SET NULL"), nullable=True)
     max_winners: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    target_scope: Mapped[str] = mapped_column(String(24), nullable=False, default="all")  # all|group
+    target_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_dispatched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_by_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
@@ -90,6 +97,7 @@ class QuizQuestion(Base, TimestampMixin):
     order_num: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     question_text: Mapped[str] = mapped_column(Text, nullable=False)
     options: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    accepted_answers: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     correct_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     image_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     time_limit_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
@@ -310,6 +318,8 @@ class ScheduledMessage(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     media_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    from_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    forward_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     target_scope: Mapped[str] = mapped_column(String(24), nullable=False, default="all")
     send_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)

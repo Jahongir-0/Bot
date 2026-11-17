@@ -80,6 +80,24 @@ def _col_defs(dialect: str):
             ("reward_coins", "INTEGER NOT NULL DEFAULT 0"),
             ("target_scope", "VARCHAR(24) NOT NULL DEFAULT 'all'"),
         ],
+        "forced_channels": [
+            ("channel_type", "VARCHAR(24) NOT NULL DEFAULT 'telegram'"),
+            ("sub_mode", "VARCHAR(24) NOT NULL DEFAULT 'vip'"),
+            ("expires_at", dt),
+        ],
+        "quizzes": [
+            ("target_scope", "VARCHAR(24) NOT NULL DEFAULT 'all'"),
+            ("target_group_id", "INTEGER"),
+            ("scheduled_at", dt),
+            ("is_dispatched", f"BOOLEAN NOT NULL DEFAULT {bool_true}"),
+        ],
+        "quiz_questions": [
+            ("accepted_answers", f"JSON NOT NULL DEFAULT {json_empty_arr}"),
+        ],
+        "scheduled_messages": [
+            ("from_chat_id", "BIGINT"),
+            ("forward_message_id", "BIGINT"),
+        ],
     }
 
 

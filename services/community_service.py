@@ -134,6 +134,9 @@ class CommunityService:
         invite_link: Optional[str],
         added_by_tg_id: int,
         target_subscribers: Optional[int] = None,
+        channel_type: str = "telegram",
+        sub_mode: str = "vip",
+        expires_at: Optional[datetime] = None,
     ) -> ForcedChannel:
         ch = (await session.execute(select(ForcedChannel).where(ForcedChannel.chat_id == chat_id))).scalar_one_or_none()
         if ch is None:
@@ -142,6 +145,9 @@ class CommunityService:
                 title=title[:255],
                 username=username,
                 invite_link=invite_link,
+                channel_type=channel_type,
+                sub_mode=sub_mode,
+                expires_at=expires_at,
                 is_active=True,
                 target_subscribers=target_subscribers,
                 added_by_tg_id=added_by_tg_id,
@@ -151,6 +157,9 @@ class CommunityService:
             ch.title = title[:255]
             ch.username = username
             ch.invite_link = invite_link
+            ch.channel_type = channel_type
+            ch.sub_mode = sub_mode
+            ch.expires_at = expires_at
             ch.is_active = True
             ch.target_subscribers = target_subscribers
         await session.flush()
@@ -181,7 +190,7 @@ class CommunityService:
         user: Optional[User],
         tg_user_id: int,
     ) -> Tuple[bool, List[ForcedChannel]]:
-        """Qaytaradi: (is_ok, missing_channels). VIP bypass tekshiriladi."""
+        """Qaytaradi: (is_ok, missing_channels). VIP bypass va muddatli/obunachili kanallar tekshiriladi."""
         if user is not None and await CommunityService.has_vip_benefit(session, user, "bypass_forced_sub"):
             return True, []
 
@@ -189,18 +198,23 @@ class CommunityService:
         if not channels:
             return True, []
 
+        now = utcnow()
         missing: List[ForcedChannel] = []
         for ch in channels:
-            # Target subscriber limitga yetgan bo'lsa avtomatik to'xtatish
-            if ch.target_subscribers and ch.current_subscribers >= ch.target_subscribers:
+            if ch.sub_mode == "daily" and ch.expires_at and ensure_utc(ch.expires_at) <= now:
                 ch.is_active = False
+                continue
+            if ch.sub_mode == "subscribers" and ch.target_subscribers and ch.current_subscribers >= ch.target_subscribers:
+                ch.is_active = False
+                continue
+            if ch.channel_type == "external":
+                # Tashqi havolalar (Instagram/YouTube) Telegram API bilan tekshirilmaydi
                 continue
             try:
                 member = await bot.get_chat_member(ch.chat_id, tg_user_id)
                 if getattr(member, "status", "left") in ("left", "kicked"):
                     missing.append(ch)
             except Exception:
-                # Bot kanalga admin bo'lmasa yoki xato bersa foydalanuvchini bloklab qo'ymaymiz
                 continue
         await session.flush()
         return len(missing) == 0, missing
@@ -273,6 +287,15 @@ class CommunityService:
     @staticmethod
     async def list_ads(session: AsyncSession) -> List[AdCampaign]:
         return list((await session.execute(select(AdCampaign).order_by(AdCampaign.id.desc()))).scalars().all())
+
+    @staticmethod
+    async def delete_ad(session: AsyncSession, ad_id: int) -> bool:
+        ad = await session.get(AdCampaign, ad_id)
+        if ad is None:
+            return False
+        await session.delete(ad)
+        await session.flush()
+        return True
 
     @staticmethod
     async def create_ad(
@@ -525,11 +548,15 @@ class CommunityService:
         target_scope: str,
         admin_tg_id: int,
         media_file_id: Optional[str] = None,
+        from_chat_id: Optional[int] = None,
+        forward_message_id: Optional[int] = None,
     ) -> ScheduledMessage:
         sm = ScheduledMessage(
             title=title[:160],
             body=body,
             media_file_id=media_file_id,
+            from_chat_id=from_chat_id,
+            forward_message_id=forward_message_id,
             target_scope=target_scope,
             send_at=send_at,
             status="pending",

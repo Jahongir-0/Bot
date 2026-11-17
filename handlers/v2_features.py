@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional
 
 from aiogram import F, Router
@@ -140,6 +141,43 @@ async def cb_quiz_hist(callback: CallbackQuery, db_user: User) -> None:
     ok_cnt = sum(1 for r in rows if r.is_correct)
     txt = f"📜 <b>QUIZ TARIXINGIZ</b>\n\nOxirgi {len(rows)} ta javobdan <b>{ok_cnt}</b> tasi to‘g‘ri!\nUmumiy quiz g‘alabalar: <b>{db_user.quiz_wins}</b>"
     await edit_or_answer(callback, txt, reply_markup=quiz_list_kb(callback.from_user.id, []))
+
+
+@router.message(F.reply_to_message, F.text, NotCommandFilter())
+async def msg_reply_quiz_answer(message: Message, db_user: User) -> None:
+    """Viktorina e'loniga reply qilib yozilgan javobni tekshiradi."""
+    replied = message.reply_to_message
+    if replied is None or replied.from_user is None or not replied.from_user.is_bot:
+        return
+    rtxt = replied.text or ""
+    if "YANGI VIKTORINA BOSHLANDI" not in rtxt:
+        return
+    m = re.search(r"Quiz #(\d+)", rtxt)
+    if not m:
+        return
+    quiz_id = int(m.group(1))
+    guess = (message.text or "").strip()
+    if not guess:
+        return
+
+    async with get_session() as session:
+        user = await session.get(User, db_user.id)
+        if user is None:
+            return
+        qq = await GameplayService.get_next_unanswered_question(session, quiz_id, user.id)
+        if qq is None:
+            return
+        accepted, is_ok, msg = await GameplayService.submit_quiz_text_answer(
+            session, quiz_id, qq.id, user, guess
+        )
+        if accepted:
+            await session.commit()
+        else:
+            await session.rollback()
+    if accepted and is_ok and msg:
+        await message.reply(msg)
+    elif msg:
+        await message.reply(esc(msg))
 
 
 # ------------------------------------------------------------------

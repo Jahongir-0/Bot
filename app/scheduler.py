@@ -15,6 +15,7 @@ from models.base import ensure_utc, utcnow
 from models.group import Group
 from models.schedule import ActiveDrop, DropSchedule
 from models.user import User
+from models.v2_features import ForcedChannel, ScheduledMessage
 from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
 from services.community_service import CommunityService
@@ -260,41 +261,71 @@ async def _dispatch_slot(bot: Bot, schedule_id: int) -> None:
 
 
 async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
-    # 1. Auktsion, Season va Temp Ban yakunlash (~1 daqiqada bir)
+    # 1. Auktsion, Season, Temp Ban, Kanal muddati, Rejalashtirilgan Quiz va Xabarlar (~1 daqiqada bir)
     if tick % 2 == 0:
+        now = utcnow()
+        due_msgs: List[ScheduledMessage] = []
+        due_quizzes = []
         async with get_session() as session:
             finalized_auc = await AuctionWishlistService.finalize_expired_auctions(session)
             finalized_seasons = await GameplayService.finalize_expired_seasons(session)
             expired_bans = await SecurityBackupService.expire_temp_bans(session)
+            expired_ch = await session.execute(
+                update(ForcedChannel)
+                .where(
+                    ForcedChannel.is_active.is_(True),
+                    ForcedChannel.sub_mode == "daily",
+                    ForcedChannel.expires_at.is_not(None),
+                    ForcedChannel.expires_at <= now,
+                )
+                .values(is_active=False)
+            )
             due_msgs = await CommunityService.get_due_scheduled_messages(session)
-            if finalized_auc or finalized_seasons or expired_bans or due_msgs:
+            due_quizzes = await GameplayService.get_due_scheduled_quizzes(session)
+            for q in due_quizzes:
+                q.status = "active"
+                q.is_active = True
+                q.is_dispatched = True
+            if finalized_auc or finalized_seasons or expired_bans or expired_ch.rowcount or due_msgs or due_quizzes:
                 await session.commit()
 
         # Rejalashtirilgan xabarlarni yuborish
         for sm in due_msgs:
             sent_cnt = 0
+            targets: List[int] = []
             async with get_session() as s_msg:
-                targets: List[int] = []
-                if sm.target_type in ("users", "all"):
+                if sm.target_scope in ("users", "all"):
                     u_ids = (await s_msg.execute(select(User.telegram_id).where(User.is_banned.is_(False)))).scalars().all()
                     targets.extend(int(x) for x in u_ids)
-                if sm.target_type in ("groups", "all"):
+                if sm.target_scope in ("groups", "all"):
                     g_ids = (
                         await s_msg.execute(
                             select(Group.telegram_chat_id).where(Group.is_active.is_(True), Group.is_banned.is_(False))
                         )
                     ).scalars().all()
                     targets.extend(int(x) for x in g_ids)
+
             sem = asyncio.Semaphore(SEND_CONCURRENCY)
 
             async def _send_one(cid: int) -> None:
                 nonlocal sent_cnt
                 async with sem:
                     try:
-                        await bot.send_message(cid, sm.text)
+                        if sm.from_chat_id and sm.forward_message_id:
+                            await bot.copy_message(chat_id=cid, from_chat_id=sm.from_chat_id, message_id=sm.forward_message_id)
+                        else:
+                            await bot.send_message(cid, sm.body)
                         sent_cnt += 1
                     except TelegramRetryAfter as exc:
                         await asyncio.sleep(float(exc.retry_after) + 0.5)
+                        try:
+                            if sm.from_chat_id and sm.forward_message_id:
+                                await bot.copy_message(chat_id=cid, from_chat_id=sm.from_chat_id, message_id=sm.forward_message_id)
+                            else:
+                                await bot.send_message(cid, sm.body)
+                            sent_cnt += 1
+                        except Exception:
+                            pass
                     except Exception:
                         pass
 
@@ -302,13 +333,51 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                 await asyncio.gather(*[_send_one(c) for c in targets])
 
             async with get_session() as s_done:
-                from models.v2_features import ScheduledMessage
-
                 row = await s_done.get(ScheduledMessage, sm.id)
                 if row is not None:
                     row.status = "sent"
                     row.sent_count = sent_cnt
                     await s_done.commit()
+
+        # Rejalashtirilgan viktorinalarni e'lon qilish
+        for q in due_quizzes:
+            async with get_session() as s_q:
+                qs_res = await GameplayService.get_quiz_with_questions(s_q, q.id)
+                first_q = qs_res[1][0] if qs_res and qs_res[1] else None
+                q_targets: List[int] = []
+                if q.target_scope == "group" and q.target_group_id:
+                    grp = await s_q.get(Group, q.target_group_id)
+                    if grp and grp.is_active and not grp.is_banned:
+                        q_targets.append(grp.telegram_chat_id)
+                else:
+                    g_ids = (
+                        await s_q.execute(
+                            select(Group.telegram_chat_id).where(Group.is_active.is_(True), Group.is_banned.is_(False))
+                        )
+                    ).scalars().all()
+                    u_ids = (await s_q.execute(select(User.telegram_id).where(User.is_banned.is_(False)))).scalars().all()
+                    q_targets.extend(int(x) for x in g_ids)
+                    q_targets.extend(int(x) for x in u_ids)
+
+            q_text = (
+                f"🧠 <b>YANGI VIKTORINA BOSHLANDI: {esc(q.title)}</b>\n\n"
+                f"🎁 Har bir to‘g‘ri javob uchun: <b>{q.reward_coins:,} 🪙</b>\n"
+                + (f"❓ <b>1-savol:</b> {esc(first_q.question_text)}\n\n" if first_q else "")
+                + f"👇 Ishtirok etish uchun /quiz yozing (yoki ushbu xabarga javob yozing)!\n<code>Quiz #{q.id}</code>"
+            )
+            sem_q = asyncio.Semaphore(SEND_CONCURRENCY)
+
+            async def _send_quiz_msg(cid: int) -> None:
+                async with sem_q:
+                    try:
+                        await bot.send_message(cid, q_text)
+                    except TelegramRetryAfter as exc:
+                        await asyncio.sleep(float(exc.retry_after) + 0.5)
+                    except Exception:
+                        pass
+
+            if q_targets:
+                await asyncio.gather(*[_send_quiz_msg(c) for c in q_targets])
 
     # 2. Avtomatik kunlik backup + eski backuplarni tozalash (~24 soatda bir: 2880 tick * 30s)
     if tick > 0 and tick % 2880 == 120:

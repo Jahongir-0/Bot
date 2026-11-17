@@ -1,47 +1,71 @@
 import asyncio
+import io
 import json
 import logging
+import re
 import zipfile
-import io
-from datetime import datetime, timezone
-from typing import Optional
+import zlib
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 
 from admin.filters import IsAdminFilter, has_admin_perm, resolve_admin_perms
 from config.settings import get_settings
 from database.session import get_session
 from keyboards.v2 import (
+    admin_rank_detail_kb,
+    admin_ranks_list_kb,
+    admin_rbac_menu_kb,
+    admin_rbac_perms_kb,
+    admin_rbac_pick_user_kb,
+    admin_undropped_cards_kb,
+    admin_v2_add_choice_kb,
     admin_v2_card_detail_kb,
+    admin_v2_cards_action_list_kb,
     admin_v2_cards_menu_kb,
     admin_v2_edit_fields_kb,
     admin_v2_home_kb,
+    admin_v2_media_titles_kb,
+    admin_v2_title_cards_kb,
     admin_v2_view_cards_kb,
 )
+from models.admin import AdminAction
 from models.base import ensure_utc, utcnow
 from models.card import Card
 from models.group import Group
+from models.schedule import ActiveDrop
 from models.user import User
 from models.user_card import UserCard
-from models.v2_features import AdCampaign, ForcedChannel, Quiz, SecurityIncident, SupportTicket
+from models.v2_features import (
+    AdCampaign,
+    AdminRole,
+    BackupRecord,
+    Quiz,
+    SecurityIncident,
+    SupportTicket,
+)
 from services.admin_service import AdminService
 from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
 from services.community_service import CommunityService
+from services.drop_service import DropService
 from services.gameplay_service import GameplayService
 from services.security_backup_service import MAX_ZIP_BYTES, SecurityBackupService
 from services.settings_service import SettingsService
 from services.user_service import UserService
-from utils.callback_data import AdmV2Cb, AdminCb, NavCb
-from utils.constants import ADMIN_PERMISSION_SECTIONS, MEDIA_TYPES, PAGE_SIZE, get_rarity_meta, list_rarities
-from utils.formatting import esc, fmt_coins, format_card_about, format_card_block
+from utils.callback_data import AdmV2Cb, AdminCb
+from utils.constants import ADMIN_PERMISSION_SECTIONS, MEDIA_TYPES, PAGE_SIZE, get_rarity_meta
+from utils.formatting import esc, fmt_coins, format_card_about, format_card_block, format_drop_message
 from utils.image_check import validate_image_url
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_super_admin, send_card_message
+from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_super_admin, send_card_message, send_card_visual
 
 logger = logging.getLogger(__name__)
 
@@ -51,22 +75,65 @@ router.callback_query.filter(IsAdminFilter())
 
 
 class AdminV2States(StatesGroup):
+    # Cards
     waiting_zip_cards = State()
     waiting_card_search = State()
     waiting_card_edit_val = State()
-    waiting_new_admin_id = State()
-    waiting_channel_add = State()
-    waiting_rank_input = State()
-    waiting_quiz_create = State()
-    waiting_quiz_question = State()
-    waiting_games_cfg = State()
-    waiting_auction_create = State()
-    waiting_season_create = State()
-    waiting_ad_create = State()
+
+    # Admins RBAC
+    waiting_admin_search = State()
+    waiting_admin_role_name = State()
+
+    # Channels
+    waiting_channel_link = State()
+    waiting_channel_title = State()
+    waiting_channel_days = State()
+    waiting_channel_subs = State()
+
+    # Ranks
+    waiting_rank_field = State()
+    waiting_rank_add_name = State()
+    waiting_rank_add_emoji = State()
+    waiting_rank_add_prob = State()
+    waiting_rank_add_drops = State()
+
+    # Quiz
+    waiting_quiz_title = State()
+    waiting_quiz_coins = State()
+    waiting_quiz_q_text = State()
+    waiting_quiz_q_opts = State()
+    waiting_quiz_sched_dt = State()
+    waiting_quiz_clone_coins = State()
+
+    # Games
+    waiting_games_field = State()
+
+    # Auction
+    waiting_auc_price = State()
+    waiting_auc_hours = State()
+    waiting_auc_step = State()
+
+    # Season
+    waiting_season_name = State()
+    waiting_season_days = State()
+    waiting_season_prize = State()
+
+    # Reklama
+    waiting_ad_content = State()
+    waiting_ad_button = State()
+
+    # Broadcast / Message
+    waiting_msg_sched_dt = State()
+    waiting_msg_content = State()
+
+    # Memory / Backup
+    waiting_backup_date = State()
     waiting_backup_restore = State()
+
+    # Support & Security
     waiting_support_reply = State()
-    waiting_security_ban = State()
-    waiting_scheduled_msg = State()
+    waiting_sec_target = State()
+    waiting_sec_reason = State()
 
 
 def _back_home_btn(owner_id: int) -> InlineKeyboardButton:
@@ -80,9 +147,30 @@ async def _deny_if_no_perm(callback: CallbackQuery, admin_perms: set | None, sec
     return False
 
 
-# ---------------------------------------------------------------------------
-# CARDS V2 (ZIP Import, View Tabs 20/page, Titles, Card Detail, Edit Fields, Search, Restore)
-# ---------------------------------------------------------------------------
+def _cancel_kb(owner_id: int, sec: str, act: str = "v") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec=sec, act=act).pack())]]
+    )
+
+
+def _local_tz() -> ZoneInfo:
+    return ZoneInfo(get_settings().timezone)
+
+
+def _parse_local_dt(raw: str) -> Optional[datetime]:
+    cleaned = " ".join((raw or "").strip().split())
+    for fmt in ("%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%d.%m.%y %H:%M"):
+        try:
+            dt_local = datetime.strptime(cleaned, fmt).replace(tzinfo=_local_tz())
+            return dt_local.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+# ===========================================================================
+# 1. CARDS V2 (Add choice, ZIP, View Tabs, Media Titles, Edit, Delete, Search, Restore)
+# ===========================================================================
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "v")))
 async def cb_v2_cards_menu(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
@@ -90,8 +178,20 @@ async def cb_v2_cards_menu(callback: CallbackQuery, state: FSMContext, admin_per
     await state.clear()
     await edit_or_answer(
         callback,
-        "🎴 <b>CARD BO‘LIMI V2</b>\n\nKerakli amalni tanlang:",
+        "🎴 <b>CARD BO‘LIMI</b>\n\nKerakli amalni tanlang:",
         reply_markup=admin_v2_cards_menu_kb(callback.from_user.id),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "add_menu")))
+async def cb_v2_add_choice(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    await state.clear()
+    await edit_or_answer(
+        callback,
+        "➕ <b>ADD CARD</b>\n\nKartalarni qanday usulda qo‘shasiz?",
+        reply_markup=admin_v2_add_choice_kb(callback.from_user.id),
     )
 
 
@@ -101,20 +201,22 @@ async def cb_v2_zip_prompt(callback: CallbackQuery, state: FSMContext, admin_per
         return
     await state.set_state(AdminV2States.waiting_zip_cards)
     await state.update_data(owner_tg_id=callback.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="v").pack())]])
     await edit_or_answer(
         callback,
         "📦 <b>ZIP CARD IMPORT</b>\n\n"
-        "Botga <code>.zip</code> arxiv yuboring (max 50 MB).\n"
+        "Botga <code>.zip</code> arxiv faylini yuboring (max 50 MB).\n"
         "• Ichida <code>cards.json</code> yoki <code>cards.csv</code> + rasmlar bo‘lishi mumkin;\n"
-        "• Yoki rasmlar nomini <code>Character - Anime - Rank.jpg</code> ko‘rinishida qo‘ying.\n"
+        "• Yoki rasmlar nomini <code>Personaj - Anime - Rank.jpg</code> ko‘rinishida joylang.\n"
         "<i>Bekor qilish: /cancel</i>",
-        reply_markup=kb,
+        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
     )
 
 
 @router.message(AdminV2States.waiting_zip_cards, F.document)
 async def fsm_v2_zip_upload(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
     doc = message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
         await message.answer("⚠️ Faqat <code>.zip</code> arxiv fayl yuboring.")
@@ -123,7 +225,7 @@ async def fsm_v2_zip_upload(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ ZIP fayl hajmi 50 MB dan oshmasligi kerak.")
         return
     await state.clear()
-    wait_msg = await message.answer("⏳ ZIP arxiv tekshirilmoqda va import qilinmoqda...")
+    wait_msg = await message.answer("⏳ ZIP arxiv tekshirilmoqda va ma’lumotlar o‘rniga qo‘shilmoqda...")
 
     buf = io.BytesIO()
     await message.bot.download(doc, destination=buf)
@@ -131,17 +233,19 @@ async def fsm_v2_zip_upload(message: Message, state: FSMContext) -> None:
         rep = await SecurityBackupService.import_cards_from_zip(session, buf.getvalue(), message.from_user.id)
         await session.commit()
 
+    status_hdr = "✅ <b>MA’LUMOTLAR QO‘SHILDI!</b>" if rep.added > 0 else "⚠️ <b>HECH QANDAY YANGI KARTA QO‘SHILMADI</b>"
     lines = [
-        "✅ <b>IMPORT COMPLETED</b>",
-        f"Files: <b>{rep.total_files}</b>",
-        f"Cards: <b>{rep.total_cards}</b>",
-        f"Images: <b>{rep.total_images}</b>",
-        f"Added: <b>{rep.added}</b>",
-        f"Duplicate: <b>{rep.duplicates}</b>",
-        f"Failed: <b>{rep.failed}</b>",
+        status_hdr,
+        "",
+        f"📁 Jami fayllar: <b>{rep.total_files}</b>",
+        f"🎴 Aniqlangan kartalar: <b>{rep.total_cards}</b>",
+        f"🖼 Rasmlar: <b>{rep.total_images}</b>",
+        f"✅ Qo‘shildi: <b>{rep.added}</b> ta",
+        f"♻️ Takroriy (o‘tkazildi): <b>{rep.duplicates}</b> ta",
+        f"❌ Qo‘shilmadi (xato): <b>{rep.failed}</b> ta",
     ]
     if rep.failed_files:
-        lines.append("\n<b>Failed files:</b>")
+        lines.append("\n<b>Qo‘shilmagan fayllar/sabablari:</b>")
         for idx, item in enumerate(rep.failed_files[:15], start=1):
             lines.append(f"{idx}. {esc(item)}")
     await wait_msg.edit_text("\n".join(lines), reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
@@ -159,7 +263,19 @@ async def cb_v2_view_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admi
         page = 1
         async with get_session() as session:
             cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=1, page_size=PAGE_SIZE)
-    txt = f"👁 <b>VIEW CARDS — {esc(tab.upper())}</b> (Jami: <b>{total}</b> ta | 20/sahifa)"
+    tab_titles = {
+        "sent_group": "SENT GROUP (oxirgi yuborilganlar yuqorida)",
+        "not_sent": "NOT SENT (hali guruhga tashlanmaganlar)",
+        "anime": "ANIME KARTALARI",
+        "manga": "MANGA / MANHWA / MANHUA",
+        "movie": "KINO / TV SERIES",
+        "cartoon": "CARTOON / COMIC",
+        "event": "EVENT KARTALARI",
+        "other": "OTHER KARTALAR",
+        "deleted": "O‘CHIRILGAN KARTALAR",
+        "all": "BARCHA KARTALAR",
+    }
+    txt = f"👁 <b>{tab_titles.get(tab, tab.upper())}</b> (Jami: <b>{total}</b> ta | 20/sahifa)"
     if not cards:
         txt += "\n\n📭 Bu bo‘limda kartalar yo‘q."
     await edit_or_answer(
@@ -176,23 +292,90 @@ async def cb_v2_media_titles(callback: CallbackQuery, callback_data: AdmV2Cb, ad
     mgroup = callback_data.ext or "anime"
     page = max(1, callback_data.p)
     async with get_session() as session:
-        rows, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
-    lines = [f"📊 <b>{esc(mgroup.upper())} NOMLARI</b> (Karta soni bo‘yicha | Jami: {total})\n"]
-    for idx, (title, cnt) in enumerate(rows, start=(page - 1) * PAGE_SIZE + 1):
-        lines.append(f"{idx}. <b>{esc(title)}</b> — {cnt}")
-    if not rows:
-        lines.append("📭 Topilmadi.")
+        titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
+    txt = f"📁 <b>{esc(mgroup.upper())} NOMLARI</b> (Karta soni bo‘yicha | Jami: <b>{total}</b> ta)\n\nIchiga kirish uchun nomni tanlang:"
+    if not titles:
+        txt = f"📁 <b>{esc(mgroup.upper())} NOMLARI</b>\n\n📭 Hozircha kartalar yo‘q."
+    await edit_or_answer(
+        callback,
+        txt,
+        reply_markup=admin_v2_media_titles_kb(callback.from_user.id, titles, mgroup, page, total, page_size=PAGE_SIZE),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "mtitle")))
+async def cb_v2_media_title_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    mgroup = callback_data.ext or "anime"
+    page = max(1, callback_data.p)
+    async with get_session() as session:
+        title, cards, total = await AdminService.get_v2_cards_by_media_title(
+            session, media_group=mgroup, rep_card_id=callback_data.tid, page=page, page_size=PAGE_SIZE
+        )
+    txt = f"🎬 <b>{esc(title or mgroup.upper())}</b> (Jami: <b>{total}</b> ta karta)\n\nTahrirlash yoki ko‘rish uchun kartani tanlang:"
+    if not cards:
+        txt += "\n\n📭 Topilmadi."
+    await edit_or_answer(
+        callback,
+        txt,
+        reply_markup=admin_v2_title_cards_kb(callback.from_user.id, cards, callback_data.tid, mgroup, page, total, page_size=PAGE_SIZE),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"edit_list", "del_list"}))))
+async def cb_v2_cards_action_list(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    mode = callback_data.act
+    page = max(1, callback_data.p)
+    async with get_session() as session:
+        cards, total = await AdminService.get_v2_cards_by_tab(session, tab="all", page=page, page_size=PAGE_SIZE)
+    hdr = "✏️ <b>KARTA TAHRIRLASH</b>" if mode == "edit_list" else "🗑 <b>KARTA O‘CHIRISH</b>"
+    txt = f"{hdr} (Jami: <b>{total}</b> ta | 20/sahifa)\n\nKerakli kartani tanlang yoki qidiring:"
+    if not cards:
+        txt += "\n\n📭 Kartalar yo‘q."
+    await edit_or_answer(
+        callback,
+        txt,
+        reply_markup=admin_v2_cards_action_list_kb(callback.from_user.id, cards, mode, page, total, page_size=PAGE_SIZE),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "del_one")))
+async def cb_v2_delete_one_confirm(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    async with get_session() as session:
+        card = await session.get(Card, callback_data.tid)
+    title = f"{card.character_name} ({card.card_code})" if card else f"#{callback_data.tid}"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⬅️ ORQAGA",
-                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="view_tabs", ext=mgroup, p=1).pack(),
+                    text="📦 Arxivlab o‘chirish (userlarda qolsin)",
+                    callback_data=AdminCb(owner_id=callback.from_user.id, section="cards", action="delete_exec", target_id=callback_data.tid, extra="archive").pack(),
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🪙 To‘liq o‘chirish + Coin kompensatsiya",
+                    callback_data=AdminCb(owner_id=callback.from_user.id, section="cards", action="delete_exec", target_id=callback_data.tid, extra="refund").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ ORQAGA",
+                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="del_list", p=max(1, callback_data.p)).pack(),
+                )
+            ],
         ]
     )
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
+    await edit_or_answer(
+        callback,
+        f"🗑 <b>KARTANI O‘CHIRISH: {esc(title)}</b>\n\nMavjud egalardagi nusxalar bilan qanday yo‘l tutamiz?",
+        reply_markup=kb,
+    )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "card_det")))
@@ -206,9 +389,7 @@ async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, adm
             return
         owners_list, drops_sent = await AdminService.get_card_ownership_and_drops(session, card.id)
         latest_uc = (
-            await session.execute(
-                select(UserCard).where(UserCard.card_id == card.id).order_by(UserCard.id.desc()).limit(1)
-            )
+            await session.execute(select(UserCard).where(UserCard.card_id == card.id).order_by(UserCard.id.desc()).limit(1))
         ).scalar_one_or_none()
     owner_preview = ", ".join(f"{n} (×{q})" for n, q in owners_list[:4]) if owners_list else "Yo‘q"
     claimed_dt = latest_uc.acquired_at.strftime("%Y-%m-%d %H:%M") if latest_uc and latest_uc.acquired_at else "—"
@@ -250,7 +431,7 @@ async def cb_v2_card_sub_actions(callback: CallbackQuery, callback_data: AdmV2Cb
             text = format_card_about(card)
         elif act == "owners":
             owners, drops = await AdminService.get_card_ownership_and_drops(session, card.id)
-            lines = [f"👤 <b>{esc(card.character_name)} EGALARI</b> (Drops: {drops})\n"]
+            lines = [f"👤 <b>{esc(card.character_name)} EGALARI</b> (Tashlangan: {drops})\n"]
             for name, qty in owners[:20]:
                 lines.append(f"• {esc(name)} — <b>{qty}</b> ta")
             if not owners:
@@ -265,7 +446,7 @@ async def cb_v2_card_sub_actions(callback: CallbackQuery, callback_data: AdmV2Cb
             if not hist:
                 lines.append("📭 Tarix yozuvlari yo‘q.")
             text = "\n".join(lines)
-        else:  # restore
+        else:
             if not is_super_admin(callback.from_user):
                 await callback.answer("⛔ Faqat Super Admin tiklay oladi.", show_alert=True)
                 return
@@ -275,27 +456,22 @@ async def cb_v2_card_sub_actions(callback: CallbackQuery, callback_data: AdmV2Cb
             await callback.answer("♻️ Karta tiklandi!", show_alert=True)
             text = f"♻️ <b>{esc(card.character_name)}</b> muvaffaqiyatli tiklandi!"
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Karta",
-                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="card_det", tid=callback_data.tid).pack(),
-                )
-            ]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Karta", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="card_det", tid=callback_data.tid).pack())]]
     )
     await edit_or_answer(callback, text, reply_markup=kb)
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"search", "edit_search"}))))
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"search", "edit_search", "del_search"}))))
 async def cb_v2_card_search_prompt(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
+    next_map = {"edit_search": "edit_pick", "del_search": "del_one", "search": "card_det"}
     await state.set_state(AdminV2States.waiting_card_search)
-    await state.update_data(owner_tg_id=callback.from_user.id, next_act="edit_pick" if callback_data.act == "edit_search" else "card_det")
+    await state.update_data(owner_tg_id=callback.from_user.id, next_act=next_map.get(callback_data.act, "card_det"))
     await edit_or_answer(
         callback,
         "🔍 <b>KARTA QIDIRISH</b>\n\nPersonaj ismi, anime/media nomi, <code>CRD-...</code> yoki DB ID yozing:\n<i>Bekor qilish: /cancel</i>",
+        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
     )
 
 
@@ -317,7 +493,7 @@ async def fsm_v2_card_search(message: Message, state: FSMContext) -> None:
         meta = get_rarity_meta(c.rarity)
         b.row(
             InlineKeyboardButton(
-                text=f"{meta.emoji} {c.character_name[:24]} ({c.card_code})"[:60],
+                text=f"{meta.emoji} {c.character_name[:22]} · {c.anime_name[:16]} ({c.card_code})"[:60],
                 callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="cards", act=next_act, tid=c.id).pack(),
             )
         )
@@ -346,13 +522,21 @@ async def cb_v2_edit_field_start(callback: CallbackQuery, callback_data: AdmV2Cb
         b = InlineKeyboardBuilder()
         for i in range(0, len(MEDIA_TYPES), 3):
             b.row(*[InlineKeyboardButton(text=m, callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="set_mtype", tid=cid, ext=m).pack()) for m in MEDIA_TYPES[i : i + 3]])
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="edit_pick", tid=cid).pack()))
         await edit_or_answer(callback, "🎬 Yangi Media Type tanlang:", reply_markup=b.as_markup())
         return
     if field == "rank":
+        async with get_session() as session:
+            ranks = await GameplayService.get_rank_definitions(session)
         b = InlineKeyboardBuilder()
-        for r in list_rarities():
-            meta = get_rarity_meta(r)
-            b.row(InlineKeyboardButton(text=f"{meta.emoji} {r}", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="set_rank", tid=cid, ext=r).pack()))
+        for idx, r in enumerate(ranks):
+            b.row(
+                InlineKeyboardButton(
+                    text=f"{r.get('emoji', '⭐')} {r['name']} ({r.get('drop_limit', 1)} drop)",
+                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="set_rank", tid=cid, ext=str(idx)).pack(),
+                )
+            )
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="edit_pick", tid=cid).pack()))
         await edit_or_answer(callback, "⭐ Yangi Rank tanlang:", reply_markup=b.as_markup())
         return
 
@@ -362,11 +546,16 @@ async def cb_v2_edit_field_start(callback: CallbackQuery, callback_data: AdmV2Cb
         "img": "🖼 Yangi rasmni foto sifatida yuboring yoki URL yozing:",
         "desc": "📝 Yangi tavsif (description) matnini yozing:",
         "alias": "🏷 Aliaslarni vergul bilan yozing (masalan: <code>Gojo, Satoru</code>):",
+        "limit": "🔁 Guruhga nechta tushish sonini (drop limit) yozing (masalan: <code>3</code>):",
         "value": "💎 Yangi coin qiymatini kiriting (musbat son):",
     }
     await state.set_state(AdminV2States.waiting_card_edit_val)
     await state.update_data(owner_tg_id=callback.from_user.id, edit_card_id=cid, edit_field=field)
-    await edit_or_answer(callback, prompts.get(field, "Yangi qiymatni yozing:") + "\n<i>Bekor: /cancel</i>")
+    await edit_or_answer(
+        callback,
+        prompts.get(field, "Yangi qiymatni yozing:") + "\n<i>Bekor: /cancel</i>",
+        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
+    )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"set_mtype", "set_rank"}))))
@@ -383,10 +572,16 @@ async def cb_v2_edit_inline_field(callback: CallbackQuery, callback_data: AdmV2C
             card.media_type = callback_data.ext
             await CommunityService.log_audit(session, callback.from_user.id, "edit_card", "card", str(card.id), {"media_type": old}, {"media_type": card.media_type})
         else:
+            ranks = await GameplayService.get_rank_definitions(session)
+            r_obj = ranks[int(callback_data.ext)] if callback_data.ext.isdigit() and 0 <= int(callback_data.ext) < len(ranks) else None
+            new_rank = str(r_obj["name"]) if r_obj else callback_data.ext
             old = card.rarity
-            card.rarity = callback_data.ext
-            meta = get_rarity_meta(card.rarity)
-            card.drop_weight = meta.drop_weight
+            card.rarity = new_rank
+            if r_obj:
+                card.drop_limit = int(r_obj.get("drop_limit", card.drop_limit))
+                card.drop_weight = int(r_obj.get("drop_probability", card.drop_weight))
+            else:
+                card.drop_weight = get_rarity_meta(new_rank).drop_weight
             await CommunityService.log_audit(session, callback.from_user.id, "edit_card", "card", str(card.id), {"rarity": old}, {"rarity": card.rarity})
         await session.commit()
     await callback.answer("✅ Yangilandi!")
@@ -431,6 +626,12 @@ async def fsm_v2_edit_card_val(message: Message, state: FSMContext) -> None:
             card.metadata_json = meta
         elif field == "alias":
             card.aliases = [a.strip() for a in (message.text or "").split(",") if a.strip()]
+        elif field == "limit":
+            raw = (message.text or "").strip()
+            if not raw.isdigit() or int(raw) < 1:
+                await message.answer("⚠️ Kamida 1 butun son kiriting.")
+                return
+            card.drop_limit = int(raw)
         elif field == "value":
             raw = (message.text or "").strip()
             if not raw.isdigit():
@@ -443,501 +644,1896 @@ async def fsm_v2_edit_card_val(message: Message, state: FSMContext) -> None:
     await message.answer("✅ Karta maydoni yangilandi!", reply_markup=admin_v2_edit_fields_kb(message.from_user.id, cid))
 
 
-# ---------------------------------------------------------------------------
-# ADMIN RBAC MANAGEMENT (sec="admins")
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 2. GROUPS UNDROPPED DROP PICKER (sec="groups", act="pick_card" / "drop_sel")
+# ===========================================================================
+@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "pick_card")))
+async def cb_v2_group_pick_card(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "groups"):
+        return
+    gid = callback_data.tid
+    page = max(1, callback_data.p)
+    async with get_session() as session:
+        cards, total = await AdminService.get_undropped_cards_paginated(session, page=page, page_size=PAGE_SIZE)
+    back_cb = AdminCb(owner_id=callback.from_user.id, section="groups", action="group_view", target_id=gid).pack()
+    txt = (
+        f"🎴 <b>GURUHGA TASHLASH UCHUN KARTA TANLANG</b>\nHali tashlanmagan kartalar (<b>{total}</b> ta):"
+        if cards
+        else "📭 Hozircha hali guruhga tashlanmagan bo‘sh kartalar yo‘q."
+    )
+    await edit_or_answer(
+        callback,
+        txt,
+        reply_markup=admin_undropped_cards_kb(
+            callback.from_user.id, cards, "groups", "drop_sel", page, total, back_cb, target_ctx_id=gid, page_size=PAGE_SIZE
+        ),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "drop_sel")))
+async def cb_v2_group_drop_selected(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "groups"):
+        return
+    card_id = callback_data.tid
+    group_id = int(callback_data.ext) if callback_data.ext.isdigit() else 0
+    async with get_session() as session:
+        card = await session.get(Card, card_id)
+        group = await session.get(Group, group_id)
+        if card is None or group is None:
+            await callback.answer("Karta yoki guruh topilmadi.", show_alert=True)
+            return
+        if card.is_event_card:
+            await callback.answer("🎯 Event kartasi guruhga tashlanmaydi.", show_alert=True)
+            return
+        drop = await DropService.create_active_drop(session, group, card, force=True)
+        active_event = await CardService.get_active_event(session)
+        await AdminService.log_action(
+            session, callback.from_user.id, "manual_card_drop", "group", str(group.id), {"card_id": card.id, "card_code": card.card_code}
+        )
+        await session.commit()
+
+    caption = format_drop_message(card, active_event=active_event)
+    try:
+        sent_msg = await send_card_visual(
+            bot=callback.bot, chat_id=group.telegram_chat_id, image=card.image, caption=caption, reply_markup=None
+        )
+        async with get_session() as s2:
+            d2 = await s2.get(ActiveDrop, drop.id)
+            if d2 is not None:
+                d2.telegram_message_id = sent_msg.message_id
+                await s2.commit()
+    except Exception as exc:
+        logger.warning("Failed dropping selected card %s to group %s: %s", card.id, group.telegram_chat_id, exc)
+        await callback.answer("❌ Guruhga yuborib bo‘lmadi.", show_alert=True)
+        return
+
+    await callback.answer(f"✅ {card.character_name} → {group.title} guruhiga tashlandi!", show_alert=True)
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Guruhga qaytish", callback_data=AdminCb(owner_id=callback.from_user.id, section="groups", action="group_view", target_id=group.id).pack())]]
+    )
+    await edit_or_answer(
+        callback,
+        f"✅ <b>DROP YUBORILDI!</b>\n\n🎴 Karta: <b>{esc(card.character_name)}</b>\n👥 Guruh: <b>{esc(group.title)}</b>",
+        reply_markup=back_kb,
+    )
+
+
+# ===========================================================================
+# 3. ADMIN RBAC MANAGEMENT (Zero-pipe, User Picker + Checkboxes)
+# ===========================================================================
+async def _show_rbac_menu(target, owner_id: int, is_super: bool) -> None:
+    async with get_session() as session:
+        roles = await CommunityService.list_admin_roles(session)
+    super_ids = sorted(get_settings().admin_ids)
+    lines = [
+        "👑 <b>ADMINLAR VA RUXSATLAR (RBAC)</b>\n",
+        f"⭐ Asosiy Super Adminlar: <code>{', '.join(map(str, super_ids))}</code>",
+        f"🛡 Qo‘shimcha adminlar: <b>{sum(1 for r in roles if r.is_active)}</b> ta\n",
+    ]
+    await edit_or_answer(target, "\n".join(lines), reply_markup=admin_rbac_menu_kb(owner_id, roles, is_super))
+
+
 @router.callback_query(AdmV2Cb.filter(F.sec == "admins"))
 async def cb_v2_admins(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "admins"):
         return
-    if callback_data.act == "add":
-        if not is_super_admin(callback.from_user):
-            await callback.answer("⛔ Faqat Super Admin yangi admin qo‘sha oladi.", show_alert=True)
+    act = callback_data.act
+    owner_id = callback.from_user.id
+    is_sup_caller = is_super_admin(callback.from_user)
+
+    if act == "v":
+        await state.clear()
+        await _show_rbac_menu(callback, owner_id, is_sup_caller)
+        return
+
+    if act == "det":
+        async with get_session() as session:
+            r = await CommunityService.get_admin_role(session, callback_data.tid)
+        if r is None:
+            await callback.answer("Admin topilmadi.", show_alert=True)
             return
-        await state.set_state(AdminV2States.waiting_new_admin_id)
-        await state.update_data(owner_tg_id=callback.from_user.id)
+        p_txt = "BARCHA BO‘LIMLAR (Super Admin)" if r.is_super_admin else (", ".join(r.permissions or []) or "Hech narsa")
+        txt = (
+            f"👑 <b>ADMIN MA’LUMOTI</b>\n\n"
+            f"🆔 Telegram ID: <code>{r.telegram_id}</code>\n"
+            f"🏷 Lavozim: <b>{esc(r.role_name)}</b>\n"
+            f"🔐 Ruxsatlar: <code>{esc(p_txt)}</code>"
+        )
+        b = InlineKeyboardBuilder()
+        if is_sup_caller:
+            b.row(
+                InlineKeyboardButton(text="✏️ Ruxsatlarni tahrirlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="edit_p", tid=r.telegram_id).pack()),
+                InlineKeyboardButton(text="🗑 O‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="del", tid=r.telegram_id).pack()),
+            )
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="v").pack()))
+        await edit_or_answer(callback, txt, reply_markup=b.as_markup())
+        return
+
+    if not is_sup_caller:
+        await callback.answer("⛔ Faqat Super Admin adminlarni boshqara oladi.", show_alert=True)
+        return
+
+    if act == "add_pick":
+        page = max(1, callback_data.p)
+        async with get_session() as session:
+            users, total = await AdminService.get_users_paginated(session, filter_mode="all", page=page, page_size=PAGE_SIZE)
         await edit_or_answer(
             callback,
-            "👑 <b>YANGI ADMIN QO‘SHISH</b>\n\n"
-            "Format: <code>TelegramID | RolNomi | ruxsat1,ruxsat2</code>\n"
-            "Misol: <code>123456789 | Moderator | cards,support,report</code>\n"
-            "<i>Yoki barchasi uchun: <code>123456789 | Co-Admin | all</code></i>\n"
-            "Mavjud bo‘limlar: <code>" + ", ".join(k for k, _ in ADMIN_PERMISSION_SECTIONS) + "</code>",
+            f"👑 <b>YANGI ADMIN QO‘SHISH</b>\n\nBot foydalanuvchilaridan birini tanlang (Jami: {total}):",
+            reply_markup=admin_rbac_pick_user_kb(owner_id, users, page, total, page_size=PAGE_SIZE),
         )
         return
-    if callback_data.act == "del":
-        if not is_super_admin(callback.from_user):
-            await callback.answer("⛔ Faqat Super Admin o‘chira oladi.", show_alert=True)
-            return
-        async with get_session() as session:
-            await CommunityService.remove_admin_role(session, callback_data.tid)
-            await CommunityService.log_audit(session, callback.from_user.id, "remove_admin", "admin", str(callback_data.tid))
-            await session.commit()
-        await callback.answer("✅ Admin olib tashlandi.")
 
-    async with get_session() as session:
-        roles = await CommunityService.list_admin_roles(session)
-    super_ids = sorted(get_settings().admin_ids)
-    lines = ["👑 <b>ADMINLAR VA RUXSATLAR (RBAC)</b>\n", f"⭐ Super Admin IDs: <code>{', '.join(map(str, super_ids))}</code>\n"]
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="➕ Admin qo‘shish / yangilash", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="admins", act="add").pack()))
-    for r in roles:
-        if not r.is_active:
-            continue
-        p_txt = "BARCHA" if r.is_super_admin else ", ".join(r.permissions or [])
-        lines.append(f"• <code>{r.telegram_id}</code> — <b>{esc(r.role_name)}</b> ({esc(p_txt)})")
-        if is_super_admin(callback.from_user):
+    if act in ("add_search", "add_id"):
+        await state.set_state(AdminV2States.waiting_admin_search)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(
+            callback,
+            "🔍 Admin qilmoqchi bo‘lgan odamning <b>Telegram ID</b>, <b>@username</b> yoki <b>ismini</b> yozing:\n<i>Bekor: /cancel</i>",
+            reply_markup=_cancel_kb(owner_id, "admins", "v"),
+        )
+        return
+
+    if act == "pick_u":
+        target_tg_id = callback_data.tid
+        await state.set_state(AdminV2States.waiting_admin_role_name)
+        await state.update_data(owner_tg_id=owner_id, rbac_target_id=target_tg_id)
+        b = InlineKeyboardBuilder()
+        for rname in ("Moderator", "Editor", "Card Manager", "Co-Admin"):
             b.row(
                 InlineKeyboardButton(
-                    text=f"🗑 O‘chirish: {r.telegram_id}",
-                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="admins", act="del", tid=r.telegram_id).pack(),
+                    text=f"🏷 {rname}",
+                    callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="set_role", tid=target_tg_id, ext=rname).pack(),
                 )
             )
-    b.row(_back_home_btn(callback.from_user.id))
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
+        b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="v").pack()))
+        await edit_or_answer(
+            callback,
+            f"🆔 Tanlangan foydalanuvchi: <code>{target_tg_id}</code>\n\nLavozim nomini tanlang yoki o‘zingiz matn bilan yozing:",
+            reply_markup=b.as_markup(),
+        )
+        return
+
+    if act == "set_role":
+        target_tg_id = callback_data.tid
+        role_name = callback_data.ext or "Moderator"
+        async with get_session() as session:
+            existing = await CommunityService.get_admin_role(session, target_tg_id)
+        perms = list(existing.permissions or []) if existing else ["cards", "support"]
+        is_sup = bool(existing.is_super_admin) if existing else False
+        await state.set_state(None)
+        await state.update_data(owner_tg_id=owner_id, rbac_target_id=target_tg_id, rbac_role_name=role_name, rbac_perms=perms, rbac_is_super=is_sup)
+        await edit_or_answer(
+            callback,
+            f"🔐 <b>RUXSATLARNI BELGILASH</b>\n👤 ID: <code>{target_tg_id}</code> · 🏷 <b>{esc(role_name)}</b>\n\nKerakli bo‘limlarni yoqing/o‘chiring:",
+            reply_markup=admin_rbac_perms_kb(owner_id, target_tg_id, set(perms), is_sup),
+        )
+        return
+
+    if act == "edit_p":
+        target_tg_id = callback_data.tid
+        async with get_session() as session:
+            existing = await CommunityService.get_admin_role(session, target_tg_id)
+        if existing is None:
+            await callback.answer("Admin topilmadi.", show_alert=True)
+            return
+        perms = list(existing.permissions or [])
+        await state.set_state(None)
+        await state.update_data(
+            owner_tg_id=owner_id,
+            rbac_target_id=target_tg_id,
+            rbac_role_name=existing.role_name,
+            rbac_perms=perms,
+            rbac_is_super=bool(existing.is_super_admin),
+        )
+        await edit_or_answer(
+            callback,
+            f"🔐 <b>RUXSATLARNI TAHRIRLASH</b>\n👤 ID: <code>{target_tg_id}</code> · 🏷 <b>{esc(existing.role_name)}</b>",
+            reply_markup=admin_rbac_perms_kb(owner_id, target_tg_id, set(perms), bool(existing.is_super_admin)),
+        )
+        return
+
+    if act in ("psup", "ptog"):
+        data = await state.get_data()
+        target_tg_id = int(data.get("rbac_target_id") or callback_data.tid)
+        role_name = str(data.get("rbac_role_name") or "Moderator")
+        perms = set(data.get("rbac_perms") or [])
+        is_sup = bool(data.get("rbac_is_super", False))
+        if act == "psup":
+            is_sup = not is_sup
+        else:
+            key = callback_data.ext
+            if key in perms:
+                perms.remove(key)
+            else:
+                perms.add(key)
+        await state.update_data(rbac_target_id=target_tg_id, rbac_role_name=role_name, rbac_perms=sorted(perms), rbac_is_super=is_sup)
+        await edit_or_answer(
+            callback,
+            f"🔐 <b>RUXSATLARNI BELGILASH</b>\n👤 ID: <code>{target_tg_id}</code> · 🏷 <b>{esc(role_name)}</b>",
+            reply_markup=admin_rbac_perms_kb(owner_id, target_tg_id, perms, is_sup),
+        )
+        return
+
+    if act == "psave":
+        data = await state.get_data()
+        target_tg_id = int(data.get("rbac_target_id") or callback_data.tid)
+        role_name = str(data.get("rbac_role_name") or "Moderator")
+        is_sup = bool(data.get("rbac_is_super", False))
+        all_keys = [k for k, _ in ADMIN_PERMISSION_SECTIONS]
+        perms = all_keys if is_sup else [p for p in (data.get("rbac_perms") or []) if p in all_keys]
+        await state.clear()
+        async with get_session() as session:
+            await CommunityService.upsert_admin_role(session, target_tg_id, role_name, perms, owner_id, is_super=is_sup)
+            await CommunityService.log_audit(session, owner_id, "upsert_admin", "admin", str(target_tg_id), new_value={"role": role_name, "perms": perms})
+            await session.commit()
+        await callback.answer("✅ Admin saqlandi!", show_alert=True)
+        await _show_rbac_menu(callback, owner_id, is_sup_caller)
+        return
+
+    if act == "del":
+        async with get_session() as session:
+            await CommunityService.remove_admin_role(session, callback_data.tid)
+            await CommunityService.log_audit(session, owner_id, "remove_admin", "admin", str(callback_data.tid))
+            await session.commit()
+        await callback.answer("✅ Admin olib tashlandi.", show_alert=True)
+        await _show_rbac_menu(callback, owner_id, is_sup_caller)
 
 
-@router.message(AdminV2States.waiting_new_admin_id, NotCommandFilter())
-async def fsm_v2_new_admin(message: Message, state: FSMContext) -> None:
-    if not is_super_admin(message.from_user):
+@router.message(AdminV2States.waiting_admin_search, NotCommandFilter())
+async def fsm_v2_admin_search(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id or not is_super_admin(message.from_user):
         return
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 2 or not parts[0].lstrip("-").isdigit():
-        await message.answer("⚠️ Format: <code>TelegramID | RolNomi | cards,support</code>")
+    q = (message.text or "").strip()
+    if q.lstrip("-").isdigit() and len(q) >= 5:
+        tg_id = int(q)
+        await state.set_state(AdminV2States.waiting_admin_role_name)
+        await state.update_data(owner_tg_id=message.from_user.id, rbac_target_id=tg_id)
+        b = InlineKeyboardBuilder()
+        for rname in ("Moderator", "Editor", "Card Manager", "Co-Admin"):
+            b.row(InlineKeyboardButton(text=f"🏷 {rname}", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="admins", act="set_role", tid=tg_id, ext=rname).pack()))
+        await message.answer(f"🆔 ID: <code>{tg_id}</code>\n\nLavozim nomini tanlang yoki yozing:", reply_markup=b.as_markup())
         return
-    tg_id = int(parts[0])
-    role_name = parts[1]
-    raw_perms = parts[2] if len(parts) > 2 else "cards,support"
-    all_keys = [k for k, _ in ADMIN_PERMISSION_SECTIONS]
-    is_sup = raw_perms.lower() == "all"
-    perms = all_keys if is_sup else [p.strip() for p in raw_perms.split(",") if p.strip() in all_keys]
-    await state.clear()
     async with get_session() as session:
-        await CommunityService.upsert_admin_role(session, tg_id, role_name, perms, message.from_user.id, is_super=is_sup)
-        await CommunityService.log_audit(session, message.from_user.id, "upsert_admin", "admin", str(tg_id), new_value={"role": role_name, "perms": perms})
-        await session.commit()
-    await message.answer(f"✅ Admin <code>{tg_id}</code> ({esc(role_name)}) saqlandi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+        matches = await AdminService.search_users_for_admin(session, q, limit=20)
+    if not matches:
+        await message.answer("❌ Bunday foydalanuvchi topilmadi. Telegram ID raqamini yozing.")
+        return
+    b = InlineKeyboardBuilder()
+    for u in matches:
+        b.row(
+            InlineKeyboardButton(
+                text=f"👤 {u.display_name[:28]} ({u.telegram_id})"[:60],
+                callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="admins", act="pick_u", tid=u.telegram_id).pack(),
+            )
+        )
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="admins", act="v").pack()))
+    await message.answer("👇 Qidiruv natijalaridan birini tanlang:", reply_markup=b.as_markup())
 
 
-# ---------------------------------------------------------------------------
-# FORCED CHANNELS (sec="channels")
-# ---------------------------------------------------------------------------
+@router.message(AdminV2States.waiting_admin_role_name, NotCommandFilter())
+async def fsm_v2_admin_role_name(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id or not is_super_admin(message.from_user):
+        return
+    role_name = (message.text or "Moderator").strip()[:48]
+    target_tg_id = int(data["rbac_target_id"])
+    async with get_session() as session:
+        existing = await CommunityService.get_admin_role(session, target_tg_id)
+    perms = list(existing.permissions or []) if existing else ["cards", "support"]
+    is_sup = bool(existing.is_super_admin) if existing else False
+    await state.set_state(None)
+    await state.update_data(rbac_role_name=role_name, rbac_perms=perms, rbac_is_super=is_sup)
+    await message.answer(
+        f"🔐 <b>RUXSATLARNI BELGILASH</b>\n👤 ID: <code>{target_tg_id}</code> · 🏷 <b>{esc(role_name)}</b>",
+        reply_markup=admin_rbac_perms_kb(message.from_user.id, target_tg_id, set(perms), is_sup),
+    )
+
+
+# ===========================================================================
+# 4. FORCED CHANNELS & GROUPS & LINKS (sec="channels")
+# ===========================================================================
+async def _render_channels_menu(target, owner_id: int) -> None:
+    async with get_session() as session:
+        channels = await CommunityService.list_channels(session)
+    lines = ["📢 <b>MAJBURIY OBUNA KANALLARI / GURUHLAR / LINKLAR</b>\n"]
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="➕ Kanal / Guruh / Link qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="add").pack()))
+    mode_lbl = {"daily": "📅 Kunlik", "subscribers": "👥 Obunachi", "vip": "💎 VIP"}
+    for ch in channels:
+        st = "🟢" if ch.is_active else "🔴"
+        lim = f" · Limit: {ch.target_subscribers}" if ch.target_subscribers else ""
+        exp = f" · {ensure_utc(ch.expires_at):%d.%m %H:%M} gacha" if ch.expires_at else ""
+        lines.append(f"{st} <b>{esc(ch.title)}</b> [{mode_lbl.get(ch.sub_mode, ch.sub_mode)}]{lim}{exp}")
+        b.row(
+            InlineKeyboardButton(text=f"{st} {ch.title[:24]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="tog", tid=ch.id).pack()),
+            InlineKeyboardButton(text="🗑", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="del", tid=ch.id).pack()),
+        )
+    if not channels:
+        lines.append("📭 Majburiy obunalar yo‘q.")
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+def _channel_mode_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📅 Kunlik (vaqtinchalik)", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="mode", ext="daily").pack()))
+    b.row(InlineKeyboardButton(text="👥 Obunachi soni (limitga qadar)", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="mode", ext="subscribers").pack()))
+    b.row(InlineKeyboardButton(text="💎 VIP / Doimiy (cheksiz)", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="mode", ext="vip").pack()))
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="v").pack()))
+    return b.as_markup()
+
+
 @router.callback_query(AdmV2Cb.filter(F.sec == "channels"))
 async def cb_v2_channels(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "channels"):
         return
-    if callback_data.act == "add":
-        await state.set_state(AdminV2States.waiting_channel_add)
-        await state.update_data(owner_tg_id=callback.from_user.id)
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "add":
+        await state.set_state(AdminV2States.waiting_channel_link)
+        await state.update_data(owner_tg_id=owner_id)
         await edit_or_answer(
             callback,
-            "📢 <b>KANAL QO‘SHISH</b>\n\n"
-            "Format: <code>ChatID | Nomi | @username_yoki_link | TargetLimit(ixtiyoriy)</code>\n"
-            "Misol: <code>-1001234567890 | Anime News | @animenews | 1000</code>",
+            "📢 <b>KANAL / GURUH / HAVOLA QO‘SHISH</b>\n\n"
+            "Quyidagilardan birini yuboring:\n"
+            "• Kanal yoki guruh <code>@username</code> (masalan <code>@anime_uz</code>)\n"
+            "• Link (<code>https://t.me/...</code> yoki Instagram/YouTube havolasi)\n"
+            "• Chat ID (<code>-100...</code>) yoki kanaldan biror postni forward qiling!\n\n"
+            "<i>Telegram kanallar uchun bot o‘sha kanalda admin bo‘lishi kerak.</i>",
+            reply_markup=_cancel_kb(owner_id, "channels", "v"),
         )
         return
+
+    if act == "mode":
+        mode = callback_data.ext or "vip"
+        await state.update_data(ch_mode=mode)
+        if mode == "daily":
+            await state.set_state(AdminV2States.waiting_channel_days)
+            b = InlineKeyboardBuilder()
+            for d in (1, 3, 7, 14, 30):
+                b.add(InlineKeyboardButton(text=f"{d} kun", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="days", tid=d).pack()))
+            b.adjust(3)
+            b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="v").pack()))
+            await edit_or_answer(callback, "📅 Necha kun majburiy tursin? Tugmadan tanlang yoki kun sonini yozing:", reply_markup=b.as_markup())
+            return
+        if mode == "subscribers":
+            await state.set_state(AdminV2States.waiting_channel_subs)
+            b = InlineKeyboardBuilder()
+            for cnt in (500, 1000, 2000, 5000):
+                b.add(InlineKeyboardButton(text=f"{cnt:,}", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="subs", tid=cnt).pack()))
+            b.adjust(2)
+            b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="v").pack()))
+            await edit_or_answer(callback, "👥 Necha obunachiga yetguncha tursin? Tugmadan tanlang yoki son yozing:", reply_markup=b.as_markup())
+            return
+
+        # VIP (doimiy)
+        data = await state.get_data()
+        await state.clear()
+        async with get_session() as session:
+            await CommunityService.add_channel(
+                session,
+                chat_id=int(data["ch_id"]),
+                title=data["ch_title"],
+                username=data.get("ch_uname"),
+                invite_link=data.get("ch_link"),
+                added_by_tg_id=owner_id,
+                channel_type=data.get("ch_type", "telegram"),
+                sub_mode="vip",
+            )
+            await session.commit()
+        await callback.answer("✅ VIP/Doimiy kanal qo‘shildi!", show_alert=True)
+        await _render_channels_menu(callback, owner_id)
+        return
+
+    if act == "days":
+        data = await state.get_data()
+        await state.clear()
+        exp = utcnow() + timedelta(days=max(1, callback_data.tid))
+        async with get_session() as session:
+            await CommunityService.add_channel(
+                session,
+                chat_id=int(data["ch_id"]),
+                title=data["ch_title"],
+                username=data.get("ch_uname"),
+                invite_link=data.get("ch_link"),
+                added_by_tg_id=owner_id,
+                channel_type=data.get("ch_type", "telegram"),
+                sub_mode="daily",
+                expires_at=exp,
+            )
+            await session.commit()
+        await callback.answer(f"✅ {callback_data.tid} kunlik kanal qo‘shildi!", show_alert=True)
+        await _render_channels_menu(callback, owner_id)
+        return
+
+    if act == "subs":
+        data = await state.get_data()
+        await state.clear()
+        async with get_session() as session:
+            await CommunityService.add_channel(
+                session,
+                chat_id=int(data["ch_id"]),
+                title=data["ch_title"],
+                username=data.get("ch_uname"),
+                invite_link=data.get("ch_link"),
+                added_by_tg_id=owner_id,
+                target_subscribers=max(1, callback_data.tid),
+                channel_type=data.get("ch_type", "telegram"),
+                sub_mode="subscribers",
+            )
+            await session.commit()
+        await callback.answer(f"✅ {callback_data.tid:,} obunachigacha qo‘shildi!", show_alert=True)
+        await _render_channels_menu(callback, owner_id)
+        return
+
     async with get_session() as session:
-        if callback_data.act == "tog":
+        if act == "tog":
             await CommunityService.toggle_channel(session, callback_data.tid)
             await session.commit()
-        elif callback_data.act == "del":
+        elif act == "del":
             await CommunityService.delete_channel(session, callback_data.tid)
             await session.commit()
-        channels = await CommunityService.list_channels(session)
-    lines = ["📢 <b>MAJBURIY OBUNA KANALLARI</b>\n"]
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="➕ Kanal qo‘shish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="channels", act="add").pack()))
-    for ch in channels:
-        st = "🟢" if ch.is_active else "🔴"
-        lim = f" · Limit: {ch.target_subscribers}" if ch.target_subscribers else ""
-        lines.append(f"{st} <b>{esc(ch.title)}</b> (<code>{ch.chat_id}</code>){lim}")
-        b.row(
-            InlineKeyboardButton(text=f"{st} {ch.title[:22]}", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="channels", act="tog", tid=ch.id).pack()),
-            InlineKeyboardButton(text="🗑", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="channels", act="del", tid=ch.id).pack()),
-        )
-    if not channels:
-        lines.append("📭 Majburiy kanallar yo‘q.")
-    b.row(_back_home_btn(callback.from_user.id))
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
+    await state.clear()
+    await _render_channels_menu(callback, owner_id)
 
 
-@router.message(AdminV2States.waiting_channel_add, NotCommandFilter())
-async def fsm_v2_channel_add(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 3 or not parts[0].lstrip("-").isdigit():
-        await message.answer("⚠️ Format: <code>-1001234567890 | Nomi | @username</code>")
+@router.message(AdminV2States.waiting_channel_link, NotCommandFilter())
+async def fsm_v2_channel_link(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
         return
-    chat_id = int(parts[0])
-    title = parts[1]
-    ref = parts[2]
-    uname = ref.lstrip("@") if not ref.startswith("http") else None
-    link = ref if ref.startswith("http") else f"https://t.me/{ref.lstrip('@')}"
-    target = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
+
+    # 1. Forward qilingan xabar bo'lsa
+    f_chat = getattr(message, "forward_from_chat", None)
+    if f_chat is not None:
+        uname = getattr(f_chat, "username", None)
+        ch_type = "group" if getattr(f_chat, "type", "") in ("group", "supergroup") else "telegram"
+        link = f"https://t.me/{uname}" if uname else None
+        await state.update_data(ch_id=f_chat.id, ch_title=f_chat.title or "Kanal", ch_uname=uname, ch_link=link, ch_type=ch_type)
+        await state.set_state(None)
+        await message.answer(
+            f"✅ Topildi: <b>{esc(f_chat.title or 'Kanal')}</b> (<code>{f_chat.id}</code>)\n\nEndi obuna rejimini tanlang:",
+            reply_markup=_channel_mode_kb(message.from_user.id),
+        )
+        return
+
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("⚠️ @username, link yoki Chat ID yuboring.")
+        return
+
+    # 2. Tashqi link (Instagram/YouTube/Sayt)
+    if raw.startswith("http") and "t.me/" not in raw.lower() and "telegram.me/" not in raw.lower():
+        pseudo_id = -abs(zlib.crc32(raw.encode()) + 10_000_000_000)
+        await state.update_data(ch_id=pseudo_id, ch_uname=None, ch_link=raw[:250], ch_type="external")
+        await state.set_state(AdminV2States.waiting_channel_title)
+        await message.answer("🔗 Tashqi havola aniqlandi! Tugmada ko‘rinadigan <b>nomini</b> yozing (masalan: <code>Instagram</code>):")
+        return
+
+    # 3. Telegram link/username/ID
+    ref = raw
+    if "t.me/" in raw or "telegram.me/" in raw:
+        tail = raw.rstrip("/").split("/")[-1]
+        if tail.startswith("+") or tail.startswith("joinchat"):
+            pseudo_id = -abs(zlib.crc32(raw.encode()) + 10_000_000_000)
+            await state.update_data(ch_id=pseudo_id, ch_uname=None, ch_link=raw[:250], ch_type="external")
+            await state.set_state(AdminV2States.waiting_channel_title)
+            await message.answer(
+                "🔐 Yopiq taklif linki! Agar bot obunani ham tekshirishini istasangiz, kanal postini forward qiling yoki nomini yozing:"
+            )
+            return
+        ref = "@" + tail.lstrip("@")
+
+    chat_lookup = int(ref) if ref.lstrip("-").isdigit() else (ref if ref.startswith("@") else "@" + ref)
+    try:
+        chat = await message.bot.get_chat(chat_lookup)
+        uname = getattr(chat, "username", None)
+        link = f"https://t.me/{uname}" if uname else getattr(chat, "invite_link", None)
+        ch_type = "group" if getattr(chat, "type", "") in ("group", "supergroup") else "telegram"
+        try:
+            me = await message.bot.get_me()
+            member = await message.bot.get_chat_member(chat.id, me.id)
+            if getattr(member, "status", "") not in ("administrator", "creator"):
+                await message.answer("⚠️ Eslatma: Bot bu kanalda admin emas — obuna tekshiruvi ishlashi uchun botni admin qiling.")
+        except Exception:
+            pass
+        await state.update_data(ch_id=chat.id, ch_title=chat.title or str(chat.id), ch_uname=uname, ch_link=link, ch_type=ch_type)
+        await state.set_state(None)
+        await message.answer(
+            f"✅ <b>{esc(chat.title or str(chat.id))}</b> aniqlandi!\n\nEndi obuna rejimini tanlang:",
+            reply_markup=_channel_mode_kb(message.from_user.id),
+        )
+    except Exception as exc:
+        await message.answer(
+            f"❌ Kanal topilmadi yoki botda ruxsat yo‘q: <code>{esc(str(exc)[:100])}</code>\n"
+            "Botni kanalga admin qiling yoki kanaldan post forward qilib tashlang."
+        )
+
+
+@router.message(AdminV2States.waiting_channel_title, NotCommandFilter())
+async def fsm_v2_channel_title(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    title = (message.text or "Link").strip()[:200]
+    await state.update_data(ch_title=title)
+    await state.set_state(None)
+    await message.answer(f"🏷 Nomi: <b>{esc(title)}</b>\n\nEndi rejimni tanlang:", reply_markup=_channel_mode_kb(message.from_user.id))
+
+
+@router.message(AdminV2States.waiting_channel_days, NotCommandFilter())
+async def fsm_v2_channel_days(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ Kamida 1 kun yozing.")
+        return
+    days = int(raw)
     await state.clear()
     async with get_session() as session:
-        await CommunityService.add_channel(session, chat_id, title, uname, link, message.from_user.id, target)
+        await CommunityService.add_channel(
+            session,
+            chat_id=int(data["ch_id"]),
+            title=data["ch_title"],
+            username=data.get("ch_uname"),
+            invite_link=data.get("ch_link"),
+            added_by_tg_id=message.from_user.id,
+            channel_type=data.get("ch_type", "telegram"),
+            sub_mode="daily",
+            expires_at=utcnow() + timedelta(days=days),
+        )
         await session.commit()
-    await message.answer(f"✅ Kanal qo‘shildi: <b>{esc(title)}</b>", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await message.answer(f"✅ Kanal <b>{days} kun</b>ga qo‘shildi!")
+    await _render_channels_menu(message, message.from_user.id)
 
 
-# ---------------------------------------------------------------------------
-# RANKS MANAGER (sec="ranks")
-# ---------------------------------------------------------------------------
+@router.message(AdminV2States.waiting_channel_subs, NotCommandFilter())
+async def fsm_v2_channel_subs(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "")
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ Musbat obunachi sonini yozing.")
+        return
+    subs = int(raw)
+    await state.clear()
+    async with get_session() as session:
+        await CommunityService.add_channel(
+            session,
+            chat_id=int(data["ch_id"]),
+            title=data["ch_title"],
+            username=data.get("ch_uname"),
+            invite_link=data.get("ch_link"),
+            added_by_tg_id=message.from_user.id,
+            target_subscribers=subs,
+            channel_type=data.get("ch_type", "telegram"),
+            sub_mode="subscribers",
+        )
+        await session.commit()
+    await message.answer(f"✅ Kanal <b>{subs:,}</b> obunachigacha qo‘shildi!")
+    await _render_channels_menu(message, message.from_user.id)
+
+
+# ===========================================================================
+# 5. RANKS MANAGER (sec="ranks", Zero-pipe step-by-step + Normalize)
+# ===========================================================================
+async def _show_ranks_home(target, owner_id: int) -> None:
+    async with get_session() as session:
+        ranks = await GameplayService.get_rank_definitions(session)
+    total_p = sum(int(r.get("drop_probability", 0)) for r in ranks)
+    warn = " ✅" if total_p == 100 else " ⚠️ (100% bo‘lishi kerak!)"
+    txt = f"⭐ <b>RANKLAR TIZIMI</b>\nJami ehtimollik: <b>{total_p}%</b>{warn}\n\nTahrirlash uchun rank ustiga bosing:"
+    await edit_or_answer(target, txt, reply_markup=admin_ranks_list_kb(owner_id, ranks, total_p))
+
+
+async def _show_rank_detail(target, owner_id: int, rank_idx: int) -> None:
+    async with get_session() as session:
+        ranks = await GameplayService.get_rank_definitions(session)
+    if not (0 <= rank_idx < len(ranks)):
+        await _show_ranks_home(target, owner_id)
+        return
+    r = ranks[rank_idx]
+    txt = (
+        f"{r.get('emoji', '⭐')} <b>RANK: {esc(r['name'])}</b>\n\n"
+        f"• Emoji: {r.get('emoji', '⭐')}\n"
+        f"• Tushish ehtimoli: <b>{r.get('drop_probability', 0)}%</b>\n"
+        f"• Bir marta yaratilganda guruhga tushish soni: <b>{r.get('drop_limit', 1)} ta</b>"
+    )
+    await edit_or_answer(target, txt, reply_markup=admin_rank_detail_kb(owner_id, rank_idx))
+
+
 @router.callback_query(AdmV2Cb.filter(F.sec == "ranks"))
 async def cb_v2_ranks(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "ranks"):
         return
-    if callback_data.act == "edit":
-        await state.set_state(AdminV2States.waiting_rank_input)
-        await state.update_data(owner_tg_id=callback.from_user.id)
-        await edit_or_answer(
-            callback,
-            "⭐ <b>RANK TAHRIRLASH / QO‘SHISH</b>\n\n"
-            "Ehtimolliklar yig‘indisi <b>100%</b> bo‘lishi shart!\n"
-            "Format (har qatorda bittadan yoki bitta rank):\n"
-            "<code>edit | Common | 50 | 1000 | 3</code>\n"
-            "Yoki yangi rank qo‘shish: <code>add | Celestial | 🌟 | 2 | 50000 | 1</code>",
-        )
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "v":
+        await state.clear()
+        await _show_ranks_home(callback, owner_id)
         return
-    async with get_session() as session:
-        ranks = await GameplayService.get_rank_definitions(session)
-    lines = ["⭐ <b>RANKLAR TIZIMI (V2)</b>\n"]
-    total_p = 0
-    for r in ranks:
-        total_p += int(r.get("drop_probability", 0))
-        lines.append(
-            f"{r.get('emoji', '⭐')} <b>{esc(r['name'])}</b> — {r.get('drop_probability')}% · "
-            f"💰 {int(r.get('base_value', 0)):,} · 🔁 {r.get('drop_limit')} ta"
-        )
-    lines.append(f"\nJami ehtimollik: <b>{total_p}%</b>")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Rank tahrirlash / qo‘shish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="ranks", act="edit").pack())],
-            [_back_home_btn(callback.from_user.id)],
-        ]
-    )
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
+
+    if act == "det":
+        await state.clear()
+        await _show_rank_detail(callback, owner_id, callback_data.tid)
+        return
+
+    if act == "norm":
+        async with get_session() as session:
+            await GameplayService.normalize_rank_probabilities(session)
+            await session.commit()
+        await callback.answer("⚖️ Ehtimolliklar 100% ga moslandi!", show_alert=True)
+        await _show_ranks_home(callback, owner_id)
+        return
+
+    if act == "ef":
+        prompts = {
+            "name": "✏️ Yangi rank nomini yozing:",
+            "emoji": "😀 Yangi emoji yuboring (masalan: 🌟):",
+            "prob": "📊 Yangi drop ehtimolligini yozing (0–100):",
+            "drops": "🔁 Guruhga nechta tushish sonini (drop limit) yozing:",
+        }
+        await state.set_state(AdminV2States.waiting_rank_field)
+        await state.update_data(owner_tg_id=owner_id, rank_idx=callback_data.tid, rank_field=callback_data.ext)
+        await edit_or_answer(callback, prompts.get(callback_data.ext, "Yangi qiymat:"), reply_markup=_cancel_kb(owner_id, "ranks", "v"))
+        return
+
+    if act == "del":
+        async with get_session() as session:
+            ranks = await GameplayService.get_rank_definitions(session)
+            if len(ranks) <= 1 or not (0 <= callback_data.tid < len(ranks)):
+                await callback.answer("⚠️ Kamida 1 ta rank qolishi shart.", show_alert=True)
+                return
+            await GameplayService.delete_rank(session, str(ranks[callback_data.tid]["name"]))
+            await session.commit()
+        await callback.answer("🗑 Rank o‘chirildi!", show_alert=True)
+        await _show_ranks_home(callback, owner_id)
+        return
+
+    if act == "add":
+        await state.set_state(AdminV2States.waiting_rank_add_name)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, "➕ <b>YANGI RANK (1/4)</b>\n\nRank nomini yozing (masalan: <code>Celestial</code>):", reply_markup=_cancel_kb(owner_id, "ranks", "v"))
 
 
-@router.message(AdminV2States.waiting_rank_input, NotCommandFilter())
-async def fsm_v2_rank_input(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    cmd = parts[0].lower() if parts else ""
+@router.message(AdminV2States.waiting_rank_field, NotCommandFilter())
+async def fsm_v2_rank_field(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    idx = int(data["rank_idx"])
+    field = data["rank_field"]
+    raw = (message.text or "").strip()
     try:
         async with get_session() as session:
-            if cmd == "edit" and len(parts) >= 5:
-                await GameplayService.update_rank_field(session, parts[1], int(parts[2]), int(parts[3]), int(parts[4]))
-            elif cmd == "add" and len(parts) >= 6:
-                await GameplayService.add_rank(session, parts[1], parts[2], int(parts[3]), int(parts[4]), int(parts[5]))
-            else:
-                await message.answer("⚠️ Noto‘g‘ri format. Misol: <code>edit | Common | 50 | 1000 | 3</code>")
+            ranks = await GameplayService.get_rank_definitions(session)
+            if not (0 <= idx < len(ranks)):
+                await state.clear()
+                await message.answer("❌ Rank topilmadi.")
                 return
+            r_name = str(ranks[idx]["name"])
+            if field == "name":
+                await GameplayService.update_single_rank_attr(session, r_name, new_name=raw)
+            elif field == "emoji":
+                await GameplayService.update_single_rank_attr(session, r_name, emoji=raw)
+            elif field == "prob":
+                if not raw.isdigit():
+                    await message.answer("⚠️ 0 dan 100 gacha son kiriting.")
+                    return
+                await GameplayService.update_single_rank_attr(session, r_name, drop_probability=int(raw))
+            elif field == "drops":
+                if not raw.isdigit() or int(raw) < 1:
+                    await message.answer("⚠️ Kamida 1 butun son kiriting.")
+                    return
+                await GameplayService.update_single_rank_attr(session, r_name, drop_limit=int(raw))
             await session.commit()
     except ValueError as exc:
         await message.answer(f"⚠️ {esc(str(exc))}")
         return
     await state.clear()
-    await message.answer("✅ Rank sozlamalari saqlandi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await _show_rank_detail(message, message.from_user.id, idx)
 
 
-# ---------------------------------------------------------------------------
-# QUIZ & GAMES & AUCTION & SEASON & REKLAMA
-# ---------------------------------------------------------------------------
+@router.message(AdminV2States.waiting_rank_add_name, NotCommandFilter())
+async def fsm_v2_rank_add_name(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    name = (message.text or "").strip()[:32]
+    if not name:
+        await message.answer("⚠️ Rank nomini yozing.")
+        return
+    await state.update_data(new_rank_name=name)
+    await state.set_state(AdminV2States.waiting_rank_add_emoji)
+    await message.answer("2/4: Rank <b>emojisi</b>ni yuboring (masalan: 🌟):")
+
+
+@router.message(AdminV2States.waiting_rank_add_emoji, NotCommandFilter())
+async def fsm_v2_rank_add_emoji(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    emoji = (message.text or "⭐").strip()[:8]
+    await state.update_data(new_rank_emoji=emoji)
+    await state.set_state(AdminV2States.waiting_rank_add_prob)
+    await message.answer("3/4: Tushish ehtimolini (%) yozing (masalan: <code>5</code>):")
+
+
+@router.message(AdminV2States.waiting_rank_add_prob, NotCommandFilter())
+async def fsm_v2_rank_add_prob(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("⚠️ Son kiriting.")
+        return
+    await state.update_data(new_rank_prob=int(raw))
+    await state.set_state(AdminV2States.waiting_rank_add_drops)
+    await message.answer("4/4: Guruhga necha marta tashlanish sonini (drop limit) yozing (masalan: <code>1</code>):")
+
+
+@router.message(AdminV2States.waiting_rank_add_drops, NotCommandFilter())
+async def fsm_v2_rank_add_drops(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ Kamida 1 son kiriting.")
+        return
+    await state.clear()
+    try:
+        async with get_session() as session:
+            await GameplayService.add_rank_flexible(
+                session,
+                name=data["new_rank_name"],
+                emoji=data["new_rank_emoji"],
+                drop_probability=int(data["new_rank_prob"]),
+                drop_limit=int(raw),
+            )
+            await session.commit()
+    except ValueError as exc:
+        await message.answer(f"⚠️ {esc(str(exc))}")
+        return
+    await _show_ranks_home(message, message.from_user.id)
+
+
+# ===========================================================================
+# 6. QUIZ MANAGER (Zero-pipe Builder + Reuse/Clone + Schedule + Group/All Target)
+# ===========================================================================
+async def _dispatch_quiz_announcement(bot, session, quiz: Quiz) -> None:
+    qs_res = await GameplayService.get_quiz_with_questions(session, quiz.id)
+    first_q = qs_res[1][0] if qs_res and qs_res[1] else None
+    text = (
+        f"🧠 <b>YANGI VIKTORINA BOSHLANDI: {esc(quiz.title)}</b>\n\n"
+        f"🎁 Har bir to‘g‘ri javob uchun: <b>{quiz.reward_coins:,} 🪙</b>\n"
+        + (f"❓ <b>1-savol:</b> {esc(first_q.question_text)}\n\n" if first_q else "")
+        + f"👇 Ishtirok etish uchun /quiz yozing (yoki ushbu xabarga javob yozing)!\n<code>Quiz #{quiz.id}</code>"
+    )
+    chat_ids: List[int] = []
+    if quiz.target_scope == "group" and quiz.target_group_id:
+        grp = await session.get(Group, quiz.target_group_id)
+        if grp and grp.is_active:
+            chat_ids.append(grp.telegram_chat_id)
+    else:
+        g_ids = (await session.execute(select(Group.telegram_chat_id).where(Group.is_active.is_(True), Group.is_banned.is_(False)))).scalars().all()
+        u_ids = (await session.execute(select(User.telegram_id).where(User.is_banned.is_(False)))).scalars().all()
+        chat_ids.extend(int(x) for x in g_ids)
+        chat_ids.extend(int(x) for x in u_ids)
+
+    sem = asyncio.Semaphore(6)
+
+    async def _send(cid: int) -> None:
+        async with sem:
+            try:
+                await bot.send_message(cid, text)
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(float(exc.retry_after) + 0.5)
+            except Exception:
+                pass
+
+    if chat_ids:
+        await asyncio.gather(*[_send(c) for c in chat_ids])
+
+
+async def _show_quiz_home(target, owner_id: int) -> None:
+    async with get_session() as session:
+        quizzes = await GameplayService.list_all_quizzes(session, limit=15)
+    lines = ["🧠 <b>QUIZ BOSHQARUVI</b>\n"]
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="➕ Yangi Quiz yaratish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="new").pack()))
+    for q in quizzes:
+        st = "⏰" if q.status == "scheduled" else ("🟢" if q.is_active else "⚪")
+        lines.append(f"{st} <b>#{q.id} {esc(q.title)}</b> — {q.question_count} savol · {q.reward_coins:,} 🪙")
+        b.row(InlineKeyboardButton(text=f"{st} #{q.id} {q.title[:26]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="det", tid=q.id).pack()))
+    if not quizzes:
+        lines.append("📭 Hozircha quizlar yo‘q.")
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
 @router.callback_query(AdmV2Cb.filter(F.sec == "quiz"))
 async def cb_v2_quiz(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "quiz"):
         return
-    if callback_data.act == "add":
-        await state.set_state(AdminV2States.waiting_quiz_create)
-        await edit_or_answer(callback, "🧠 Yangi quiz formati: <code>Nomi | CoinMukofot | XP</code>\nMisol: <code>Naruto Viktorinasi | 500 | 40</code>")
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "v":
+        await state.clear()
+        await _show_quiz_home(callback, owner_id)
         return
-    if callback_data.act == "add_q":
-        await state.set_state(AdminV2States.waiting_quiz_question)
-        await edit_or_answer(callback, "➕ Savol formati:\n<code>QuizID | Savol matni | Var1;Var2;Var3;Var4 | To‘g‘riRaqam(1-4)</code>")
+
+    if act == "new":
+        await state.set_state(AdminV2States.waiting_quiz_title)
+        await state.update_data(owner_tg_id=owner_id, quiz_questions=[])
+        await edit_or_answer(callback, "🧠 <b>YANGI QUIZ (1/4)</b>\n\nQuiz nomini yozing (masalan: <code>Naruto Viktorinasi</code>):", reply_markup=_cancel_kb(owner_id, "quiz", "v"))
         return
+
+    if act == "coins_p":
+        await state.update_data(quiz_coins=callback_data.tid)
+        await state.set_state(AdminV2States.waiting_quiz_q_text)
+        await edit_or_answer(callback, f"🪙 Mukofot: <b>{callback_data.tid:,}</b> coin.\n\nEndi <b>1-savol matnini</b> yozing:", reply_markup=_cancel_kb(owner_id, "quiz", "v"))
+        return
+
+    if act == "q_ans":
+        data = await state.get_data()
+        qs = list(data.get("quiz_questions") or [])
+        opts = list(data.get("cur_q_opts") or [])
+        q_text = data.get("cur_q_text", "")
+        cidx = max(0, min(len(opts) - 1, callback_data.tid))
+        qs.append({"q": q_text, "opts": opts, "cidx": cidx, "acc": [opts[cidx]] if opts else []})
+        await state.update_data(quiz_questions=qs)
+        await state.set_state(None)
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="➕ Yana savol qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_more").pack()),
+            InlineKeyboardButton(text="✅ Savollar tayyor", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_done").pack()),
+        )
+        await edit_or_answer(callback, f"✅ Savol #{len(qs)} saqlandi!\nYana savol qo‘shasizmi?", reply_markup=b.as_markup())
+        return
+
+    if act == "q_more":
+        data = await state.get_data()
+        await state.set_state(AdminV2States.waiting_quiz_q_text)
+        await edit_or_answer(callback, f"❓ <b>{len(data.get('quiz_questions', [])) + 1}-savol matnini</b> yozing:", reply_markup=_cancel_kb(owner_id, "quiz", "v"))
+        return
+
+    if act == "q_done":
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="🌍 Barcha guruh & userlarga", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="scope_all").pack()))
+        b.row(InlineKeyboardButton(text="👥 Aniq bitta guruhga", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="scope_grp").pack()))
+        await edit_or_answer(callback, "📢 <b>QUIZ QAYERGA YUBORILSIN?</b>", reply_markup=b.as_markup())
+        return
+
+    if act == "scope_all":
+        await state.update_data(quiz_scope="all", quiz_grp_id=None)
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="⚡ Hozir boshlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="when_now").pack()),
+            InlineKeyboardButton(text="⏰ Vaqtga belgilash", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="when_sched").pack()),
+        )
+        await edit_or_answer(callback, "⏰ <b>QACHON BOSHLANSIN?</b>", reply_markup=b.as_markup())
+        return
+
+    if act == "scope_grp":
+        async with get_session() as session:
+            groups = list((await session.execute(select(Group).where(Group.is_active.is_(True)).order_by(Group.id.desc()).limit(20))).scalars().all())
+        b = InlineKeyboardBuilder()
+        for g in groups:
+            b.row(InlineKeyboardButton(text=f"👥 {g.title[:36]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="set_grp", tid=g.id).pack()))
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_done").pack()))
+        await edit_or_answer(callback, "👥 Qaysi guruhni tanlaysiz?", reply_markup=b.as_markup())
+        return
+
+    if act == "set_grp":
+        await state.update_data(quiz_scope="group", quiz_grp_id=callback_data.tid)
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="⚡ Hozir boshlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="when_now").pack()),
+            InlineKeyboardButton(text="⏰ Vaqtga belgilash", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="when_sched").pack()),
+        )
+        await edit_or_answer(callback, "⏰ <b>QACHON BOSHLANSIN?</b>", reply_markup=b.as_markup())
+        return
+
+    if act == "when_sched":
+        await state.set_state(AdminV2States.waiting_quiz_sched_dt)
+        await edit_or_answer(callback, "⏰ Boshlanish vaqtini yozing (<code>2026-12-01 18:00</code> yoki <code>01.12.2026 18:00</code>):")
+        return
+
+    if act == "when_now":
+        data = await state.get_data()
+        await state.clear()
+        async with get_session() as session:
+            q = await GameplayService.create_quiz(
+                session,
+                title=data.get("quiz_title", "Quiz"),
+                reward_coins=int(data.get("quiz_coins", 300)),
+                admin_tg_id=owner_id,
+                target_scope=data.get("quiz_scope", "all"),
+                target_group_id=data.get("quiz_grp_id"),
+                status="active",
+            )
+            for item in data.get("quiz_questions") or []:
+                await GameplayService.add_quiz_question(
+                    session, q.id, item["q"], item["opts"], item["cidx"], accepted_answers=item.get("acc")
+                )
+            await session.commit()
+            await _dispatch_quiz_announcement(callback.bot, session, q)
+        await callback.answer("🎉 Quiz yaratildi va yuborildi!", show_alert=True)
+        await _show_quiz_home(callback, owner_id)
+        return
+
+    if act == "det":
+        async with get_session() as session:
+            res = await GameplayService.get_quiz_with_questions(session, callback_data.tid)
+        if res is None:
+            await callback.answer("Quiz topilmadi.", show_alert=True)
+            return
+        q, qs = res
+        lines = [
+            f"🧠 <b>QUIZ #{q.id}: {esc(q.title)}</b>\n",
+            f"Holat: <b>{esc(q.status)}</b> ({'🟢 Faol' if q.is_active else '🔴 Yopiq'})",
+            f"🪙 Mukofot: <b>{q.reward_coins:,}</b> coin · ⚡ {q.reward_xp} XP",
+            f"❓ Savollar: <b>{len(qs)}</b> ta",
+        ]
+        for idx, qq in enumerate(qs[:10], 1):
+            lines.append(f"{idx}. {esc(qq.question_text[:60])}")
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="🔄 Yoqish/O‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="tog", tid=q.id).pack()),
+            InlineKeyboardButton(text="📋 Qayta o‘tkazish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="clone", tid=q.id).pack()),
+        )
+        b.row(
+            InlineKeyboardButton(text="🗑 O‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="del", tid=q.id).pack()),
+            InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="v").pack()),
+        )
+        await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
+        return
+
+    if act == "clone":
+        await state.set_state(AdminV2States.waiting_quiz_clone_coins)
+        await state.update_data(owner_tg_id=owner_id, clone_qid=callback_data.tid)
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="⏭ Eski narx bilan boshlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="clone_go", tid=callback_data.tid).pack()))
+        await edit_or_answer(callback, "📋 <b>QUIZNI QAYTA O‘TKAZISH</b>\n\nYangi coin mukofotini yozing yoki eski narx bilan boshlang:", reply_markup=b.as_markup())
+        return
+
+    if act == "clone_go":
+        await state.clear()
+        async with get_session() as session:
+            nq = await GameplayService.clone_quiz(session, callback_data.tid, owner_id)
+            if nq:
+                await session.commit()
+                await _dispatch_quiz_announcement(callback.bot, session, nq)
+        await callback.answer("🎉 Quiz qayta boshlandi!", show_alert=True)
+        await _show_quiz_home(callback, owner_id)
+        return
+
     async with get_session() as session:
-        if callback_data.act == "tog":
-            q = await session.get(Quiz, callback_data.tid)
-            if q:
+        q = await session.get(Quiz, callback_data.tid)
+        if q:
+            if act == "tog":
                 q.is_active = not q.is_active
                 q.status = "active" if q.is_active else "ended"
-                await session.commit()
-        quizzes = (await session.execute(select(Quiz).order_by(Quiz.id.desc()).limit(10))).scalars().all()
-    lines = ["🧠 <b>QUIZ BOSHQARUVI</b>\n"]
+            elif act == "del":
+                await session.delete(q)
+            await session.commit()
+    await _show_quiz_home(callback, owner_id)
+
+
+@router.message(AdminV2States.waiting_quiz_title, NotCommandFilter())
+async def fsm_v2_quiz_title(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    title = (message.text or "").strip()[:160]
+    if not title:
+        await message.answer("⚠️ Quiz nomini yozing.")
+        return
+    await state.update_data(quiz_title=title)
+    await state.set_state(AdminV2States.waiting_quiz_coins)
     b = InlineKeyboardBuilder()
-    b.row(
-        InlineKeyboardButton(text="➕ Yangi Quiz", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="quiz", act="add").pack()),
-        InlineKeyboardButton(text="➕ Savol qo‘shish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="quiz", act="add_q").pack()),
+    for c in (200, 500, 1000, 2500):
+        b.add(InlineKeyboardButton(text=f"🪙 {c:,}", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="quiz", act="coins_p", tid=c).pack()))
+    b.adjust(2)
+    await message.answer("2/4: To‘g‘ri javob uchun <b>coin mukofotini</b> tanlang yoki son yozing:", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_quiz_coins, NotCommandFilter())
+async def fsm_v2_quiz_coins(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Musbat son kiriting.")
+        return
+    await state.update_data(quiz_coins=int(raw))
+    await state.set_state(AdminV2States.waiting_quiz_q_text)
+    await message.answer("3/4: <b>1-savol matnini</b> yozing:")
+
+
+@router.message(AdminV2States.waiting_quiz_q_text, NotCommandFilter())
+async def fsm_v2_quiz_q_text(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    qtxt = (message.text or "").strip()
+    if not qtxt:
+        await message.answer("⚠️ Savol matnini yozing.")
+        return
+    await state.update_data(cur_q_text=qtxt)
+    await state.set_state(AdminV2States.waiting_quiz_q_opts)
+    await message.answer(
+        "Javob variantlarini <b>vergul</b> yoki <b>yangi qator</b> bilan yozing (masalan: <code>Naruto, Sasuke, Sakura, Kakashi</code>).\n"
+        "<i>Agar bitta to‘g‘ri javob yozsangiz, ochiq javobli savol bo‘ladi!</i>"
     )
-    for q in quizzes:
-        st = "🟢" if q.is_active else "⚪"
-        lines.append(f"{st} <b>#{q.id} {esc(q.title)}</b> — {q.question_count} savol · {q.reward_coins:,} 🪙")
-        b.row(InlineKeyboardButton(text=f"{st} #{q.id} {q.title[:22]}", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="quiz", act="tog", tid=q.id).pack()))
-    b.row(_back_home_btn(callback.from_user.id))
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
 
 
-@router.message(AdminV2States.waiting_quiz_create, NotCommandFilter())
-async def fsm_v2_quiz_create(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 2 or not parts[1].isdigit():
-        await message.answer("⚠️ Format: <code>Nomi | CoinMukofot | XP</code>")
+@router.message(AdminV2States.waiting_quiz_q_opts, NotCommandFilter())
+async def fsm_v2_quiz_q_opts(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
         return
-    xp = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 30
+    raw = (message.text or "").strip()
+    opts = [x.strip() for x in re.split(r"[\n,;]+", raw) if x.strip()][:6]
+    if not opts:
+        await message.answer("⚠️ Kamida 1 ta javob yozing.")
+        return
+    if len(opts) == 1:
+        qs = list(data.get("quiz_questions") or [])
+        qs.append({"q": data.get("cur_q_text", ""), "opts": [opts[0]], "cidx": 0, "acc": [opts[0]]})
+        await state.update_data(quiz_questions=qs)
+        await state.set_state(None)
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="➕ Yana savol qo‘shish", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="quiz", act="q_more").pack()),
+            InlineKeyboardButton(text="✅ Savollar tayyor", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="quiz", act="q_done").pack()),
+        )
+        await message.answer(f"✅ Savol #{len(qs)} saqlandi (to‘g‘ri javob: <code>{esc(opts[0])}</code>)!", reply_markup=b.as_markup())
+        return
+
+    await state.update_data(cur_q_opts=opts)
+    await state.set_state(None)
+    b = InlineKeyboardBuilder()
+    for idx, opt in enumerate(opts):
+        b.row(InlineKeyboardButton(text=f"✅ {opt[:40]}", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="quiz", act="q_ans", tid=idx).pack()))
+    await message.answer("👇 Qaysi variant <b>TO‘G‘RI JAVOB</b>?", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_quiz_sched_dt, NotCommandFilter())
+async def fsm_v2_quiz_sched_dt(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    dt_utc = _parse_local_dt(message.text or "")
+    if dt_utc is None:
+        await message.answer("⚠️ Sana formati noto‘g‘ri. Misol: <code>2026-12-01 18:00</code>")
+        return
     await state.clear()
     async with get_session() as session:
-        q = await GameplayService.create_quiz(session, parts[0], int(parts[1]), message.from_user.id, reward_xp=xp)
+        q = await GameplayService.create_quiz(
+            session,
+            title=data.get("quiz_title", "Quiz"),
+            reward_coins=int(data.get("quiz_coins", 300)),
+            admin_tg_id=message.from_user.id,
+            target_scope=data.get("quiz_scope", "all"),
+            target_group_id=data.get("quiz_grp_id"),
+            scheduled_at=dt_utc,
+            status="scheduled",
+        )
+        for item in data.get("quiz_questions") or []:
+            await GameplayService.add_quiz_question(session, q.id, item["q"], item["opts"], item["cidx"], accepted_answers=item.get("acc"))
         await session.commit()
-    await message.answer(f"✅ Quiz #{q.id} yaratildi! Endi savol qo‘shishingiz mumkin.", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await message.answer(f"⏰ Quiz #{q.id} belgilangan vaqtga rejalashtirildi!")
+    await _show_quiz_home(message, message.from_user.id)
 
 
-@router.message(AdminV2States.waiting_quiz_question, NotCommandFilter())
-async def fsm_v2_quiz_question(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 4 or not parts[0].isdigit() or not parts[3].isdigit():
-        await message.answer("⚠️ Format: <code>QuizID | Savol | V1;V2;V3;V4 | 1</code>")
+@router.message(AdminV2States.waiting_quiz_clone_coins, NotCommandFilter())
+async def fsm_v2_quiz_clone_coins(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
         return
-    opts = [o.strip() for o in parts[2].split(";") if o.strip()]
-    if len(opts) < 2:
-        await message.answer("⚠️ Kamida 2 ta variant yozing (`;`).")
+    raw = (message.text or "").strip().replace(",", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Son kiriting.")
         return
+    qid = int(data["clone_qid"])
     await state.clear()
     async with get_session() as session:
-        qq = await GameplayService.add_quiz_question(session, int(parts[0]), parts[1], opts, int(parts[3]) - 1)
-        await session.commit()
-    if qq is None:
-        await message.answer("❌ Quiz ID topilmadi.")
-    else:
-        await message.answer("✅ Savol quizga qo‘shildi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+        nq = await GameplayService.clone_quiz(session, qid, message.from_user.id, new_reward_coins=int(raw))
+        if nq:
+            await session.commit()
+            await _dispatch_quiz_announcement(message.bot, session, nq)
+    await message.answer("🎉 Quiz yangi mukofot bilan qayta boshlandi!")
+    await _show_quiz_home(message, message.from_user.id)
+
+
+# ===========================================================================
+# 7. GAMES (sec="games", Zero-pipe per-field edit)
+# ===========================================================================
+async def _show_games_home(target, owner_id: int) -> None:
+    async with get_session() as session:
+        cfg = await GameplayService.get_game_config(session)
+    st = "🟢 Yoqilgan" if cfg.get("dice_enabled", True) else "🔴 O‘chirilgan"
+    txt = (
+        f"🎮 <b>O‘YINLAR SOZLAMASI</b>\n\nHolat: {st}\n"
+        f"🎲 Kunlik o‘yin limiti: <b>{cfg.get('dice_daily_limit')}</b>\n"
+        f"⏳ Cooldown: <b>{cfg.get('dice_cooldown_minutes')} daq.</b>\n"
+        f"🎉 To‘g‘ri topganda yutuq: <b>{cfg.get('dice_jackpot_reward')} 🪙</b>"
+    )
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🔄 Yoqish/O‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog").pack()))
+    b.row(
+        InlineKeyboardButton(text="🎉 Yutuq coin", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_jackpot_reward").pack()),
+        InlineKeyboardButton(text="🔢 Kunlik limit", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_daily_limit").pack()),
+    )
+    b.row(InlineKeyboardButton(text="⏳ Cooldown (daqiqa)", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_cooldown_minutes").pack()))
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, txt, reply_markup=b.as_markup())
 
 
 @router.callback_query(AdmV2Cb.filter(F.sec == "games"))
 async def cb_v2_games(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "games"):
         return
-    if callback_data.act == "edit":
-        await state.set_state(AdminV2States.waiting_games_cfg)
-        await edit_or_answer(callback, "🎮 Format: <code>KunlikLimit | CooldownDaq | JackpotCoin</code>\nMisol: <code>3 | 30 | 300</code>")
+    owner_id = callback.from_user.id
+    if callback_data.act == "ed":
+        await state.set_state(AdminV2States.waiting_games_field)
+        await state.update_data(owner_tg_id=owner_id, g_field=callback_data.ext)
+        await edit_or_answer(callback, f"🎮 <b>{esc(callback_data.ext)}</b> uchun yangi musbat son kiriting:", reply_markup=_cancel_kb(owner_id, "games", "v"))
         return
-    async with get_session() as session:
-        cfg = await GameplayService.get_game_config(session)
-        if callback_data.act == "tog":
+    if callback_data.act == "tog":
+        async with get_session() as session:
+            cfg = await GameplayService.get_game_config(session)
             cfg["dice_enabled"] = not cfg.get("dice_enabled", True)
             await SettingsService.set_value(session, "game_config", cfg)
             await session.commit()
-    st = "🟢 Yoqilgan" if cfg.get("dice_enabled", True) else "🔴 O‘chirilgan"
-    txt = (
-        f"🎮 <b>O‘YINLAR SOZLAMASI</b>\n\nHolat: {st}\n"
-        f"🎲 Kunlik limit: <b>{cfg.get('dice_daily_limit')}</b>\n"
-        f"⏳ Cooldown: <b>{cfg.get('dice_cooldown_minutes')} daq.</b>\n"
-        f"🎉 Jackpot: <b>{cfg.get('dice_jackpot_reward')} 🪙</b>"
-    )
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Yoqish/O‘chirish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="games", act="tog").pack())],
-            [InlineKeyboardButton(text="✏️ Limit/Mukofotni tahrirlash", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="games", act="edit").pack())],
-            [_back_home_btn(callback.from_user.id)],
-        ]
-    )
-    await edit_or_answer(callback, txt, reply_markup=kb)
+    await _show_games_home(callback, owner_id)
 
 
-@router.message(AdminV2States.waiting_games_cfg, NotCommandFilter())
-async def fsm_v2_games_cfg(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 3 or not all(p.isdigit() for p in parts[:3]):
-        await message.answer("⚠️ Format: <code>3 | 30 | 300</code>")
+@router.message(AdminV2States.waiting_games_field, NotCommandFilter())
+async def fsm_v2_games_field(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
         return
+    raw = (message.text or "").strip().replace(",", "")
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ Kamida 1 butun son kiriting.")
+        return
+    field = data["g_field"]
     await state.clear()
     async with get_session() as session:
         cfg = await GameplayService.get_game_config(session)
-        cfg["dice_daily_limit"] = max(1, int(parts[0]))
-        cfg["dice_cooldown_minutes"] = max(1, int(parts[1]))
-        cfg["dice_jackpot_reward"] = max(10, int(parts[2]))
+        cfg[field] = int(raw)
         await SettingsService.set_value(session, "game_config", cfg)
         await session.commit()
-    await message.answer("✅ O‘yin sozlamalari saqlandi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await _show_games_home(message, message.from_user.id)
+
+
+# ===========================================================================
+# 8. AUCTION (sec="auction", Pick undropped card + Step-by-step + End/Cancel)
+# ===========================================================================
+async def _show_auctions_home(target, owner_id: int) -> None:
+    async with get_session() as session:
+        items, total = await AuctionWishlistService.list_active_auctions(session, page=1, page_size=15)
+    lines = [f"🔨 <b>AUKSIONLAR BOSHQARUVI</b> ({total} ta faol)\n"]
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="➕ Yangi Auksion", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="pick_card", p=1).pack()))
+    for auc, c in items:
+        lines.append(f"• <b>#{auc.id}</b> {esc(c.character_name)} — {auc.current_price:,} 🪙 ({auc.bid_count} stavka)")
+        b.row(
+            InlineKeyboardButton(text=f"🏁 Yakunlash #{auc.id}", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="fin", tid=auc.id).pack()),
+            InlineKeyboardButton(text=f"❌ Bekor #{auc.id}", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="can", tid=auc.id).pack()),
+        )
+    if not items:
+        lines.append("📭 Hozircha faol auksionlar yo‘q.")
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
 @router.callback_query(AdmV2Cb.filter(F.sec == "auction"))
 async def cb_v2_auction(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "auction"):
         return
-    if callback_data.act in ("new", "new_card"):
-        await state.set_state(AdminV2States.waiting_auction_create)
-        pre = f"{callback_data.tid} | " if callback_data.tid else "CardID | "
-        await edit_or_answer(callback, f"🔨 <b>YANGI AUKSION</b>\n\nFormat: <code>{pre}BoshlangichNarx | Soat | MinQadam</code>\nMisol: <code>1 | 2000 | 24 | 100</code>")
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "v":
+        await state.clear()
+        await _show_auctions_home(callback, owner_id)
         return
-    async with get_session() as session:
-        items, total = await AuctionWishlistService.list_active_auctions(session, page=1, page_size=15)
-    lines = [f"🔨 <b>AUKSIONLAR BOSHQARUVI</b> ({total} ta faol)\n"]
-    for auc, c in items:
-        lines.append(f"• <b>#{auc.id}</b> {esc(c.character_name)} — {auc.current_price:,} 🪙 ({auc.bid_count} stavka)")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Yangi Auksion", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="auction", act="new").pack())],
-            [_back_home_btn(callback.from_user.id)],
-        ]
-    )
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
+
+    if act == "fin":
+        async with get_session() as session:
+            ok, msg = await AuctionWishlistService.admin_finalize_auction(session, callback_data.tid)
+            if ok:
+                await session.commit()
+        await callback.answer(msg, show_alert=True)
+        await _show_auctions_home(callback, owner_id)
+        return
+
+    if act == "can":
+        async with get_session() as session:
+            ok, msg = await AuctionWishlistService.admin_cancel_auction(session, callback_data.tid)
+            if ok:
+                await session.commit()
+        await callback.answer(msg, show_alert=True)
+        await _show_auctions_home(callback, owner_id)
+        return
+
+    if act == "pick_card":
+        page = max(1, callback_data.p)
+        async with get_session() as session:
+            cards, total = await AdminService.get_undropped_cards_paginated(session, page=page, page_size=PAGE_SIZE)
+        back_cb = AdmV2Cb(owner_id=owner_id, sec="auction", act="v").pack()
+        txt = f"🔨 <b>AUKSION UCHUN KARTA TANLANG</b>\nHali tashlanmagan kartalar ({total} ta):" if cards else "📭 Auksion uchun bo‘sh kartalar yo‘q."
+        await edit_or_answer(
+            callback,
+            txt,
+            reply_markup=admin_undropped_cards_kb(owner_id, cards, "auction", "new_card", page, total, back_cb, page_size=PAGE_SIZE),
+        )
+        return
+
+    if act == "new_card":
+        await state.set_state(AdminV2States.waiting_auc_price)
+        await state.update_data(owner_tg_id=owner_id, auc_card_id=callback_data.tid)
+        await edit_or_answer(
+            callback,
+            f"🔨 <b>YANGI AUKSION (1/3)</b>\nKarta ID: <code>{callback_data.tid}</code>\n\nEng kam (boshlang‘ich) coin narxini yozing (masalan: <code>2000</code>):",
+            reply_markup=_cancel_kb(owner_id, "auction", "v"),
+        )
+        return
+
+    if act == "dur":
+        await state.update_data(auc_hours=callback_data.tid)
+        await state.set_state(AdminV2States.waiting_auc_step)
+        b = InlineKeyboardBuilder()
+        for st in (50, 100, 250, 500):
+            b.add(InlineKeyboardButton(text=f"+{st}", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="step", tid=st).pack()))
+        b.adjust(2)
+        await edit_or_answer(callback, f"⏳ Davomiylik: <b>{callback_data.tid} soat</b>.\n\n3/3: Eng kam stavka oshish qadamini tanlang yoki yozing:", reply_markup=b.as_markup())
+        return
+
+    if act == "step":
+        data = await state.get_data()
+        await state.clear()
+        async with get_session() as session:
+            ok, msg, auc = await AuctionWishlistService.create_auction(
+                session,
+                card_id=int(data["auc_card_id"]),
+                start_price=int(data["auc_price"]),
+                hours=int(data["auc_hours"]),
+                created_by_tg_id=owner_id,
+                min_step=max(10, callback_data.tid),
+            )
+            if ok:
+                await session.commit()
+            else:
+                await session.rollback()
+        await callback.answer(msg, show_alert=True)
+        await _show_auctions_home(callback, owner_id)
 
 
-@router.message(AdminV2States.waiting_auction_create, NotCommandFilter())
-async def fsm_v2_auction_create(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 3 or not all(p.isdigit() for p in parts[:3]):
-        await message.answer("⚠️ Format: <code>CardID | Narx | Soat | Qadam</code>")
+@router.message(AdminV2States.waiting_auc_price, NotCommandFilter())
+async def fsm_v2_auc_price(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
         return
-    step = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 50
+    raw = (message.text or "").strip().replace(",", "")
+    if not raw.isdigit() or int(raw) <= 0:
+        await message.answer("⚠️ Musbat coin narxini yozing.")
+        return
+    await state.update_data(auc_price=int(raw))
+    await state.set_state(AdminV2States.waiting_auc_hours)
+    b = InlineKeyboardBuilder()
+    for h in (6, 12, 24, 48, 72):
+        b.add(InlineKeyboardButton(text=f"{h} soat", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="auction", act="dur", tid=h).pack()))
+    b.adjust(3)
+    await message.answer("2/3: Auksion qancha soat davom etsin? Tanlang yoki son yozing:", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_auc_hours, NotCommandFilter())
+async def fsm_v2_auc_hours(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= 168):
+        await message.answer("⚠️ 1 dan 168 soatgacha yozing.")
+        return
+    await state.update_data(auc_hours=int(raw))
+    await state.set_state(AdminV2States.waiting_auc_step)
+    b = InlineKeyboardBuilder()
+    for st in (50, 100, 250, 500):
+        b.add(InlineKeyboardButton(text=f"+{st}", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="auction", act="step", tid=st).pack()))
+    b.adjust(2)
+    await message.answer("3/3: Eng kam stavka qadamini tanlang yoki yozing:", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_auc_step, NotCommandFilter())
+async def fsm_v2_auc_step(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) < 10:
+        await message.answer("⚠️ Kamida 10 coin yozing.")
+        return
     await state.clear()
     async with get_session() as session:
-        ok, msg, auc = await AuctionWishlistService.create_auction(
-            session, int(parts[0]), int(parts[1]), int(parts[2]), message.from_user.id, min_step=step
+        ok, msg, _ = await AuctionWishlistService.create_auction(
+            session,
+            card_id=int(data["auc_card_id"]),
+            start_price=int(data["auc_price"]),
+            hours=int(data["auc_hours"]),
+            created_by_tg_id=message.from_user.id,
+            min_step=int(raw),
         )
         if ok:
             await session.commit()
-        else:
-            await session.rollback()
-    await message.answer(msg + (f" (ID: #{auc.id})" if auc else ""), reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await message.answer(msg)
+    await _show_auctions_home(message, message.from_user.id)
+
+
+# ===========================================================================
+# 9. SEASON (sec="season", Create / Extend / End)
+# ===========================================================================
+async def _show_season_home(target, owner_id: int) -> None:
+    async with get_session() as session:
+        s = await GameplayService.get_active_season(session)
+        top = await GameplayService.get_season_leaderboard(session, s.id, 10) if s else []
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="➕ Yangi Mavsum Boshlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="new").pack()))
+    if s:
+        lines = [f"🏆 <b>{esc(s.name)}</b> (#{s.season_number})\n⏳ Tugash: <b>{ensure_utc(s.ends_at):%d.%m.%Y %H:%M} UTC</b>\n"]
+        for i, (sp, u) in enumerate(top, 1):
+            lines.append(f"{i}. {esc(u.display_name)} — {sp.points} ball")
+        b.row(
+            InlineKeyboardButton(text="⏳ Muddat uzaytirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="ext_menu").pack()),
+            InlineKeyboardButton(text="🏁 Yakunlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="end_conf").pack()),
+        )
+    else:
+        lines = ["🏆 Hozircha faol mavsum yo‘q."]
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
 @router.callback_query(AdmV2Cb.filter(F.sec == "season"))
 async def cb_v2_season(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "season"):
         return
-    if callback_data.act == "new":
-        await state.set_state(AdminV2States.waiting_season_create)
-        await edit_or_answer(callback, "🏆 Yangi mavsum: <code>Nomi | Kunlar | Top1Mukofot</code>\nMisol: <code>Season 2: Eclipse | 30 | 15000</code>")
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "new":
+        await state.set_state(AdminV2States.waiting_season_name)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, "🏆 <b>YANGI MAVSUM (1/3)</b>\n\nMavsum nomini yozing (masalan: <code>Season 2: Eclipse</code>):", reply_markup=_cancel_kb(owner_id, "season", "v"))
         return
-    async with get_session() as session:
-        s = await GameplayService.get_active_season(session)
-        top = await GameplayService.get_season_leaderboard(session, s.id, 10) if s else []
-    if s:
-        lines = [f"🏆 <b>{esc(s.name)}</b> (#{s.season_number})\n⏳ {ensure_utc(s.ends_at):%d.%m.%Y %H:%M} UTC\n"]
-        for i, (sp, u) in enumerate(top, 1):
-            lines.append(f"{i}. {esc(u.display_name)} — {sp.points} ball")
-    else:
-        lines = ["🏆 Faol mavsum yo‘q."]
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Yangi Mavsum Boshlash", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="season", act="new").pack())],
-            [_back_home_btn(callback.from_user.id)],
-        ]
-    )
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
+
+    if act == "days_p":
+        await state.update_data(s_days=callback_data.tid)
+        await state.set_state(AdminV2States.waiting_season_prize)
+        await edit_or_answer(callback, f"📅 Davomiylik: <b>{callback_data.tid} kun</b>.\n\n3/3: 1-o‘rin g‘olibi uchun coin mukofotini yozing (masalan: <code>15000</code>):")
+        return
+
+    if act == "ext_menu":
+        b = InlineKeyboardBuilder()
+        for d in (7, 15, 30):
+            b.add(InlineKeyboardButton(text=f"+{d} kun", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="ext_go", tid=d).pack()))
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="v").pack()))
+        await edit_or_answer(callback, "⏳ Mavsum muddatini necha kunga uzaytiramiz?", reply_markup=b.as_markup())
+        return
+
+    if act == "ext_go":
+        async with get_session() as session:
+            await GameplayService.extend_active_season(session, callback_data.tid)
+            await session.commit()
+        await callback.answer(f"✅ +{callback_data.tid} kun uzaytirildi!", show_alert=True)
+        await _show_season_home(callback, owner_id)
+        return
+
+    if act == "end_conf":
+        b = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Ha, hozir yakunlash (mukofotlarni berish)", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="end_go").pack())],
+                [InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="v").pack())],
+            ]
+        )
+        await edit_or_answer(callback, "🏁 Faol mavsumni hozir yakunlab, Top-3 g‘oliblarga coin tarqatamizmi?", reply_markup=b)
+        return
+
+    if act == "end_go":
+        async with get_session() as session:
+            await GameplayService.end_active_season_now(session)
+            await session.commit()
+        await callback.answer("🏁 Mavsum yakunlandi va g‘oliblar taqdirlandi!", show_alert=True)
+    await state.clear()
+    await _show_season_home(callback, owner_id)
 
 
-@router.message(AdminV2States.waiting_season_create, NotCommandFilter())
-async def fsm_v2_season_create(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|")]
-    if len(parts) < 2 or not parts[1].isdigit():
-        await message.answer("⚠️ Format: <code>Nomi | Kunlar | Top1Mukofot</code>")
+@router.message(AdminV2States.waiting_season_name, NotCommandFilter())
+async def fsm_v2_season_name(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
         return
-    prize = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 10000
+    name = (message.text or "").strip()[:120]
+    if not name:
+        await message.answer("⚠️ Mavsum nomini yozing.")
+        return
+    await state.update_data(s_name=name)
+    await state.set_state(AdminV2States.waiting_season_days)
+    b = InlineKeyboardBuilder()
+    for d in (14, 30, 60):
+        b.add(InlineKeyboardButton(text=f"{d} kun", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="season", act="days_p", tid=d).pack()))
+    await message.answer("2/3: Necha kun davom etsin? Tanlang yoki kun sonini yozing:", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_season_days, NotCommandFilter())
+async def fsm_v2_season_days(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ Kamida 1 kun yozing.")
+        return
+    await state.update_data(s_days=int(raw))
+    await state.set_state(AdminV2States.waiting_season_prize)
+    await message.answer("3/3: 1-o‘rin mukofoti (coin) ni yozing (masalan: <code>15000</code>):")
+
+
+@router.message(AdminV2States.waiting_season_prize, NotCommandFilter())
+async def fsm_v2_season_prize(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Musbat son yozing.")
+        return
     await state.clear()
     async with get_session() as session:
-        s = await GameplayService.create_season(session, parts[0], int(parts[1]), prize)
+        await GameplayService.create_season(session, data["s_name"], int(data["s_days"]), int(raw))
         await session.commit()
-    await message.answer(f"✅ Yangi mavsum #{s.season_number} ({esc(s.name)}) boshlandi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await _show_season_home(message, message.from_user.id)
+
+
+# ===========================================================================
+# 10. REKLAMA (sec="reklama", Zero-pipe Media + Button + Placement + Freq)
+# ===========================================================================
+async def _show_reklama_home(target, owner_id: int) -> None:
+    async with get_session() as session:
+        ads = await CommunityService.list_ads(session)
+    lines = ["📣 <b>REKLAMA KAMPANIYALARI</b>\n"]
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="➕ Reklama qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="reklama", act="add").pack()))
+    for a in ads[:12]:
+        st = "🟢" if a.is_active else "🔴"
+        lines.append(f"{st} <b>#{a.id} {esc(a.title)}</b> — 👁 {a.views_count} ({a.placement}, {a.frequency_mins} daq)")
+        b.row(
+            InlineKeyboardButton(text=f"{st} #{a.id} {a.title[:22]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="reklama", act="tog", tid=a.id).pack()),
+            InlineKeyboardButton(text="🗑", callback_data=AdmV2Cb(owner_id=owner_id, sec="reklama", act="del", tid=a.id).pack()),
+        )
+    if not ads:
+        lines.append("📭 Hozircha reklamalar yo‘q.")
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
 @router.callback_query(AdmV2Cb.filter(F.sec == "reklama"))
 async def cb_v2_reklama(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "reklama"):
         return
-    if callback_data.act == "add":
-        await state.set_state(AdminV2States.waiting_ad_create)
-        await edit_or_answer(callback, "📣 Reklama formati: <code>Sarlavha | DaqiqaOraliq | Placement(all/private) | Matn</code>")
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "add":
+        await state.set_state(AdminV2States.waiting_ad_content)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, "📣 <b>YANGI REKLAMA (1/3)</b>\n\nReklama matnini (yoki rasm bilan matnni) yuboring:", reply_markup=_cancel_kb(owner_id, "reklama", "v"))
         return
+
+    if act == "no_btn":
+        await state.update_data(ad_btn_txt=None, ad_btn_url=None)
+        await state.set_state(None)
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="📱 Shaxsiy menyuda", callback_data=AdmV2Cb(owner_id=owner_id, sec="reklama", act="place", ext="private").pack()),
+            InlineKeyboardButton(text="🌍 Barchasida", callback_data=AdmV2Cb(owner_id=owner_id, sec="reklama", act="place", ext="all").pack()),
+        )
+        await edit_or_answer(callback, "📍 Reklama qayerlarda chiqsin?", reply_markup=b.as_markup())
+        return
+
+    if act == "place":
+        await state.update_data(ad_place=callback_data.ext or "all")
+        b = InlineKeyboardBuilder()
+        for m in (30, 60, 120, 360):
+            b.add(InlineKeyboardButton(text=f"{m} daqiqa", callback_data=AdmV2Cb(owner_id=owner_id, sec="reklama", act="freq", tid=m).pack()))
+        b.adjust(2)
+        await edit_or_answer(callback, "⏱ Reklama har necha daqiqada ko‘rsatilsin?", reply_markup=b.as_markup())
+        return
+
+    if act == "freq":
+        data = await state.get_data()
+        await state.clear()
+        txt = data.get("ad_text", "")
+        title = txt.splitlines()[0][:60] if txt else "Reklama"
+        async with get_session() as session:
+            await CommunityService.create_ad(
+                session,
+                title=title,
+                text=txt,
+                admin_tg_id=owner_id,
+                placement=data.get("ad_place", "all"),
+                frequency_mins=max(1, callback_data.tid),
+                button_text=data.get("ad_btn_txt"),
+                button_url=data.get("ad_btn_url"),
+                media_file_id=data.get("ad_photo"),
+            )
+            await session.commit()
+        await callback.answer("✅ Reklama faollashtirildi!", show_alert=True)
+        await _show_reklama_home(callback, owner_id)
+        return
+
     async with get_session() as session:
-        if callback_data.act == "tog":
+        if act == "tog":
             ad = await session.get(AdCampaign, callback_data.tid)
             if ad:
                 ad.is_active = not ad.is_active
                 await session.commit()
-        ads = await CommunityService.list_ads(session)
-    lines = ["📣 <b>REKLAMA KAMPANIYALARI</b>\n"]
+        elif act == "del":
+            await CommunityService.delete_ad(session, callback_data.tid)
+            await session.commit()
+    await state.clear()
+    await _show_reklama_home(callback, owner_id)
+
+
+@router.message(AdminV2States.waiting_ad_content, NotCommandFilter())
+async def fsm_v2_ad_content(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    txt = (message.caption or message.text or "").strip()
+    fid = message.photo[-1].file_id if message.photo else None
+    if not txt and not fid:
+        await message.answer("⚠️ Reklama matni yoki rasm yuboring.")
+        return
+    await state.update_data(ad_text=txt or "📣 Reklama", ad_photo=fid)
+    await state.set_state(AdminV2States.waiting_ad_button)
+    b = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏭ Tugmasiz davom etish", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="reklama", act="no_btn").pack())]])
+    await message.answer(
+        "2/3: Agar reklama ostida havola tugmasi bo‘lsin desangiz, tugma nomi va linkni yozing:\nMisol: <code>Kanalga o‘tish https://t.me/kanal</code>",
+        reply_markup=b,
+    )
+
+
+@router.message(AdminV2States.waiting_ad_button, NotCommandFilter())
+async def fsm_v2_ad_button(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    m = re.search(r"(https?://\S+)", raw)
+    if not m:
+        await message.answer("⚠️ Link topilmadi (`https://...` bo‘lishi kerak). Yoki Tugmasiz tugmasini bosing.")
+        return
+    url = m.group(1)
+    btn_txt = raw.replace(url, "").strip(" -") or "🔗 Batafsil"
+    await state.update_data(ad_btn_txt=btn_txt[:60], ad_btn_url=url[:250])
+    await state.set_state(None)
     b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="➕ Reklama qo‘shish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="reklama", act="add").pack()))
-    for a in ads[:10]:
-        st = "🟢" if a.is_active else "🔴"
-        lines.append(f"{st} <b>{esc(a.title)}</b> — 👁 {a.views_count} ({a.placement})")
-        b.row(InlineKeyboardButton(text=f"{st} {a.title[:22]}", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="reklama", act="tog", tid=a.id).pack()))
-    b.row(_back_home_btn(callback.from_user.id))
+    b.row(
+        InlineKeyboardButton(text="📱 Shaxsiy menyuda", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="reklama", act="place", ext="private").pack()),
+        InlineKeyboardButton(text="🌍 Barchasida", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="reklama", act="place", ext="all").pack()),
+    )
+    await message.answer("📍 Reklama qayerlarda chiqsin?", reply_markup=b.as_markup())
+
+
+# ===========================================================================
+# 11. MESSAGE / BROADCAST (sec="message", Target + Now/Sched + Forward/Copy)
+# ===========================================================================
+@router.callback_query(AdmV2Cb.filter(F.sec == "message"))
+async def cb_v2_message_menu(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "message"):
+        return
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "who":
+        await state.update_data(owner_tg_id=owner_id, msg_scope=callback_data.ext or "all")
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="⚡ Hozir yuborish", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="when_now").pack()),
+            InlineKeyboardButton(text="⏰ Vaqtga rejalash", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="when_sched").pack()),
+        )
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="v").pack()))
+        await edit_or_answer(callback, f"🎯 Qabul qiluvchilar: <b>{esc(callback_data.ext.upper())}</b>\n\nQachon yuborilsin?", reply_markup=b.as_markup())
+        return
+
+    if act == "when_now":
+        await state.update_data(msg_when="now", msg_sched_dt=None)
+        await state.set_state(AdminV2States.waiting_msg_content)
+        await edit_or_answer(
+            callback,
+            "✉️ <b>XABARNI YUBORING</b>\n\nMatn, rasm, video, stiker yoki istalgan kanal postini forward qiling — bot hammaga aynan shunday yuboradi:",
+            reply_markup=_cancel_kb(owner_id, "message", "v"),
+        )
+        return
+
+    if act == "when_sched":
+        await state.set_state(AdminV2States.waiting_msg_sched_dt)
+        await edit_or_answer(
+            callback,
+            "⏰ Yuborilish vaqtini yozing (<code>2026-12-01 18:00</code>):",
+            reply_markup=_cancel_kb(owner_id, "message", "v"),
+        )
+        return
+
+    await state.clear()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🌍 Barchaga (Userlar + Guruhlar)", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="who", ext="all").pack()))
+    b.row(
+        InlineKeyboardButton(text="👤 Faqat Userlarga", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="who", ext="users").pack()),
+        InlineKeyboardButton(text="👥 Faqat Guruhlarga", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="who", ext="groups").pack()),
+    )
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(callback, "📨 <b>XABARLAR VA BROADCAST</b>\n\nKimga xabar yuboramiz?", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_msg_sched_dt, NotCommandFilter())
+async def fsm_v2_msg_sched_dt(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    dt_utc = _parse_local_dt(message.text or "")
+    if dt_utc is None:
+        await message.answer("⚠️ Sana formati noto‘g‘ri. Misol: <code>2026-12-01 18:00</code>")
+        return
+    await state.update_data(msg_when="sched", msg_sched_dt=dt_utc.isoformat())
+    await state.set_state(AdminV2States.waiting_msg_content)
+    await message.answer("✉️ Endi rejalangan xabarni (matn/media/forward) yuboring:")
+
+
+@router.message(AdminV2States.waiting_msg_content, NotCommandFilter())
+async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    scope = data.get("msg_scope", "all")
+    when = data.get("msg_when", "now")
+    sched_iso = data.get("msg_sched_dt")
+    await state.clear()
+
+    if when == "sched" and sched_iso:
+        dt_utc = datetime.fromisoformat(sched_iso)
+        body = (message.caption or message.text or "Media xabar").strip()
+        async with get_session() as session:
+            await CommunityService.create_scheduled_message(
+                session,
+                title=body[:120],
+                body=body,
+                send_at=dt_utc,
+                target_scope=scope,
+                admin_tg_id=message.from_user.id,
+                from_chat_id=message.chat.id,
+                forward_message_id=message.message_id,
+            )
+            await session.commit()
+        await message.answer(
+            f"✅ Xabar rejalashtirildi! ({scope})",
+            reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)),
+        )
+        return
+
+    wait = await message.answer("⏳ Xabar barchaga yuborilmoqda...")
+    async with get_session() as session:
+        targets: List[int] = []
+        if scope in ("users", "all"):
+            u_ids = (await session.execute(select(User.telegram_id).where(User.is_banned.is_(False)))).scalars().all()
+            targets.extend(int(x) for x in u_ids)
+        if scope in ("groups", "all"):
+            g_ids = (await session.execute(select(Group.telegram_chat_id).where(Group.is_active.is_(True), Group.is_banned.is_(False)))).scalars().all()
+            targets.extend(int(x) for x in g_ids)
+
+    sent = 0
+    sem = asyncio.Semaphore(6)
+
+    async def _send(cid: int) -> None:
+        nonlocal sent
+        async with sem:
+            try:
+                await message.bot.copy_message(chat_id=cid, from_chat_id=message.chat.id, message_id=message.message_id)
+                sent += 1
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(float(exc.retry_after) + 0.5)
+            except Exception:
+                pass
+
+    if targets:
+        await asyncio.gather(*[_send(c) for c in targets])
+    await wait.edit_text(
+        f"✅ <b>XABAR YUBORISH YAKUNLANDI!</b>\n\n📤 Yetkazildi: <b>{sent}</b> / {len(targets)}",
+        reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)),
+    )
+
+
+# ===========================================================================
+# 12. REPORT (sec="report" -> Live Activity & Analytics Dashboard)
+# ===========================================================================
+@router.callback_query(AdmV2Cb.filter(F.sec == "report"))
+async def cb_v2_report(callback: CallbackQuery, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "report"):
+        return
+    owner_id = callback.from_user.id
+    async with get_session() as session:
+        rep = await AdminService.get_v2_activity_report(session)
+    lines = [
+        "🚨 <b>FAOLLIK HISOBOTI (REPORT)</b>\n",
+        f"🟢 24 soatda faol userlar: <b>{rep['active_users_24h']:,}</b>",
+        f"👥 Faol guruhlar: <b>{rep['active_groups']:,}</b>",
+        f"🎮 Bugungi o‘yinlar: <b>{rep['games_today']}</b> (Jami: {rep['games_total']:,})",
+        f"🎁 Bugungi Daily bonus: <b>{rep['daily_claims_today']}</b>",
+        f"🧠 Jami Quizlar: <b>{rep['quizzes_total']}</b>",
+        f"💬 Ochiq Support murojaatlar: <b>{rep['open_tickets']}</b>",
+        f"🔐 Hal qilinmagan xavfsizlik hodisalari: <b>{rep['unresolved_sec']}</b>\n",
+        "🏆 <b>Eng faol guruhlar (olingan kartalar):</b>",
+    ]
+    for idx, (gname, cnt) in enumerate(rep["top_groups"], 1):
+        lines.append(f"{idx}. {esc(gname)} — <b>{cnt:,}</b>")
+    if not rep["top_groups"]:
+        lines.append("• Ma’lumot yo‘q")
+    lines.append("\n⚡ <b>Oxirgi faol foydalanuvchilar:</b>")
+    for u in rep["top_users"]:
+        lines.append(f"• {esc(u.display_name)} — 🎴 {u.total_cards} · 🪙 {u.coins:,}")
+
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="💬 Support", callback_data=AdmV2Cb(owner_id=owner_id, sec="support", act="v").pack()),
+        InlineKeyboardButton(text="🔐 Security", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="v").pack()),
+        InlineKeyboardButton(text="📋 Logs", callback_data=AdmV2Cb(owner_id=owner_id, sec="logs", act="v").pack()),
+    )
+    b.row(_back_home_btn(owner_id))
     await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
 
 
-@router.message(AdminV2States.waiting_ad_create, NotCommandFilter())
-async def fsm_v2_ad_create(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|", 3)]
-    if len(parts) < 4 or not parts[1].isdigit():
-        await message.answer("⚠️ Format: <code>Sarlavha | 120 | all | Reklama matni</code>")
-        return
-    await state.clear()
+# ===========================================================================
+# 13. MEMORY / BACKUP (sec="memory", List + Download + Date Search + Clean + Restore)
+# ===========================================================================
+async def _show_memory_home(target, owner_id: int, date_filter: Optional[str] = None) -> None:
     async with get_session() as session:
-        await CommunityService.create_ad(session, parts[0], parts[3], message.from_user.id, placement=parts[2], frequency_mins=int(parts[1]))
-        await session.commit()
-    await message.answer("✅ Reklama kampaniyasi qo‘shildi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+        backups = await SecurityBackupService.list_backups(session, limit=20)
+    if date_filter:
+        backups = [b for b in backups if ensure_utc(b.created_at).strftime("%Y-%m-%d") == date_filter]
+    lines = [f"💾 <b>XOTIRA VA BACKUP TIZIMI</b>" + (f" (Sana: <code>{date_filter}</code>)" if date_filter else "") + "\n"]
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="💾 Hozir Backup (.zip)", callback_data=AdmV2Cb(owner_id=owner_id, sec="memory", act="backup_now").pack()),
+        InlineKeyboardButton(text="📅 Sana bo‘yicha", callback_data=AdmV2Cb(owner_id=owner_id, sec="memory", act="date_q").pack()),
+    )
+    for b_rec in backups[:8]:
+        dt_s = ensure_utc(b_rec.created_at).strftime("%d.%m %H:%M")
+        kb_size = max(1, b_rec.file_size_bytes // 1024)
+        lines.append(f"• <code>{dt_s}</code> — {kb_size} KB ({b_rec.backup_type})")
+        b.row(
+            InlineKeyboardButton(
+                text=f"⬇️ {dt_s} ({kb_size} KB, {b_rec.backup_type})",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="memory", act="dl", tid=b_rec.id).pack(),
+            )
+        )
+    if not backups:
+        lines.append("📭 Backuplar topilmadi.")
+    b.row(
+        InlineKeyboardButton(text="🧹 Eskilarini tozalash", callback_data=AdmV2Cb(owner_id=owner_id, sec="memory", act="clean").pack()),
+        InlineKeyboardButton(text="♻️ Restore (.zip)", callback_data=AdmV2Cb(owner_id=owner_id, sec="memory", act="restore").pack()),
+    )
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
-# ---------------------------------------------------------------------------
-# MEMORY / BACKUP & RESTORE (sec="memory")
-# ---------------------------------------------------------------------------
 @router.callback_query(AdmV2Cb.filter(F.sec == "memory"))
 async def cb_v2_memory(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "memory"):
         return
-    if callback_data.act == "backup_now":
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "backup_now":
         async with get_session() as session:
-            rec = await SecurityBackupService.create_full_backup_zip(session, "manual", callback.from_user.id)
+            rec = await SecurityBackupService.create_full_backup_zip(session, "manual", owner_id)
             await session.commit()
         try:
             await callback.bot.send_document(
-                callback.from_user.id,
+                owner_id,
                 FSInputFile(rec.storage_path),
                 caption=f"💾 <b>To‘liq ZIP Backup</b>\n📦 {rec.filename} ({rec.file_size_bytes:,} bytes)",
             )
             await callback.answer("✅ Backup yaratildi va yuborildi!", show_alert=True)
-        except Exception as exc:
-            logger.warning("Failed sending backup document: %s", exc)
+        except Exception:
             await callback.answer(f"✅ Backup saqlandi: {rec.filename}", show_alert=True)
+        await _show_memory_home(callback, owner_id)
         return
-    if callback_data.act == "clean":
+
+    if act == "dl":
+        async with get_session() as session:
+            rec = await session.get(BackupRecord, callback_data.tid)
+        if rec is None:
+            await callback.answer("Backup topilmadi.", show_alert=True)
+            return
+        try:
+            await callback.bot.send_document(
+                owner_id,
+                FSInputFile(rec.storage_path),
+                caption=f"💾 <b>{esc(rec.filename)}</b> ({rec.file_size_bytes:,} bytes)",
+            )
+            await callback.answer("📥 Fayl yuborildi!")
+        except Exception as exc:
+            await callback.answer(f"❌ Faylni yuborib bo‘lmadi: {str(exc)[:60]}", show_alert=True)
+        return
+
+    if act == "date_q":
+        await state.set_state(AdminV2States.waiting_backup_date)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, "📅 Backup sanasini yozing (<code>YYYY-MM-DD</code>, masalan: <code>2026-11-17</code>):", reply_markup=_cancel_kb(owner_id, "memory", "v"))
+        return
+
+    if act == "clean":
         async with get_session() as session:
             n = await SecurityBackupService.cleanup_old_backups(session, 14)
             await session.commit()
         await callback.answer(f"🧹 {n} ta eski backup o‘chirildi.", show_alert=True)
-    if callback_data.act == "restore":
+        await _show_memory_home(callback, owner_id)
+        return
+
+    if act == "restore":
         if not is_super_admin(callback.from_user):
             await callback.answer("⛔ Faqat Super Admin tiklay oladi.", show_alert=True)
             return
         await state.set_state(AdminV2States.waiting_backup_restore)
-        await edit_or_answer(callback, "♻️ <b>BACKUP RESTORE</b>\n\nAvval joriy bazadan avtomatik pre-restore backup olinadi.\n<code>.zip</code> backup faylini yuboring (<i>/cancel</i>):")
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(
+            callback,
+            "♻️ <b>BACKUP RESTORE</b>\n\nAvval joriy bazadan avtomatik pre-restore backup olinadi.\n<code>.zip</code> backup faylini yuboring:",
+            reply_markup=_cancel_kb(owner_id, "memory", "v"),
+        )
         return
 
-    async with get_session() as session:
-        backups = await SecurityBackupService.list_backups(session, limit=8)
-    lines = ["💾 <b>XOTIRA VA BACKUP TIZIMI</b>\n"]
-    for b_rec in backups:
-        lines.append(f"• <code>{esc(b_rec.filename)}</code> — {b_rec.file_size_bytes // 1024} KB ({b_rec.backup_type})")
-    if not backups:
-        lines.append("📭 Hozircha backuplar yo‘q.")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💾 Hozir Backup olish (.zip)", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="memory", act="backup_now").pack())],
-            [
-                InlineKeyboardButton(text="🧹 Eski backuplarni tozalash", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="memory", act="clean").pack()),
-                InlineKeyboardButton(text="♻️ Restore (.zip)", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="memory", act="restore").pack()),
-            ],
-            [_back_home_btn(callback.from_user.id)],
-        ]
-    )
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
+    await state.clear()
+    await _show_memory_home(callback, owner_id)
+
+
+@router.message(AdminV2States.waiting_backup_date, NotCommandFilter())
+async def fsm_v2_backup_date(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        await message.answer("⚠️ Format: <code>YYYY-MM-DD</code>")
+        return
+    await state.clear()
+    await _show_memory_home(message, message.from_user.id, date_filter=raw)
 
 
 @router.message(AdminV2States.waiting_backup_restore, F.document)
 async def fsm_v2_backup_restore(message: Message, state: FSMContext) -> None:
-    if not is_super_admin(message.from_user):
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id or not is_super_admin(message.from_user):
         return
     doc = message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
@@ -978,18 +2574,18 @@ async def fsm_v2_backup_restore(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Pre-restore backup saqlandi va tiklash yakunlandi! Tiklangan yangi kartalar: <b>{restored_cards}</b>")
 
 
-# ---------------------------------------------------------------------------
-# SUPPORT & REPORT & SECURITY & LOGS & SCHEDULED MESSAGE
-# ---------------------------------------------------------------------------
-@router.callback_query(AdmV2Cb.filter(F.sec.in_({"support", "report"})))
+# ===========================================================================
+# 14. SUPPORT, SECURITY (zero-pipe ban) & LOGS (paginated)
+# ===========================================================================
+@router.callback_query(AdmV2Cb.filter(F.sec == "support"))
 async def cb_v2_support(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
-    sec = callback_data.sec
-    if await _deny_if_no_perm(callback, admin_perms, sec):
+    if await _deny_if_no_perm(callback, admin_perms, "support"):
         return
+    owner_id = callback.from_user.id
     if callback_data.act == "reply":
         await state.set_state(AdminV2States.waiting_support_reply)
-        await state.update_data(owner_tg_id=callback.from_user.id, ticket_id=callback_data.tid)
-        await edit_or_answer(callback, f"✍️ Murojaat <b>#{callback_data.tid}</b> uchun javob matnini yozing:")
+        await state.update_data(owner_tg_id=owner_id, ticket_id=callback_data.tid)
+        await edit_or_answer(callback, f"✍️ Murojaat <b>#{callback_data.tid}</b> uchun javob matnini yozing:", reply_markup=_cancel_kb(owner_id, "support", "v"))
         return
     async with get_session() as session:
         if callback_data.act == "close":
@@ -1009,22 +2605,24 @@ async def cb_v2_support(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
-                        InlineKeyboardButton(text="✍️ Javob berish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec=sec, act="reply", tid=t.id).pack()),
-                        InlineKeyboardButton(text="🔒 Yopish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec=sec, act="close", tid=t.id).pack()),
+                        InlineKeyboardButton(text="✍️ Javob berish", callback_data=AdmV2Cb(owner_id=owner_id, sec="support", act="reply", tid=t.id).pack()),
+                        InlineKeyboardButton(text="🔒 Yopish", callback_data=AdmV2Cb(owner_id=owner_id, sec="support", act="close", tid=t.id).pack()),
                     ],
-                    [InlineKeyboardButton(text="⬅️ Ro‘yxat", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec=sec, act="v").pack())],
+                    [InlineKeyboardButton(text="⬅️ Ro‘yxat", callback_data=AdmV2Cb(owner_id=owner_id, sec="support", act="v").pack())],
                 ]
             )
             await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
             return
-        tickets = await CommunityService.list_tickets(session, limit=15)
+        tickets = await CommunityService.list_tickets(session, limit=20)
     b = InlineKeyboardBuilder()
-    lines = ["💬 <b>SUPPORT VA SHIKOYATLAR</b>\n"]
+    lines = ["💬 <b>SUPPORT VA MUROJAATLAR</b>\n"]
     for t in tickets:
         ico = "🟡" if t.status == "open" else ("🟢" if t.status == "answered" else "🔴")
         lines.append(f"{ico} <b>#{t.id}</b> {esc(t.subject)}")
-        b.row(InlineKeyboardButton(text=f"{ico} #{t.id} {t.subject[:28]}", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec=sec, act="det", tid=t.id).pack()))
-    b.row(_back_home_btn(callback.from_user.id))
+        b.row(InlineKeyboardButton(text=f"{ico} #{t.id} {t.subject[:28]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="support", act="det", tid=t.id).pack()))
+    if not tickets:
+        lines.append("📭 Hozircha murojaatlar yo‘q.")
+    b.row(_back_home_btn(owner_id))
     await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
 
 
@@ -1050,119 +2648,149 @@ async def fsm_v2_support_reply(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Javob yuborildi (Ticket #{tid})!")
 
 
-@router.callback_query(AdmV2Cb.filter(F.sec == "security"))
-async def cb_v2_security(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "security"):
-        return
-    if callback_data.act == "ban_prompt":
-        await state.set_state(AdminV2States.waiting_security_ban)
-        await edit_or_answer(
-            callback,
-            "🔐 <b>TEMP / PERM BAN</b>\n\n"
-            "Format: <code>user/group | TG_ID_yoki_ChatID | Soat(0=umrbod) | Sabab</code>\n"
-            "Misol: <code>user | 123456789 | 24 | Auto-clicker</code>",
-        )
-        return
+async def _show_security_home(target, owner_id: int) -> None:
     async with get_session() as session:
         maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
-        if callback_data.act == "maint":
-            maint["enabled"] = not bool(maint.get("enabled", False))
-            await SettingsService.set_value(session, "maintenance", maint)
-            await CommunityService.log_audit(session, callback.from_user.id, "toggle_maintenance", "settings", new_value=maint)
-            await session.commit()
-        elif callback_data.act == "res":
-            inc = await session.get(SecurityIncident, callback_data.tid)
-            if inc:
-                inc.is_resolved = True
-                await session.commit()
         incidents = await SecurityBackupService.list_incidents(session, unresolved_only=True, limit=10)
     m_txt = "🔴 YOQILGAN" if maint.get("enabled") else "🟢 O‘chirilgan"
     lines = [f"🔐 <b>XAVFSIZLIK VA ANTI-CHEAT</b>\n\n🛠 Texnik rejim: {m_txt}\n\n🚨 <b>Faol hodisalar ({len(incidents)}):</b>"]
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="🛠 Texnik rejim (+/-)", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="security", act="maint").pack()),
-        InlineKeyboardButton(text="🚫 Temp/Perm Ban", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="security", act="ban_prompt").pack()),
+        InlineKeyboardButton(text="🛠 Texnik rejim (+/-)", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="maint").pack()),
+        InlineKeyboardButton(text="🚫 Temp/Perm Ban", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="ban_start").pack()),
     )
     for inc in incidents:
         lines.append(f"• #{inc.id} [{inc.severity}] {esc(inc.description[:70])}")
-        b.row(InlineKeyboardButton(text=f"✅ Yopish #{inc.id}", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="security", act="res", tid=inc.id).pack()))
-    b.row(_back_home_btn(callback.from_user.id))
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
+        b.row(InlineKeyboardButton(text=f"✅ Yopish #{inc.id}", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="res", tid=inc.id).pack()))
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
-@router.message(AdminV2States.waiting_security_ban, NotCommandFilter())
-async def fsm_v2_security_ban(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|", 3)]
-    if len(parts) < 4 or not parts[1].lstrip("-").isdigit() or not parts[2].isdigit():
-        await message.answer("⚠️ Format: <code>user | 123456789 | 24 | Sabab</code>")
+@router.callback_query(AdmV2Cb.filter(F.sec == "security"))
+async def cb_v2_security(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "security"):
         return
-    kind, target_id, hrs, reason = parts[0].lower(), int(parts[1]), int(parts[2]), parts[3]
-    hours = hrs if hrs > 0 else None
+    act = callback_data.act
+    owner_id = callback.from_user.id
+
+    if act == "ban_start":
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="👤 Foydalanuvchi", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="ban_type", ext="user").pack()),
+            InlineKeyboardButton(text="👥 Guruh", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="ban_type", ext="group").pack()),
+        )
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="security", act="v").pack()))
+        await edit_or_answer(callback, "🚫 <b>KIMNI BLOKLAYMIZ?</b>", reply_markup=b.as_markup())
+        return
+
+    if act == "ban_type":
+        await state.set_state(AdminV2States.waiting_sec_target)
+        await state.update_data(owner_tg_id=owner_id, sec_kind=callback_data.ext or "user")
+        hint = "Telegram ID yoki @username yozing:" if callback_data.ext == "user" else "Guruh Chat ID (-100...) yozing:"
+        await edit_or_answer(callback, f"🚫 <b>BAN (1/3)</b>\n\n{hint}", reply_markup=_cancel_kb(owner_id, "security", "v"))
+        return
+
+    if act == "ban_dur":
+        await state.update_data(sec_hrs=callback_data.tid)
+        await state.set_state(AdminV2States.waiting_sec_reason)
+        await edit_or_answer(callback, "3/3: Bloklash <b>sababini</b> yozing:", reply_markup=_cancel_kb(owner_id, "security", "v"))
+        return
+
+    async with get_session() as session:
+        if act == "maint":
+            maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
+            maint["enabled"] = not bool(maint.get("enabled", False))
+            await SettingsService.set_value(session, "maintenance", maint)
+            await CommunityService.log_audit(session, owner_id, "toggle_maintenance", "settings", new_value=maint)
+            await session.commit()
+        elif act == "res":
+            inc = await session.get(SecurityIncident, callback_data.tid)
+            if inc:
+                inc.is_resolved = True
+                await session.commit()
     await state.clear()
+    await _show_security_home(callback, owner_id)
+
+
+@router.message(AdminV2States.waiting_sec_target, NotCommandFilter())
+async def fsm_v2_sec_target(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("⚠️ ID yoki @username yozing.")
+        return
+    await state.update_data(sec_target=raw)
+    await state.set_state(None)
+    b = InlineKeyboardBuilder()
+    for lbl, hrs in [("⏱ 1 soat", 1), ("⏱ 24 soat", 24), ("📅 7 kun", 168), ("🚫 Umrbod", 0)]:
+        b.row(InlineKeyboardButton(text=lbl, callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="security", act="ban_dur", tid=hrs).pack()))
+    await message.answer("2/3: Bloklash muddatini tanlang:", reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_sec_reason, NotCommandFilter())
+async def fsm_v2_sec_reason(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    kind = data.get("sec_kind", "user")
+    ref = data.get("sec_target", "")
+    hrs = int(data.get("sec_hrs", 0))
+    hours = hrs if hrs > 0 else None
+    reason = (message.text or "Admin qarori").strip()
+    await state.clear()
+
     async with get_session() as session:
         if kind == "group":
-            grp = (await session.execute(select(Group).where(Group.telegram_chat_id == target_id))).scalar_one_or_none()
+            grp = (
+                await session.execute(select(Group).where(Group.telegram_chat_id == int(ref)))
+            ).scalar_one_or_none() if ref.lstrip("-").isdigit() else None
             if grp is None:
                 await message.answer("❌ Guruh topilmadi.")
                 return
             await SecurityBackupService.ban_group(session, message.from_user.id, grp, reason, hours=hours)
         else:
-            u = await UserService.find_user(session, str(target_id))
+            u = await UserService.find_user(session, ref)
             if u is None:
                 await message.answer("❌ Foydalanuvchi topilmadi.")
                 return
             await SecurityBackupService.ban_user(session, message.from_user.id, u, reason, hours=hours)
+            try:
+                dur = f"{hours} soatga" if hours else "umrbod"
+                await message.bot.send_message(u.telegram_id, f"🚫 <b>Siz botdan {dur} bloklandingiz!</b>\n📌 Sabab: {esc(reason)}")
+            except Exception:
+                pass
         await session.commit()
-    await message.answer("✅ Ban qo‘llandi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    await message.answer("✅ Ban qo‘llandi!")
+    await _show_security_home(message, message.from_user.id)
 
 
 @router.callback_query(AdmV2Cb.filter(F.sec == "logs"))
-async def cb_v2_logs(callback: CallbackQuery, admin_perms: set | None = None) -> None:
+async def cb_v2_logs(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "logs"):
         return
+    page = max(1, callback_data.p)
+    per_page = 15
     async with get_session() as session:
-        logs = await CommunityService.get_recent_logs(session, limit=20)
-    lines = ["📋 <b>AUDIT LOGS (OXIRGI 20 TA)</b>\n"]
+        total = int((await session.execute(select(func.count(AdminAction.id)))).scalar_one() or 0)
+        logs = list(
+            (await session.execute(select(AdminAction).order_by(AdminAction.id.desc()).offset((page - 1) * per_page).limit(per_page)))
+            .scalars()
+            .all()
+        )
+    lines = [f"📋 <b>AUDIT LOGS</b> (Jami: {total} ta | Sahifa {page})\n"]
     for lg in logs:
         dt = ensure_utc(lg.created_at).strftime("%d.%m %H:%M")
         lines.append(f"• <code>{dt}</code> | <code>{lg.admin_telegram_id}</code> | <b>{esc(lg.action_type)}</b> → {esc(lg.target_type)}:{esc(lg.target_id or '')}")
     if not logs:
         lines.append("📭 Loglar bo‘sh.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[_back_home_btn(callback.from_user.id)]])
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
-
-
-@router.callback_query(AdmV2Cb.filter(F.sec == "message"))
-async def cb_v2_message_menu(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "message"):
-        return
-    if callback_data.act == "sched":
-        await state.set_state(AdminV2States.waiting_scheduled_msg)
-        await edit_or_answer(callback, "⏰ <b>REJALI XABAR</b>\n\nFormat: <code>YYYY-MM-DD HH:MM | all/users/groups | Sarlavha | Matn</code> (UTC)")
-        return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Hozir barchaga yuborish", callback_data=AdminCb(owner_id=callback.from_user.id, section="broadcast", action="prompt").pack())],
-            [InlineKeyboardButton(text="⏰ Vaqtga belgilash (Scheduled)", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="message", act="sched").pack())],
-            [_back_home_btn(callback.from_user.id)],
-        ]
-    )
-    await edit_or_answer(callback, "📨 <b>XABARLAR VA BROADCAST</b>", reply_markup=kb)
-
-
-@router.message(AdminV2States.waiting_scheduled_msg, NotCommandFilter())
-async def fsm_v2_scheduled_msg(message: Message, state: FSMContext) -> None:
-    parts = [p.strip() for p in (message.text or "").split("|", 3)]
-    if len(parts) < 4:
-        await message.answer("⚠️ Format: <code>2026-12-01 14:00 | all | Sarlavha | Matn</code>")
-        return
-    try:
-        dt = datetime.strptime(parts[0], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-    except ValueError:
-        await message.answer("⚠️ Sana formati: <code>YYYY-MM-DD HH:MM</code>")
-        return
-    await state.clear()
-    async with get_session() as session:
-        await CommunityService.create_scheduled_message(session, parts[2], parts[3], dt, parts[1], message.from_user.id)
-        await session.commit()
-    await message.answer(f"✅ Xabar <code>{parts[0]} UTC</code> ga rejalashtirildi!", reply_markup=admin_v2_home_kb(message.from_user.id, resolve_admin_perms(message.from_user, None)))
+    b = InlineKeyboardBuilder()
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="logs", act="v", p=page - 1).pack()))
+    if page * per_page < total:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="logs", act="v", p=page + 1).pack()))
+    if nav:
+        b.row(*nav)
+    b.row(_back_home_btn(callback.from_user.id))
+    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())

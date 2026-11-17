@@ -604,17 +604,21 @@ class AdminService:
         media_group: str = "anime",
         page: int = 1,
         page_size: int = 20,
-    ) -> Tuple[List[Tuple[str, int]], int]:
-        """Anime/Manga nomlari card soni bo'yicha kamayish tartibida."""
+    ) -> Tuple[List[Tuple[int, str, int]], int]:
+        """Media nomlari card soni bo'yicha kamayish tartibida: [(rep_id, title, count)]."""
         conds = [Card.is_deleted.is_(False)]
         if media_group == "manga":
             conds.append(Card.media_type.in_(["Manga", "Manhwa", "Manhua"]))
         elif media_group == "anime":
             conds.append(Card.media_type == "Anime")
+        elif media_group == "movie":
+            conds.append(Card.media_type.in_(["Movie", "TV Series"]))
+        elif media_group == "cartoon":
+            conds.append(Card.media_type.in_(["Cartoon", "Comic"]))
 
         rows = (
             await session.execute(
-                select(func.min(Card.anime_name), func.count(Card.id))
+                select(func.min(Card.id), func.min(Card.anime_name), func.count(Card.id))
                 .where(*conds)
                 .group_by(anime_key())
                 .order_by(func.count(Card.id).desc(), func.min(Card.anime_name).asc())
@@ -622,6 +626,181 @@ class AdminService:
         ).all()
         total = len(rows)
         start = (max(1, page) - 1) * page_size
-        return [(str(r[0]), int(r[1])) for r in rows[start : start + page_size]], total
+        return [(int(r[0]), str(r[1]), int(r[2])) for r in rows[start : start + page_size]], total
+
+    @staticmethod
+    async def get_v2_cards_by_media_title(
+        session: AsyncSession,
+        media_group: str,
+        rep_card_id: int,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[str, List[Card], int]:
+        a_key = await get_anime_key_of(session, rep_card_id)
+        if a_key is None:
+            return "", [], 0
+        conds = [Card.is_deleted.is_(False), anime_key() == a_key]
+        if media_group == "manga":
+            conds.append(Card.media_type.in_(["Manga", "Manhwa", "Manhua"]))
+        elif media_group == "anime":
+            conds.append(Card.media_type == "Anime")
+        elif media_group == "movie":
+            conds.append(Card.media_type.in_(["Movie", "TV Series"]))
+        elif media_group == "cartoon":
+            conds.append(Card.media_type.in_(["Cartoon", "Comic"]))
+
+        total = int((await session.execute(select(func.count(Card.id)).where(*conds))).scalar_one() or 0)
+        offset = (max(1, page) - 1) * page_size
+        cards = list(
+            (await session.execute(select(Card).where(*conds).order_by(Card.id.desc()).offset(offset).limit(page_size)))
+            .scalars()
+            .all()
+        )
+        title = cards[0].anime_name if cards else ""
+        return title, cards, total
+
+    @staticmethod
+    async def get_undropped_cards_paginated(
+        session: AsyncSession,
+        page: int = 1,
+        page_size: int = 20,
+        query: str = "",
+    ) -> Tuple[List[Card], int]:
+        conds = [
+            Card.is_deleted.is_(False),
+            Card.is_available.is_(True),
+            Card.is_event_card.is_(False),
+            Card.dropped_count == 0,
+        ]
+        if query.strip():
+            pat = f"%{query.strip()}%"
+            conds.append(Card.character_name.ilike(pat) | Card.anime_name.ilike(pat) | Card.card_code.ilike(pat))
+        total = int((await session.execute(select(func.count(Card.id)).where(*conds))).scalar_one() or 0)
+        offset = (max(1, page) - 1) * page_size
+        cards = list(
+            (await session.execute(select(Card).where(*conds).order_by(Card.id.desc()).offset(offset).limit(page_size)))
+            .scalars()
+            .all()
+        )
+        return cards, total
+
+    @staticmethod
+    async def search_users_for_admin(
+        session: AsyncSession,
+        query: str,
+        limit: int = 20,
+    ) -> List[User]:
+        q = query.strip().lstrip("@")
+        if not q:
+            return []
+        conds = [User.username.ilike(f"%{q}%"), User.first_name.ilike(f"%{q}%")]
+        if q.isdigit():
+            conds.append(User.telegram_id == int(q))
+            conds.append(User.id == int(q))
+        from sqlalchemy import or_
+
+        return list(
+            (
+                await session.execute(
+                    select(User).where(or_(*conds)).order_by(User.last_activity.desc()).limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    @staticmethod
+    async def get_group_analytics(session: AsyncSession, group_id: int) -> dict:
+        from models.schedule import ActiveDrop
+
+        active_members = int(
+            (await session.execute(select(func.count(GroupMember.id)).where(GroupMember.group_id == group_id))).scalar_one() or 0
+        )
+        total_drops = int(
+            (await session.execute(select(func.count(ActiveDrop.id)).where(ActiveDrop.group_id == group_id))).scalar_one() or 0
+        )
+        claimed_drops = int(
+            (
+                await session.execute(
+                    select(func.count(ActiveDrop.id)).where(ActiveDrop.group_id == group_id, ActiveDrop.claimed_by_user_id.is_not(None))
+                )
+            ).scalar_one()
+            or 0
+        )
+        top_users = (
+            await session.execute(
+                select(User, func.count(ActiveDrop.id).label("cnt"))
+                .join(ActiveDrop, ActiveDrop.claimed_by_user_id == User.id)
+                .where(ActiveDrop.group_id == group_id)
+                .group_by(User.id)
+                .order_by(func.count(ActiveDrop.id).desc())
+                .limit(10)
+            )
+        ).all()
+        return {
+            "active_members": active_members,
+            "total_drops": total_drops,
+            "claimed_drops": claimed_drops,
+            "top_users": [(r[0], int(r[1])) for r in top_users],
+        }
+
+    @staticmethod
+    async def get_v2_activity_report(session: AsyncSession) -> dict:
+        from models.schedule import ActiveDrop
+        from models.transaction import DailyReward
+        from models.v2_features import GameSession, Quiz, SecurityIncident, SupportTicket
+
+        now = utcnow()
+        day_ago = now - timedelta(hours=24)
+        today = now.date()
+
+        active_users_24h = int(
+            (await session.execute(select(func.count(User.id)).where(User.last_activity >= day_ago))).scalar_one() or 0
+        )
+        active_groups = int(
+            (await session.execute(select(func.count(Group.id)).where(Group.is_active.is_(True)))).scalar_one() or 0
+        )
+        games_total = int((await session.execute(select(func.count(GameSession.id)))).scalar_one() or 0)
+        games_today = int(
+            (await session.execute(select(func.count(GameSession.id)).where(GameSession.created_date == today))).scalar_one() or 0
+        )
+        daily_claims_today = int(
+            (await session.execute(select(func.count(DailyReward.id)).where(DailyReward.reward_date == today))).scalar_one() or 0
+        )
+        quizzes_total = int((await session.execute(select(func.count(Quiz.id)))).scalar_one() or 0)
+        open_tickets = int(
+            (await session.execute(select(func.count(SupportTicket.id)).where(SupportTicket.status == "open"))).scalar_one() or 0
+        )
+        unresolved_sec = int(
+            (await session.execute(select(func.count(SecurityIncident.id)).where(SecurityIncident.is_resolved.is_(False)))).scalar_one() or 0
+        )
+        top_groups = (
+            await session.execute(
+                select(Group.title, func.count(ActiveDrop.id).label("c"))
+                .join(ActiveDrop, ActiveDrop.group_id == Group.id)
+                .where(ActiveDrop.claimed_by_user_id.is_not(None))
+                .group_by(Group.id, Group.title)
+                .order_by(func.count(ActiveDrop.id).desc())
+                .limit(5)
+            )
+        ).all()
+        top_users = (
+            await session.execute(
+                select(User).order_by(User.last_activity.desc(), User.total_cards.desc()).limit(5)
+            )
+        ).scalars().all()
+        return {
+            "active_users_24h": active_users_24h,
+            "active_groups": active_groups,
+            "games_total": games_total,
+            "games_today": games_today,
+            "daily_claims_today": daily_claims_today,
+            "quizzes_total": quizzes_total,
+            "open_tickets": open_tickets,
+            "unresolved_sec": unresolved_sec,
+            "top_groups": [(str(r[0]), int(r[1])) for r in top_groups],
+            "top_users": list(top_users),
+        }
+
 
 

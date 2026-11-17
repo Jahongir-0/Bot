@@ -121,8 +121,91 @@ class GameplayService:
         kept = [r for r in ranks if str(r["name"]).lower() != name.lower()]
         if len(kept) == len(ranks):
             raise ValueError("Rank topilmadi.")
-        await GameplayService.save_rank_definitions(session, kept)
+        for i, r in enumerate(kept, start=1):
+            r["order"] = i
+        await SettingsService.set_value(session, "rank_definitions", kept)
         return kept
+
+    @staticmethod
+    async def update_single_rank_attr(
+        session: AsyncSession,
+        rank_name: str,
+        new_name: Optional[str] = None,
+        emoji: Optional[str] = None,
+        drop_probability: Optional[int] = None,
+        drop_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Bitta rank maydonini alohida tahrirlash (100% moslash tugmasi bilan birga)."""
+        ranks = await GameplayService.get_rank_definitions(session)
+        target = next((r for r in ranks if str(r["name"]).lower() == rank_name.lower()), None)
+        if target is None:
+            raise ValueError("Rank topilmadi.")
+        if new_name and new_name.strip():
+            clean = new_name.strip()[:32]
+            if any(r is not target and str(r["name"]).lower() == clean.lower() for r in ranks):
+                raise ValueError("Bu nomdagi rank allaqachon mavjud.")
+            target["name"] = clean
+        if emoji:
+            target["emoji"] = emoji.strip()[:8]
+        if drop_probability is not None:
+            target["drop_probability"] = max(0, min(100, int(drop_probability)))
+        if drop_limit is not None:
+            target["drop_limit"] = max(1, int(drop_limit))
+        await SettingsService.set_value(session, "rank_definitions", ranks)
+        rcfg = await SettingsService.get_rarity_config(session)
+        for r in ranks:
+            rcfg[str(r["name"])] = {
+                "value": int(r.get("base_value", 0)),
+                "drops": int(r.get("drop_limit", 1)),
+            }
+        await SettingsService.set_value(session, "rarity_config", rcfg)
+        return ranks
+
+    @staticmethod
+    async def add_rank_flexible(
+        session: AsyncSession,
+        name: str,
+        emoji: str,
+        drop_probability: int,
+        drop_limit: int,
+    ) -> List[Dict[str, Any]]:
+        ranks = await GameplayService.get_rank_definitions(session)
+        if any(str(r["name"]).lower() == name.strip().lower() for r in ranks):
+            raise ValueError("Bu nomdagi rank allaqachon mavjud.")
+        ranks.append(
+            {
+                "name": name.strip()[:32],
+                "emoji": emoji.strip()[:8] or "⭐",
+                "order": len(ranks) + 1,
+                "drop_probability": max(0, min(100, int(drop_probability))),
+                "base_value": 0,
+                "drop_limit": max(1, int(drop_limit)),
+                "rank_weight": max(1, len(ranks) * 20),
+            }
+        )
+        await SettingsService.set_value(session, "rank_definitions", ranks)
+        rcfg = await SettingsService.get_rarity_config(session)
+        rcfg[name.strip()[:32]] = {"value": 0, "drops": max(1, int(drop_limit))}
+        await SettingsService.set_value(session, "rarity_config", rcfg)
+        return ranks
+
+    @staticmethod
+    async def normalize_rank_probabilities(session: AsyncSession) -> List[Dict[str, Any]]:
+        ranks = await GameplayService.get_rank_definitions(session)
+        total = sum(max(0, int(r.get("drop_probability", 0))) for r in ranks)
+        if total <= 0:
+            each = 100 // len(ranks)
+            for r in ranks:
+                r["drop_probability"] = each
+            ranks[0]["drop_probability"] += 100 - sum(r["drop_probability"] for r in ranks)
+        elif total != 100:
+            scaled = [max(1, round(int(r.get("drop_probability", 0)) * 100 / total)) for r in ranks]
+            diff = 100 - sum(scaled)
+            scaled[0] = max(1, scaled[0] + diff)
+            for r, val in zip(ranks, scaled):
+                r["drop_probability"] = val
+        await GameplayService.save_rank_definitions(session, ranks)
+        return ranks
 
     # ------------------------------------------------------------------
     # Quiz System
@@ -136,16 +219,24 @@ class GameplayService:
         reward_xp: int = 30,
         reward_card_id: Optional[int] = None,
         max_winners: int = 1,
+        target_scope: str = "all",
+        target_group_id: Optional[int] = None,
+        scheduled_at: Optional[datetime] = None,
+        status: str = "active",
     ) -> Quiz:
         q = Quiz(
             title=title[:160],
-            is_active=True,
-            status="active",
+            is_active=(status == "active"),
+            status=status,
             reward_coins=max(0, int(reward_coins)),
             reward_xp=max(0, int(reward_xp)),
             reward_card_id=reward_card_id,
             max_winners=max(1, int(max_winners)),
             question_count=0,
+            target_scope=target_scope,
+            target_group_id=target_group_id,
+            scheduled_at=scheduled_at,
+            is_dispatched=(scheduled_at is None),
             created_by_tg_id=admin_tg_id,
         )
         session.add(q)
@@ -161,23 +252,80 @@ class GameplayService:
         correct_index: int,
         time_limit_sec: int = 30,
         image_file_id: Optional[str] = None,
+        accepted_answers: Optional[List[str]] = None,
     ) -> Optional[QuizQuestion]:
         quiz = await session.get(Quiz, quiz_id)
         if quiz is None:
             return None
         quiz.question_count = int(quiz.question_count or 0) + 1
+        ans_list = accepted_answers if accepted_answers is not None else ([options[correct_index]] if options else [])
         qq = QuizQuestion(
             quiz_id=quiz.id,
             order_num=quiz.question_count,
             question_text=question_text,
             options=options,
-            correct_index=max(0, min(len(options) - 1, int(correct_index))),
+            accepted_answers=ans_list,
+            correct_index=max(0, min(len(options) - 1, int(correct_index))) if options else 0,
             time_limit_sec=max(5, int(time_limit_sec)),
             image_file_id=image_file_id,
         )
         session.add(qq)
         await session.flush()
         return qq
+
+    @staticmethod
+    async def list_all_quizzes(session: AsyncSession, limit: int = 20) -> List[Quiz]:
+        return list((await session.execute(select(Quiz).order_by(Quiz.id.desc()).limit(limit))).scalars().all())
+
+    @staticmethod
+    async def get_quiz_with_questions(session: AsyncSession, quiz_id: int) -> Optional[Tuple[Quiz, List[QuizQuestion]]]:
+        q = await session.get(Quiz, quiz_id)
+        if q is None:
+            return None
+        qs = list(
+            (await session.execute(select(QuizQuestion).where(QuizQuestion.quiz_id == quiz_id).order_by(QuizQuestion.order_num.asc())))
+            .scalars()
+            .all()
+        )
+        return q, qs
+
+    @staticmethod
+    async def clone_quiz(
+        session: AsyncSession,
+        source_quiz_id: int,
+        admin_tg_id: int,
+        new_reward_coins: Optional[int] = None,
+        target_scope: str = "all",
+        target_group_id: Optional[int] = None,
+        scheduled_at: Optional[datetime] = None,
+    ) -> Optional[Quiz]:
+        res = await GameplayService.get_quiz_with_questions(session, source_quiz_id)
+        if res is None:
+            return None
+        src, questions = res
+        coins = int(new_reward_coins) if new_reward_coins is not None else src.reward_coins
+        status = "scheduled" if scheduled_at else "active"
+        nq = await GameplayService.create_quiz(
+            session,
+            title=src.title,
+            reward_coins=coins,
+            admin_tg_id=admin_tg_id,
+            reward_xp=src.reward_xp,
+            target_scope=target_scope,
+            target_group_id=target_group_id,
+            scheduled_at=scheduled_at,
+            status=status,
+        )
+        for qq in questions:
+            await GameplayService.add_quiz_question(
+                session,
+                nq.id,
+                qq.question_text,
+                list(qq.options or []),
+                qq.correct_index,
+                accepted_answers=list(qq.accepted_answers or []),
+            )
+        return nq
 
     @staticmethod
     async def list_active_quizzes(session: AsyncSession) -> List[Quiz]:
@@ -269,7 +417,12 @@ class GameplayService:
         return cfg
 
     @staticmethod
-    async def play_dice_game(session: AsyncSession, user: User, dice_value: Optional[int] = None) -> Tuple[bool, str, int, int]:
+    async def play_dice_game(
+        session: AsyncSession,
+        user: User,
+        dice_value: Optional[int] = None,
+        guessed_number: Optional[int] = None,
+    ) -> Tuple[bool, str, int, int]:
         """Qaytaradi: (ok, msg, roll, reward_coins)."""
         cfg = await GameplayService.get_game_config(session)
         if not cfg.get("dice_enabled", True):
@@ -294,7 +447,7 @@ class GameplayService:
         if len(today_rolls) >= limit:
             return False, f"🎲 Bugungi o‘yin limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0, 0
 
-        if today_rolls:
+        if guessed_number is None and today_rolls:
             last_dt = ensure_utc(today_rolls[0].created_at)
             diff_sec = (utcnow() - last_dt).total_seconds()
             if diff_sec < cooldown_m * 60:
@@ -302,10 +455,15 @@ class GameplayService:
                 return False, f"⏳ Keyingi o‘yin uchun {wait_m} daqiqa kuting.", 0, 0
 
         roll = int(dice_value) if dice_value and 1 <= int(dice_value) <= 6 else random.randint(1, 6)
-        base_r = int(cfg.get("dice_base_reward", 50))
         jackpot_r = int(cfg.get("dice_jackpot_reward", 300))
         reward_xp = int(cfg.get("dice_xp", 15))
-        reward_coins = jackpot_r if roll == 6 else roll * max(10, base_r // 3)
+
+        if guessed_number is not None:
+            won = int(roll) == int(guessed_number)
+            reward_coins = jackpot_r if won else 0
+        else:
+            won = roll == 6
+            reward_coins = jackpot_r if won else roll * max(10, int(cfg.get("dice_base_reward", 50)) // 3)
 
         session.add(
             GameSession(
@@ -313,23 +471,29 @@ class GameplayService:
                 game_type="dice",
                 roll_value=roll,
                 reward_coins=reward_coins,
-                reward_xp=reward_xp,
+                reward_xp=reward_xp if won else 0,
                 created_date=today,
             )
         )
-        await UserService.credit_coins(
-            session,
-            user.id,
-            reward_coins,
-            "mini_game_dice",
-            f"Dice roll: {roll}",
-            reference_id=f"dice:{user.id}:{today.isoformat()}:{len(today_rolls)+1}",
-        )
-        user.game_wins = int(user.game_wins or 0) + 1
-        user.xp = int(user.xp or 0) + reward_xp
-        user.level = max(1, 1 + (user.xp // 250))
-        await GameplayService.add_season_points(session, user.id, points=10, xp=reward_xp)
+        if reward_coins > 0:
+            await UserService.credit_coins(
+                session,
+                user.id,
+                reward_coins,
+                "mini_game_dice",
+                f"Dice roll: {roll}",
+                reference_id=f"dice:{user.id}:{today.isoformat()}:{len(today_rolls)+1}",
+            )
+            user.game_wins = int(user.game_wins or 0) + 1
+            user.xp = int(user.xp or 0) + reward_xp
+            user.level = max(1, 1 + (user.xp // 250))
+            await GameplayService.add_season_points(session, user.id, points=10, xp=reward_xp)
         await session.flush()
+
+        if guessed_number is not None:
+            if won:
+                return True, f"🎉 TO‘G‘RI TOPDINGIZ! Tosh: <b>{roll}</b>\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
+            return True, f"😔 Afsus! Siz <b>{guessed_number}</b> tanladingiz, tosh esa <b>{roll}</b> tushdi.\nBugun yana urinib ko‘ring!", roll, 0
 
         jackpot_txt = " 🎉 JACKPOT!" if roll == 6 else ""
         return True, f"🎲 Tosh: <b>{roll}</b>{jackpot_txt}\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
@@ -471,25 +635,119 @@ class GameplayService:
         )
         count = 0
         for s in expired:
-            s.status = "ended"
-            s.finalized = True
-            top = await GameplayService.get_season_leaderboard(session, s.id, limit=3)
-            rcfg = s.rewards_config or {}
-            prizes = [int(rcfg.get("top1_coins", 10000)), int(rcfg.get("top2_coins", 5000)), int(rcfg.get("top3_coins", 2500))]
-            for idx, (sp, u) in enumerate(top):
-                if not sp.reward_claimed and idx < len(prizes) and prizes[idx] > 0:
-                    sp.reward_claimed = True
-                    await UserService.credit_coins(
-                        session,
-                        u.id,
-                        prizes[idx],
-                        "season_reward",
-                        f"Season #{s.season_number} Top {idx+1}",
-                        reference_id=f"season:{s.id}:top:{idx+1}",
-                    )
+            await GameplayService._finalize_season_obj(session, s)
             count += 1
         await session.flush()
         return count
+
+    @staticmethod
+    async def _finalize_season_obj(session: AsyncSession, s: Season) -> None:
+        s.status = "ended"
+        s.finalized = True
+        top = await GameplayService.get_season_leaderboard(session, s.id, limit=3)
+        rcfg = s.rewards_config or {}
+        prizes = [int(rcfg.get("top1_coins", 10000)), int(rcfg.get("top2_coins", 5000)), int(rcfg.get("top3_coins", 2500))]
+        for idx, (sp, u) in enumerate(top):
+            if not sp.reward_claimed and idx < len(prizes) and prizes[idx] > 0:
+                sp.reward_claimed = True
+                await UserService.credit_coins(
+                    session,
+                    u.id,
+                    prizes[idx],
+                    "season_reward",
+                    f"Season #{s.season_number} Top {idx+1}",
+                    reference_id=f"season:{s.id}:top:{idx+1}",
+                )
+
+    @staticmethod
+    async def extend_active_season(session: AsyncSession, extra_days: int) -> Optional[Season]:
+        s = await GameplayService.get_active_season(session)
+        if s is None:
+            return None
+        s.ends_at = ensure_utc(s.ends_at) + timedelta(days=max(1, int(extra_days)))
+        await session.flush()
+        return s
+
+    @staticmethod
+    async def end_active_season_now(session: AsyncSession) -> Optional[Season]:
+        s = await GameplayService.get_active_season(session)
+        if s is None:
+            return None
+        await GameplayService._finalize_season_obj(session, s)
+        await session.flush()
+        return s
+
+    @staticmethod
+    async def get_due_scheduled_quizzes(session: AsyncSession) -> List[Quiz]:
+        now = utcnow()
+        return list(
+            (
+                await session.execute(
+                    select(Quiz).where(
+                        Quiz.status == "scheduled",
+                        Quiz.is_dispatched.is_(False),
+                        Quiz.scheduled_at.is_not(None),
+                        Quiz.scheduled_at <= now,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    @staticmethod
+    async def submit_quiz_text_answer(
+        session: AsyncSession, quiz_id: int, question_id: int, user: User, answer_text: str
+    ) -> Tuple[bool, bool, str]:
+        """Ochiq javobli viktorina savolini tekshiradi: (accepted, is_correct, msg)."""
+        quiz = await session.get(Quiz, quiz_id)
+        qq = await session.get(QuizQuestion, question_id)
+        if quiz is None or qq is None or qq.quiz_id != quiz.id:
+            return False, False, "Quiz savoli topilmadi."
+        if not quiz.is_active or quiz.status != "active":
+            return False, False, "Bu quiz yakunlangan."
+        guess = " ".join((answer_text or "").lower().split())
+        if not guess:
+            return False, False, ""
+        accepted_list = [" ".join(str(a).lower().split()) for a in (qq.accepted_answers or []) if str(a).strip()]
+        if not accepted_list and qq.options and 0 <= qq.correct_index < len(qq.options):
+            accepted_list = [" ".join(str(qq.options[qq.correct_index]).lower().split())]
+        if guess not in accepted_list:
+            return False, False, ""
+
+        try:
+            async with session.begin_nested():
+                session.add(
+                    QuizAttempt(
+                        quiz_id=quiz.id,
+                        question_id=qq.id,
+                        user_id=user.id,
+                        selected_index=0,
+                        is_correct=True,
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            return False, False, "Siz bu savolga allaqachon javob bergansiz!"
+
+        user.quiz_wins = int(user.quiz_wins or 0) + 1
+        user.xp = int(user.xp or 0) + quiz.reward_xp
+        user.level = max(1, 1 + (user.xp // 250))
+        msg = f"🎉 <b>{user.display_name}</b> to‘g‘ri javob topdi! (+{quiz.reward_xp} XP"
+        if quiz.reward_coins > 0:
+            await UserService.credit_coins(
+                session,
+                user.id,
+                quiz.reward_coins,
+                "quiz_reward",
+                f"Quiz #{quiz.id}",
+                reference_id=f"quiz:{quiz.id}:q:{qq.id}:u:{user.id}",
+            )
+            msg += f" · +{quiz.reward_coins:,} 🪙"
+        msg += ")"
+        await GameplayService.add_season_points(session, user.id, points=15, xp=quiz.reward_xp, quiz_win=True)
+        await session.flush()
+        return True, True, msg
 
     # ------------------------------------------------------------------
     # Achievements & Profile Customization
