@@ -11,13 +11,17 @@ from sqlalchemy import delete, select, update
 from app.event_announcer import finalize_ended_events
 from config.settings import get_settings
 from database.session import get_session
-from keyboards.main_menu import drop_claim_kb
 from models.base import ensure_utc, utcnow
 from models.group import Group
 from models.schedule import ActiveDrop, DropSchedule
+from models.user import User
+from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
+from services.community_service import CommunityService
 from services.drop_service import DropService
+from services.gameplay_service import GameplayService
 from services.offer_service import OfferService
+from services.security_backup_service import SecurityBackupService
 from services.settings_service import SettingsService
 from services.transfer_service import TransferService
 from utils.formatting import esc, format_drop_message
@@ -232,10 +236,10 @@ async def _dispatch_slot(bot: Bot, schedule_id: int) -> None:
 
     caption = format_drop_message(card, active_event=active_event)
     try:
-        msg = await send_card_message(bot, chat_id, card, caption, drop_claim_kb(drop.id))
+        msg = await send_card_message(bot, chat_id, card, caption, reply_markup=None)
     except TelegramRetryAfter as exc:
         await asyncio.sleep(float(exc.retry_after) + 0.5)
-        msg = await send_card_message(bot, chat_id, card, caption, drop_claim_kb(drop.id))
+        msg = await send_card_message(bot, chat_id, card, caption, reply_markup=None)
     except (TelegramForbiddenError, TelegramBadRequest) as send_exc:
         logger.warning("Cannot send drop to chat %s (%s). Deactivating group.", chat_id, send_exc)
         async with get_session() as s_fail:
@@ -255,6 +259,65 @@ async def _dispatch_slot(bot: Bot, schedule_id: int) -> None:
     logger.info("Dropped card %s (%s) to group %s", card.card_code, card.character_name, chat_id)
 
 
+async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
+    # 1. Auktsion, Season va Temp Ban yakunlash (~1 daqiqada bir)
+    if tick % 2 == 0:
+        async with get_session() as session:
+            finalized_auc = await AuctionWishlistService.finalize_expired_auctions(session)
+            finalized_seasons = await GameplayService.finalize_expired_seasons(session)
+            expired_bans = await SecurityBackupService.expire_temp_bans(session)
+            due_msgs = await CommunityService.get_due_scheduled_messages(session)
+            if finalized_auc or finalized_seasons or expired_bans or due_msgs:
+                await session.commit()
+
+        # Rejalashtirilgan xabarlarni yuborish
+        for sm in due_msgs:
+            sent_cnt = 0
+            async with get_session() as s_msg:
+                targets: List[int] = []
+                if sm.target_type in ("users", "all"):
+                    u_ids = (await s_msg.execute(select(User.telegram_id).where(User.is_banned.is_(False)))).scalars().all()
+                    targets.extend(int(x) for x in u_ids)
+                if sm.target_type in ("groups", "all"):
+                    g_ids = (
+                        await s_msg.execute(
+                            select(Group.telegram_chat_id).where(Group.is_active.is_(True), Group.is_banned.is_(False))
+                        )
+                    ).scalars().all()
+                    targets.extend(int(x) for x in g_ids)
+            sem = asyncio.Semaphore(SEND_CONCURRENCY)
+
+            async def _send_one(cid: int) -> None:
+                nonlocal sent_cnt
+                async with sem:
+                    try:
+                        await bot.send_message(cid, sm.text)
+                        sent_cnt += 1
+                    except TelegramRetryAfter as exc:
+                        await asyncio.sleep(float(exc.retry_after) + 0.5)
+                    except Exception:
+                        pass
+
+            if targets:
+                await asyncio.gather(*[_send_one(c) for c in targets])
+
+            async with get_session() as s_done:
+                from models.v2_features import ScheduledMessage
+
+                row = await s_done.get(ScheduledMessage, sm.id)
+                if row is not None:
+                    row.status = "sent"
+                    row.sent_count = sent_cnt
+                    await s_done.commit()
+
+    # 2. Avtomatik kunlik backup + eski backuplarni tozalash (~24 soatda bir: 2880 tick * 30s)
+    if tick > 0 and tick % 2880 == 120:
+        async with get_session() as s_bak:
+            await SecurityBackupService.create_full_backup_zip(s_bak, backup_type="auto")
+            await SecurityBackupService.cleanup_old_backups(s_bak, retention_days=14)
+            await s_bak.commit()
+
+
 # ---------------------------------------------------------------------------
 # Asosiy sikl
 # ---------------------------------------------------------------------------
@@ -267,6 +330,7 @@ async def run_scheduler_loop(bot: Bot, stop_event: asyncio.Event) -> None:
             await _process_due_drops(bot)
             if tick % 2 == 0:
                 await finalize_ended_events(bot)
+            await _process_v2_periodic_jobs(bot, tick)
             # Muddati o'tgan takliflar/transferlar ~5 daqiqada bir (10 tick * 30s)
             if tick % 10 == 0:
                 async with get_session() as session:

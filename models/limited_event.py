@@ -28,6 +28,8 @@ class LimitedEvent(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # active|sold_out|ended|cancelled
     created_by_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     finalized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reward_coins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    target_scope: Mapped[str] = mapped_column(String(24), nullable=False, default="all")
 
     @property
     def remaining(self) -> int:

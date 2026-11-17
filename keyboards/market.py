@@ -9,7 +9,7 @@ from models.market import Offer
 from models.user import User
 from services.market_service import ListingView
 from services.search_service import GlobalCardSearchItem
-from utils.callback_data import MarketCb, NavCb, OfferCb, RankingCb, SearchCb, StarsCb, TransferCb
+from utils.callback_data import MarketCb, NavCb, OfferCb, RankingCb, SearchCb, StarsCb, TransferCb, WishCb
 from utils.constants import get_rarity_meta, list_rarities
 
 
@@ -333,6 +333,12 @@ def search_inspect_kb(
         )
     builder.row(
         InlineKeyboardButton(
+            text="💖 WISHLIST",
+            callback_data=WishCb(owner_id=owner_id, act="add", cid=item.card.id).pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="⬅️ ORQAGA",
             callback_data=SearchCb(
                 owner_id=owner_id,
@@ -442,9 +448,17 @@ def search_catalog_inspect_kb(
     mode: str,
     query: str,
     page: int,
+    card_id: int = 0,
 ) -> InlineKeyboardMarkup:
     q_short = _cb_q(query)
     builder = InlineKeyboardBuilder()
+    if card_id > 0:
+        builder.row(
+            InlineKeyboardButton(
+                text="💖 WISHLISTGA QO‘SHISH",
+                callback_data=WishCb(owner_id=owner_id, act="add", cid=card_id).pack(),
+            )
+        )
     builder.row(
         InlineKeyboardButton(
             text="⬅️ ORQAGA",
@@ -521,27 +535,62 @@ def transfer_confirm_kb(actor_telegram_id: int, transfer_id: int) -> InlineKeybo
     return builder.as_markup()
 
 
-def ranking_kb(owner_id: int, current_scope: str, in_group: bool) -> InlineKeyboardMarkup:
+def ranking_kb(
+    owner_id: int,
+    current_scope: str,
+    in_group: bool,
+    period: str = "all",
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     buttons = [
         InlineKeyboardButton(
-            text=("• 🌍 GLOBAL TOP 10 •" if current_scope == "global" else "🌍 GLOBAL TOP 10"),
-            callback_data=RankingCb(owner_id=owner_id, scope="global").pack(),
+            text=("• 🌍 GLOBAL •" if current_scope == "global" else "🌍 GLOBAL"),
+            callback_data=RankingCb(owner_id=owner_id, scope="global", period=period).pack(),
         )
     ]
     if in_group:
         buttons.append(
             InlineKeyboardButton(
-                text=("• 🏆 GROUP TOP 10 •" if current_scope == "group" else "🏆 GROUP TOP 10"),
-                callback_data=RankingCb(owner_id=owner_id, scope="group").pack(),
+                text=("• 🏆 GROUP •" if current_scope == "group" else "🏆 GROUP"),
+                callback_data=RankingCb(owner_id=owner_id, scope="group", period=period).pack(),
             )
         )
-    builder.row(*buttons)
-    builder.row(
+    buttons.append(
         InlineKeyboardButton(
-            text=("• 🏰 GURUHLAR TOP 10 •" if current_scope == "groups" else "🏰 GURUHLAR TOP 10"),
-            callback_data=RankingCb(owner_id=owner_id, scope="groups").pack(),
+            text=("• 🏰 GURUHLAR •" if current_scope == "groups" else "🏰 GURUHLAR"),
+            callback_data=RankingCb(owner_id=owner_id, scope="groups", period=period).pack(),
         )
+    )
+    builder.row(*buttons)
+    extra_scopes = [
+        ("coins", "🪙 Coins"),
+        ("xp", "⚡ XP"),
+        ("quiz", "🧠 Quiz"),
+        ("games", "🎲 Games"),
+        ("trades", "🤝 Trade"),
+        ("refs", "📣 Referal"),
+        ("rare", "💎 Rare+"),
+        ("mythic", "🔴 Mythic"),
+        ("divine", "✨ Divine"),
+    ]
+    for i in range(0, len(extra_scopes), 3):
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if current_scope == k else "") + lbl,
+                    callback_data=RankingCb(owner_id=owner_id, scope=k, period=period).pack(),
+                )
+                for k, lbl in extra_scopes[i : i + 3]
+            ]
+        )
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=("✅ " if period == p else "") + lbl,
+                callback_data=RankingCb(owner_id=owner_id, scope=current_scope, period=p).pack(),
+            )
+            for p, lbl in (("all", "Barcha vaqt"), ("monthly", "Oylik"), ("weekly", "Haftalik"))
+        ]
     )
     builder.row(
         InlineKeyboardButton(

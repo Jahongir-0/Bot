@@ -25,3 +25,6 @@ class UserCard(Base, TimestampMixin):
     )
     is_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    serial_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    is_showcased: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    card_state: Mapped[str] = mapped_column(String(24), nullable=False, default="OWNED")

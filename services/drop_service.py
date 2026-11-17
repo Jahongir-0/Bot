@@ -260,14 +260,48 @@ class DropService:
         return sched
 
     @staticmethod
+    def normalize_guess(text: str) -> str:
+        import re
+        cleaned = re.sub(r"[^\w\s]", " ", (text or "").casefold())
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @staticmethod
+    def matches_character_guess(card: Card, guess_text: str) -> bool:
+        norm_guess = DropService.normalize_guess(guess_text)
+        if not norm_guess or len(norm_guess) < 2:
+            return False
+        candidates = [card.character_name] + list(getattr(card, "aliases", None) or [])
+        compact_guess = norm_guess.replace(" ", "")
+        for cand in candidates:
+            norm_cand = DropService.normalize_guess(str(cand))
+            if not norm_cand:
+                continue
+            if norm_guess == norm_cand or compact_guess == norm_cand.replace(" ", ""):
+                return True
+        return False
+
+    @staticmethod
+    async def get_recent_unclaimed_drops(
+        session: AsyncSession, telegram_chat_id: int, limit: int = 10
+    ) -> List[Tuple[ActiveDrop, Card]]:
+        rows = (
+            await session.execute(
+                select(ActiveDrop, Card)
+                .join(Card, Card.id == ActiveDrop.card_id)
+                .where(
+                    ActiveDrop.telegram_chat_id == telegram_chat_id,
+                    ActiveDrop.is_claimed.is_(False),
+                )
+                .order_by(ActiveDrop.id.desc())
+                .limit(limit)
+            )
+        ).all()
+        return [(r[0], r[1]) for r in rows]
+
+    @staticmethod
     async def calculate_drop_reward(session: AsyncSession, card: Card, group: Group) -> int:
-        rewards = await SettingsService.get_rarity_rewards(session)
-        base_reward = int(rewards.get(card.rarity, 20))
-        multiplier = float(group.coin_multiplier or 1.0)
-        active_event = await CardService.get_active_event(session)
-        if active_event is not None:
-            multiplier *= float(active_event.coin_multiplier or 1.0)
-        return max(1, int(round(base_reward * multiplier)))
+        # V2 qoidasi: drop orqali karta olganda coin berilmaydi
+        return 0
 
     @staticmethod
     async def create_active_drop(
@@ -277,10 +311,6 @@ class DropService:
         schedule_id: Optional[int] = None,
         force: bool = False,
     ) -> Optional[ActiveDrop]:
-        """
-        Drop yaratadi va kartaning `dropped_count` ini atomik oshiradi.
-        force=False bo'lsa limit (drop_limit) tugagan kartani tashlamaydi (parallel guruhlar uchun poyga himoyasi).
-        """
         conds = [Card.id == card.id]
         if not force:
             conds.append(Card.dropped_count < Card.drop_limit)
@@ -310,15 +340,6 @@ class DropService:
         group: Group,
         preferred_card_id: Optional[int] = None,
     ) -> Tuple[Optional[Card], bool]:
-        """
-        (karta, majburiy) qaytaradi: admin tanlagan (priority/slot) kartalar limitdan qat'i nazar tashlanadi.
-
-        Guruh uchun karta tanlash tartibi:
-          1) admin "keyingi drop" (priority) kartasi,
-          2) jadvaldagi admin belgilagan karta,
-          3) tasodifiy: limiti tugamagan, event bo'lmagan, shu guruhga yaqinda tushmagan va
-             boshqa guruhlarga ham ketma-ket tushmagan kartalar orasidan (vaznli).
-        """
         priority_id = await SettingsService.get_next_priority_card_id(session)
         if priority_id is not None:
             await SettingsService.set_next_priority_card_id(session, None)
@@ -365,7 +386,7 @@ class DropService:
         )
         tiers = [
             and_(base, Card.id.not_in(same_group_recent), Card.id.not_in(any_group_recent)),
-            and_(base, Card.id.not_in(same_group_day)),  # bo'shashtirilgan: faqat shu guruhga 24 soat ichida emas
+            and_(base, Card.id.not_in(same_group_day)),
         ]
 
         active_event = await CardService.get_active_event(session)
@@ -392,12 +413,6 @@ class DropService:
         drop_id: int,
         claimer_user_id: int,
     ) -> ClaimResult:
-        """
-        Poyga holatidan xoli atomik claim:
-        1. Har bir drop uchun taqsimlangan lock.
-        2. Shartli SQL UPDATE faqat BITTA foydalanuvchiga yutuq beradi.
-        3. Bir user bir xil kartadan faqat bitta nusxa olishi mumkin (bor bo'lsa 'already_owned').
-        """
         lock_mgr = get_lock_manager()
         async with lock_mgr.lock(f"drop_claim:{drop_id}", ttl_ms=5000) as acquired:
             if not acquired:
@@ -414,7 +429,6 @@ class DropService:
             if card is None or winner is None:
                 return ClaimResult(success=False, reason="not_found")
 
-            # Drop qolib ketadi (claimed bo'lmaydi), boshqalar ola oladi
             if await UserService.owns_card(session, winner.id, card.id):
                 return ClaimResult(success=False, reason="already_owned", card=card)
 
@@ -433,34 +447,46 @@ class DropService:
                 return ClaimResult(success=False, reason="already_claimed")
 
             try:
-                session.add(
-                    UserCard(
-                        user_id=winner.id,
-                        card_id=card.id,
-                        acquired_via="drop",
-                        acquired_group_id=drop.group_id,
-                    )
+                uc = UserCard(
+                    user_id=winner.id,
+                    card_id=card.id,
+                    acquired_via="drop",
+                    acquired_group_id=drop.group_id,
+                    card_state="OWNED",
                 )
+                session.add(uc)
                 await session.flush()
+                uc.serial_number = 10000 + uc.id
             except IntegrityError:
-                # Parallel ikki guruhdagi shu kartani bir vaqtda bosgan holat: DB UNIQUE indeksi ushladi
                 await session.rollback()
                 return ClaimResult(success=False, reason="already_owned", card=card)
 
-            await UserService.credit_coins(
-                session=session,
-                user_id=winner.id,
-                amount=drop.reward_coins,
-                tx_type="card_drop_reward",
-                description=f"Card drop claimed: {card.character_name}",
-                reference_id=f"drop:{drop.id}",
-            )
+            if int(drop.reward_coins or 0) > 0:
+                await UserService.credit_coins(
+                    session=session,
+                    user_id=winner.id,
+                    amount=drop.reward_coins,
+                    tx_type="card_drop_reward",
+                    description=f"Card drop claimed: {card.character_name}",
+                    reference_id=f"drop:{drop.id}",
+                )
 
             stats = dict(winner.stats or {})
             stats["claims"] = int(stats.get("claims", 0)) + 1
             winner.stats = stats
 
-            await UserService.recompute_card_counts(session, winner.id, add_xp=25)
+            await UserService.recompute_card_counts(session, winner.id, add_xp=20)
+
+            from services.auction_wishlist_service import AuctionWishlistService
+            from services.gameplay_service import GameplayService
+            from services.security_backup_service import SecurityBackupService
+
+            await AuctionWishlistService.record_history(
+                session, card.id, "claimed", uc.id, to_user_id=winner.id, group_id=drop.group_id
+            )
+            await GameplayService.add_season_points(session, winner.id, points=10, xp=20, card_claimed=True)
+            await GameplayService.sync_user_achievements(session, winner)
+            await SecurityBackupService.check_claim_speed(session, winner, drop.created_at, drop.group_id)
             await session.flush()
 
             return ClaimResult(
@@ -471,3 +497,4 @@ class DropService:
                 reward_coins=drop.reward_coins,
                 drop=drop,
             )
+

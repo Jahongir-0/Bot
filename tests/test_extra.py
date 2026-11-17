@@ -201,3 +201,159 @@ async def test_ranking_sql_matches_modes(db_session):
         g_rank, _ = await RankingService.get_user_ranks(db_session, a.id)
         b_rank, _ = await RankingService.get_user_ranks(db_session, b.id)
         assert g_rank == 1 and b_rank == 2
+
+
+# ---------------------------------------------------------------- V2 Features Tests
+@pytest.mark.asyncio
+async def test_v2_rbac_permissions_and_revocation(db_session):
+    from services.community_service import CommunityService
+
+    await CommunityService.upsert_admin_role(
+        db_session, 555001, "Moderator", ["cards", "support"], added_by_tg_id=999999, is_super=False
+    )
+    is_adm, perms = await CommunityService.get_admin_permissions(db_session, 555001)
+    assert is_adm is True
+    assert perms == {"cards", "support"}
+    assert await CommunityService.has_section_access(db_session, 555001, "cards") is True
+    assert await CommunityService.has_section_access(db_session, 555001, "security") is False
+
+    assert await CommunityService.remove_admin_role(db_session, 555001) is True
+    is_adm2, perms2 = await CommunityService.get_admin_permissions(db_session, 555001)
+    assert is_adm2 is False and perms2 == set()
+
+
+@pytest.mark.asyncio
+async def test_v2_zip_import_zipslip_protection_and_duplicates(db_session):
+    import io
+    import json
+    import zipfile
+    from services.security_backup_service import SecurityBackupService
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("../../etc/passwd", "bad")
+        zf.writestr("cards/hero.jpg", b"\xff\xd8\xff\xe0TESTJPG")
+        manifest = [
+            {"character_name": "V2 Test Hero", "anime_name": "V2 Anime", "rarity": "Epic", "image": "hero.jpg"},
+            {"character_name": "V2 Test Hero", "anime_name": "V2 Anime", "rarity": "Epic", "image": "hero.jpg"},
+        ]
+        zf.writestr("cards.json", json.dumps(manifest))
+
+    rep = await SecurityBackupService.import_cards_from_zip(db_session, buf.getvalue(), admin_tg_id=999999)
+    assert rep.added == 1
+    assert rep.duplicates == 1
+    assert rep.failed >= 1  # ZipSlip entry rejected
+
+
+@pytest.mark.asyncio
+async def test_v2_dynamic_ranks_must_sum_to_100(db_session):
+    from services.gameplay_service import GameplayService
+
+    with pytest.raises(ValueError):
+        await GameplayService.save_rank_definitions(
+            db_session,
+            [{"name": "Common", "emoji": "⚪", "chance": 50.0, "value": 1000, "drops": 3}],
+        )
+
+    await GameplayService.save_rank_definitions(
+        db_session,
+        [
+            {"name": "Common", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
+            {"name": "Rare", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
+        ],
+    )
+    ranks = await GameplayService.get_rank_definitions(db_session)
+    assert len(ranks) == 2 and sum(r["chance"] for r in ranks) == 100.0
+
+
+@pytest.mark.asyncio
+async def test_v2_auction_bid_outbid_refund_and_finalize(db_session):
+    from models.v2_features import Auction
+    from services.auction_wishlist_service import AuctionWishlistService
+
+    b1 = await UserService.upsert_user(db_session, 9501, "bid1", "Bid1")
+    b2 = await UserService.upsert_user(db_session, 9502, "bid2", "Bid2")
+    await UserService.credit_coins(db_session, b1.id, 5000, "test", "seed")
+    await UserService.credit_coins(db_session, b2.id, 5000, "test", "seed")
+
+    card = await CardService.create_card(db_session, "Auc Hero", "Auc Anime", "https://x/auc.png", "Epic", 5000)
+    ok, _, auc = await AuctionWishlistService.create_auction(
+        db_session, card.id, start_price=1000, hours=2, created_by_tg_id=999999, min_step=100
+    )
+    assert ok and auc is not None
+
+    ok1, _ = await AuctionWishlistService.place_bid(db_session, auc.id, b1, 1000)
+    assert ok1
+    await db_session.refresh(b1)
+    assert b1.coins == 4100 and b1.locked_coins == 1000
+
+    ok2, _ = await AuctionWishlistService.place_bid(db_session, auc.id, b2, 1500)
+    assert ok2
+    await db_session.refresh(b1)
+    await db_session.refresh(b2)
+    assert b1.coins == 5100 and b1.locked_coins == 0  # outbid refund
+    assert b2.coins == 3600 and b2.locked_coins == 1500
+
+    row = await db_session.get(Auction, auc.id)
+    row.ends_at = utcnow() - timedelta(minutes=1)
+    await db_session.flush()
+    assert await AuctionWishlistService.finalize_expired_auctions(db_session) == 1
+    await db_session.refresh(b2)
+    assert b2.locked_coins == 0
+    assert await UserService.owns_card(db_session, b2.id, card.id)
+
+
+@pytest.mark.asyncio
+async def test_v2_wishlist_and_two_sided_card_trade(db_session):
+    from services.auction_wishlist_service import AuctionWishlistService
+    from services.community_service import CommunityService
+
+    u1 = await UserService.upsert_user(db_session, 9601, "tr1", "Tr1")
+    u2 = await UserService.upsert_user(db_session, 9602, "tr2", "Tr2")
+    cards = (await db_session.execute(select(Card).order_by(Card.id).limit(2))).scalars().all()
+    c1, c2 = cards[0], cards[1]
+
+    added, _ = await AuctionWishlistService.toggle_wishlist(db_session, u1.id, c2.id)
+    assert added is True
+    await AuctionWishlistService.notify_wishlist_watchers(db_session, c2.id, "drop", "Dropped!")
+    assert await CommunityService.unread_count(db_session, u1.id) >= 1
+
+    (uc1,) = await _give(db_session, u1.id, c1.id)
+    (uc2,) = await _give(db_session, u2.id, c2.id)
+    ok_t, _, tr = await AuctionWishlistService.create_trade(db_session, u1.id, u2.id, uc1)
+    assert ok_t and tr is not None
+
+    ok_c, _ = await AuctionWishlistService.confirm_trade(db_session, tr.id, u2.id, uc2)
+    assert ok_c
+    assert await UserService.owns_card(db_session, u1.id, c2.id)
+    assert await UserService.owns_card(db_session, u2.id, c1.id)
+
+
+@pytest.mark.asyncio
+async def test_v2_reply_drop_name_matching_and_temp_ban_expiry(db_session):
+    from services.drop_service import DropService
+    from services.security_backup_service import SecurityBackupService
+
+    card = await CardService.create_card(
+        db_session, "Killua Zoldyck", "Hunter x Hunter", "https://x/kil.png", "Epic", 5000
+    )
+    card.aliases = ["Killua", "Godspeed"]
+    await db_session.flush()
+
+    assert DropService.matches_character_guess(card, "killua") is True
+    assert DropService.matches_character_guess(card, "Killua Zoldyck") is True
+    assert DropService.matches_character_guess(card, "godspeed") is True
+    assert DropService.matches_character_guess(card, "naruto") is False
+
+    bad = await UserService.upsert_user(db_session, 9701, "tmpban", "Tmp")
+    await SecurityBackupService.ban_user(db_session, 999999, bad, "Spam", hours=1)
+    assert bad.is_banned is True
+    bad.ban_until = utcnow() - timedelta(minutes=1)
+    await db_session.flush()
+    assert await SecurityBackupService.expire_temp_bans(db_session) >= 1
+    await db_session.refresh(bad)
+    assert bad.is_banned is False
+
+    bak = await SecurityBackupService.create_full_backup_zip(db_session, "manual", 999999)
+    assert bak.file_size_bytes > 0
+

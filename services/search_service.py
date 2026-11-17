@@ -1,7 +1,8 @@
+import difflib
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.card import Card
@@ -60,19 +61,19 @@ class SearchService:
         mode: str,
         query: str = "",
         page: int = 1,
-        page_size: int = 5,
+        page_size: int = 20,
     ) -> Tuple[List[GlobalCardSearchItem], int]:
         stmt = (
             select(UserCard, Card, User)
             .join(Card, Card.id == UserCard.card_id)
             .join(User, User.id == UserCard.user_id)
-            .where(User.is_banned.is_(False))
+            .where(User.is_banned.is_(False), Card.is_deleted.is_(False))
         )
         count_stmt = (
             select(func.count(UserCard.id))
             .join(Card, Card.id == UserCard.card_id)
             .join(User, User.id == UserCard.user_id)
-            .where(User.is_banned.is_(False))
+            .where(User.is_banned.is_(False), Card.is_deleted.is_(False))
         )
 
         stmt, count_stmt = _apply_card_filters(stmt, count_stmt, mode, query, include_user_card_id=True)
@@ -119,26 +120,56 @@ class SearchService:
         mode: str,
         query: str = "",
         page: int = 1,
-        page_size: int = 5,
+        page_size: int = 20,
+        media_type: Optional[str] = None,
+        sort_by: str = "value_desc",
+        include_unreleased: bool = False,
     ) -> Tuple[List[Card], int]:
-        stmt = select(Card).where(Card.is_deleted.is_(False))
-        count_stmt = select(func.count(Card.id)).where(Card.is_deleted.is_(False))
+        """Foydalanuvchilar uchun katalog qidiruvi (unreleased kartalarni yashiradi, typo va aliaslarni qo'llab-quvvatlaydi)."""
+        has_owner = exists().where(UserCard.card_id == Card.id)
+        base_conds = [Card.is_deleted.is_(False)]
+        if not include_unreleased:
+            base_conds.append((Card.dropped_count > 0) | Card.is_event_card.is_(True) | has_owner)
+        if media_type and media_type != "all":
+            if media_type == "Manga":
+                base_conds.append(Card.media_type.in_(["Manga", "Manhwa", "Manhua"]))
+            else:
+                base_conds.append(Card.media_type == media_type)
+
+        stmt = select(Card).where(*base_conds)
+        count_stmt = select(func.count(Card.id)).where(*base_conds)
 
         stmt, count_stmt = _apply_card_filters(stmt, count_stmt, mode, query, include_user_card_id=False)
 
         total = int((await session.execute(count_stmt)).scalar_one() or 0)
+        if total == 0 and query.strip() and mode in ("character", "any"):
+            # Alias va yozuv xatosiga chidamli qidiruv
+            all_released = list((await session.execute(select(Card).where(*base_conds))).scalars().all())
+            q_low = query.strip().lower()
+            matched: List[Card] = []
+            for c in all_released:
+                aliases = [str(a).lower() for a in (getattr(c, "aliases", None) or [])]
+                if any(q_low in a for a in aliases):
+                    matched.append(c)
+            if not matched:
+                names = [c.character_name for c in all_released]
+                close = set(difflib.get_close_matches(query.strip(), names, n=10, cutoff=0.55))
+                matched = [c for c in all_released if c.character_name in close]
+            total = len(matched)
+            offset = (max(1, page) - 1) * page_size
+            return matched[offset : offset + page_size], total
+
         if mode == "random":
             cards = list((await session.execute(stmt.order_by(func.random()).limit(page_size))).scalars().all())
         else:
+            order_col = (
+                Card.character_name.asc()
+                if sort_by == "alpha"
+                else (Card.id.desc() if sort_by == "newest" else Card.base_value.desc())
+            )
             offset = (max(1, page) - 1) * page_size
             cards = list(
-                (
-                    await session.execute(
-                        stmt.order_by(Card.base_value.desc(), Card.id.asc())
-                        .offset(offset)
-                        .limit(page_size)
-                    )
-                )
+                (await session.execute(stmt.order_by(order_col, Card.id.asc()).offset(offset).limit(page_size)))
                 .scalars()
                 .all()
             )
@@ -180,4 +211,3 @@ class SearchService:
         if card is None or card.is_deleted:
             return None
         return card
-

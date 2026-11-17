@@ -5,11 +5,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.types import ErrorEvent
 
 from config.settings import Settings
 from database.redis_client import LockManager
 from handlers import register_all_routers
 from middlewares import CallbackSecurityMiddleware, GlobalAuthAndBanMiddleware
+from utils.tg_helpers import send_error_alert_to_super_admins
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,33 @@ def create_dispatcher(lock_manager: LockManager) -> Dispatcher:
     dp.callback_query.outer_middleware(auth_mw)
     dp.pre_checkout_query.outer_middleware(auth_mw)
     dp.callback_query.middleware(cb_guard)
+
+    @dp.errors()
+    async def _global_error_handler(event: ErrorEvent) -> bool:
+        logger.exception("Unhandled update error: %s", event.exception)
+        upd = event.update
+        tg_user = None
+        chat_id = None
+        action = None
+        if upd.message:
+            tg_user = upd.message.from_user
+            chat_id = upd.message.chat.id
+            action = (upd.message.text or "")[:80]
+        elif upd.callback_query:
+            tg_user = upd.callback_query.from_user
+            chat_id = upd.callback_query.message.chat.id if upd.callback_query.message else None
+            action = upd.callback_query.data
+        bot = event.update.bot
+        if bot is not None:
+            await send_error_alert_to_super_admins(
+                bot,
+                module_name="dispatcher",
+                exc=event.exception,
+                user_tg_id=tg_user.id if tg_user else None,
+                chat_id=chat_id,
+                action=action,
+            )
+        return True
 
     register_all_routers(dp)
     return dp

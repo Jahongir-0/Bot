@@ -531,3 +531,97 @@ class AdminService:
         ).all()
         return list(rows)
 
+    @staticmethod
+    async def get_v2_cards_by_tab(
+        session: AsyncSession,
+        tab: str = "all",
+        query: str = "",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[List[Card], int]:
+        from models.schedule import ActiveDrop
+
+        if tab == "deleted":
+            conds = [Card.is_deleted.is_(True)]
+        else:
+            conds = [Card.is_deleted.is_(False)]
+
+        if tab == "sent_group":
+            conds.append(Card.dropped_count > 0)
+        elif tab == "not_sent":
+            conds.append(Card.dropped_count == 0)
+            conds.append(Card.is_event_card.is_(False))
+        elif tab == "anime":
+            conds.append(Card.media_type == "Anime")
+        elif tab == "manga":
+            conds.append(Card.media_type.in_(["Manga", "Manhwa", "Manhua"]))
+        elif tab == "movie":
+            conds.append(Card.media_type.in_(["Movie", "TV Series"]))
+        elif tab == "cartoon":
+            conds.append(Card.media_type.in_(["Cartoon", "Comic"]))
+        elif tab == "event":
+            conds.append(Card.is_event_card.is_(True))
+        elif tab == "limited":
+            conds.append(Card.limited_copies.is_not(None))
+        elif tab == "other":
+            conds.append(Card.media_type == "Other")
+
+        if query.strip():
+            q = query.strip()
+            if q.isdigit():
+                conds.append(Card.id == int(q))
+            else:
+                pat = f"%{q}%"
+                conds.append(
+                    Card.character_name.ilike(pat) | Card.anime_name.ilike(pat) | Card.card_code.ilike(pat)
+                )
+
+        total = int((await session.execute(select(func.count(Card.id)).where(*conds))).scalar_one() or 0)
+        offset = (max(1, page) - 1) * page_size
+        if tab == "sent_group":
+            last_drop_sq = (
+                select(ActiveDrop.card_id.label("cid"), func.max(ActiveDrop.created_at).label("last_dt"))
+                .group_by(ActiveDrop.card_id)
+                .subquery()
+            )
+            stmt = (
+                select(Card)
+                .outerjoin(last_drop_sq, last_drop_sq.c.cid == Card.id)
+                .where(*conds)
+                .order_by(last_drop_sq.c.last_dt.desc().nullslast(), Card.id.desc())
+                .offset(offset)
+                .limit(page_size)
+            )
+        else:
+            stmt = select(Card).where(*conds).order_by(Card.id.desc()).offset(offset).limit(page_size)
+
+        cards = list((await session.execute(stmt)).scalars().all())
+        return cards, total
+
+    @staticmethod
+    async def get_v2_media_titles(
+        session: AsyncSession,
+        media_group: str = "anime",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[List[Tuple[str, int]], int]:
+        """Anime/Manga nomlari card soni bo'yicha kamayish tartibida."""
+        conds = [Card.is_deleted.is_(False)]
+        if media_group == "manga":
+            conds.append(Card.media_type.in_(["Manga", "Manhwa", "Manhua"]))
+        elif media_group == "anime":
+            conds.append(Card.media_type == "Anime")
+
+        rows = (
+            await session.execute(
+                select(func.min(Card.anime_name), func.count(Card.id))
+                .where(*conds)
+                .group_by(anime_key())
+                .order_by(func.count(Card.id).desc(), func.min(Card.anime_name).asc())
+            )
+        ).all()
+        total = len(rows)
+        start = (max(1, page) - 1) * page_size
+        return [(str(r[0]), int(r[1])) for r in rows[start : start + page_size]], total
+
+

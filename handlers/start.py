@@ -27,26 +27,23 @@ WELCOME_TEXT = (
 )
 
 HELP_TEXT = (
-    "❓ <b>YORDAM VA BUYRUQLAR</b>\n\n"
+    "❓ <b>YORDAM VA V2 BUYRUQLAR</b>\n\n"
     "🏠 /menu, /start — Asosiy menyu (inline tugmalar)\n"
-    "👤 /me, /profil, /profilim — Shaxsiy global profil\n"
-    "🎴 /cards, /collection — Mening kartalar kolleksiyam\n"
-    "🎁 /daily — Kunlik coin bonusi\n"
+    "👤 /me, /profil — Shaxsiy V2 profil va bezaklar\n"
+    "🎴 /cards — Kolleksiya (20/sahifa, filtrlar)\n"
+    "🎁 /daily — Kunlik coin + tasodifiy karta\n"
+    "🧠 /quiz — Viktorina savollari\n"
+    "🎮 /game — Mini o‘yinlar (Dice Roll)\n"
+    "🔨 /auction — Jonli auksionlar\n"
+    "💖 /wishlist — Orzu qilingan kartalar\n"
     "🎯 /event — Limitli event kartalari\n"
-    "🤝 /ref — Referal havola va guruh mukofoti\n"
-    "📋 /quests — Kundalik/yutuq vazifalari va coinlar\n"
-    "⭐ /stars — Telegram Stars orqali coin olish\n"
-    "🛒 /market — Global kartalar bozori\n"
-    "💰 /sell <code>CRD-0001 2500</code> — Kartani sotuvga qo‘yish\n"
-    "🛍 /buy <code>id</code> — Marketdan karta sotib olish\n"
-    "🔍 /search <code>Gojo</code> — Global qidiruv\n"
-    "🏆 /top — Global, Guruh va Guruhlar TOP 10 reyting\n"
-    "❌ /cancel — Joriy amalni (narx/qidiruv kiritish) bekor qilish\n"
-    "🤝 /give <code>@user</code> — Karta berish (karta ismini yozasiz, ro‘yxatdan tanlaysiz)\n"
-    "<i>(Guruhda xabarga reply qilib /give yozish ham mumkin. Pullik: /give @user 1000)</i>\n\n"
-    "📌 <i>Bir xil kartadan faqat bitta nusxa olish mumkin.</i>\n"
-    "💡 <i>Guruhlarda bot tasodifiy vaqtlarda karta tashlaydi — birinchi bo‘lib "
-    "<b>[🎴 KARTANI OLISH]</b> tugmasini bosing!</i>"
+    "🛒 /market, /sell, /buy — Global bozor\n"
+    "🤝 /trade, /give — Karta almashish / berish\n"
+    "💎 /vip, ⭐ /stars — VIP va Stars do‘koni\n"
+    "🏆 /top — Reytinglar · 🔔 /notif — Xabarlar · 💬 /support — Yordam\n\n"
+    "📌 <b>Karta olish qoidasi (V2):</b>\n"
+    "Guruhda karta rasmi tashlanganda uning nomi yashirin bo‘ladi — "
+    "xabarga <b>REPLY</b> qilib personaj ismini yozing va kartani qo‘lga kiriting!"
 )
 
 
@@ -77,7 +74,7 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
     builder = InlineKeyboardBuilder()
     if bot_username:
         share_text = urllib.parse.quote(
-            "🎴 Anime Card Collection botiga qo‘shiling! Noyob kartalar yig‘ing va bonus coin oling:"
+            "🎴 Anime Card Collection V2 botiga qo‘shiling! Noyob kartalar yig‘ing va bonus coin oling:"
         )
         share_url = f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={share_text}"
         builder.row(InlineKeyboardButton(text="📤 DO‘STLARGA ULASHISH", url=share_url))
@@ -101,13 +98,18 @@ async def cmd_start(
     state: FSMContext,
     db_user: User,
     command: CommandObject | None = None,
+    is_bot_admin: bool = False,
 ) -> None:
     await state.clear()
     ref_notice = ""
     args = (command.args or "").strip() if command else ""
-    if args.startswith("ref_") and args[4:].isdigit():
-        referrer_tg_id = int(args[4:])
-        async with get_session() as session:
+    welcome_txt = WELCOME_TEXT
+    async with get_session() as session:
+        custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
+        if custom_w:
+            welcome_txt = str(custom_w)
+        if args.startswith("ref_") and args[4:].isdigit():
+            referrer_tg_id = int(args[4:])
             fresh = await session.get(User, db_user.id)
             res = await UserService.apply_referral(session, fresh or db_user, referrer_tg_id)
             if res is not None:
@@ -128,8 +130,8 @@ async def cmd_start(
             else:
                 await session.rollback()
 
-    is_admin = is_admin_user(message.from_user)
-    text = f"Salom, <b>{esc(db_user.display_name)}</b>!\n\n{ref_notice}{WELCOME_TEXT}"
+    is_admin = is_bot_admin or is_admin_user(message.from_user)
+    text = f"Salom, <b>{esc(db_user.display_name)}</b>!\n\n{ref_notice}{welcome_txt}"
     await message.answer(text, reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin))
 
 
@@ -156,9 +158,14 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.callback_query(NavCb.filter(F.target == "home"))
-async def cb_home(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
+async def cb_home(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db_user: User,
+    is_bot_admin: bool = False,
+) -> None:
     await state.clear()
-    is_admin = is_admin_user(callback.from_user)
+    is_admin = is_bot_admin or is_admin_user(callback.from_user)
     text = f"🏠 <b>BOSH MENU</b> — {esc(db_user.display_name)}\n\n{WELCOME_TEXT}"
     await edit_or_answer(callback, text, reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin))
 

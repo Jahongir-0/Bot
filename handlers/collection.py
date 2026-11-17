@@ -15,6 +15,7 @@ from keyboards.collection import (
     collection_list_kb,
     collection_rarity_filter_kb,
     collection_summary_kb,
+    v2_collection_list_kb,
 )
 from keyboards.main_menu import back_home_kb
 from models.card import Card
@@ -23,8 +24,8 @@ from models.user_card import UserCard
 from services.collection_service import CollectionService
 from services.market_service import MarketService
 from utils.callback_data import CollectionCb, NavCb
-from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, get_rarity_meta
-from utils.formatting import esc, event_tag, fmt_coins, format_card_block, format_collection_summary
+from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta
+from utils.formatting import esc, event_tag, fmt_coins, format_card_about, format_card_block, format_collection_summary
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
 
 router = Router(name="collection")
@@ -65,6 +66,39 @@ async def cmd_collection(message: Message, db_user: User) -> None:
 @router.callback_query(CollectionCb.filter(F.action == "view"))
 async def cb_collection_summary(callback: CallbackQuery, db_user: User) -> None:
     await _show_summary(callback, callback.from_user.id, db_user)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "v2_list"))
+async def cb_v2_collection_list(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    filter_tab = callback_data.filter_val or "all"
+    sort_by = callback_data.sort_by or "newest"
+    page = max(1, callback_data.page)
+    async with get_session() as session:
+        rows, total = await CollectionService.get_filtered_user_cards(
+            session, db_user.id, filter_tab=filter_tab, sort_by=sort_by, page=page, page_size=PAGE_SIZE
+        )
+    if not rows and total > 0 and page > 1:
+        page = 1
+        async with get_session() as session:
+            rows, total = await CollectionService.get_filtered_user_cards(
+                session, db_user.id, filter_tab=filter_tab, sort_by=sort_by, page=1, page_size=PAGE_SIZE
+            )
+    lines = [f"🗂 <b>KARTALARIM ({filter_tab.upper()})</b> — Jami: <b>{total}</b> ta (20/sahifa)\n"]
+    if not rows:
+        lines.append("📭 Bu bo‘limda kartalar topilmadi.")
+    else:
+        for uc, c in rows:
+            meta = get_rarity_meta(c.rarity)
+            fav = "❤️ " if uc.is_favorite else ""
+            ser = f"#{uc.serial_number}" if getattr(uc, "serial_number", None) else ""
+            lines.append(f"{fav}{event_tag(c)}{meta.emoji} <b>{esc(c.character_name)}</b> · {esc(c.anime_name)} {ser}")
+    await edit_or_answer(
+        callback,
+        "\n".join(lines),
+        reply_markup=v2_collection_list_kb(
+            callback.from_user.id, rows, filter_tab, sort_by, page, total, page_size=PAGE_SIZE
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +279,7 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
     target_uc_id = unlocked_copy.id if unlocked_copy else uc.id
     is_locked = unlocked_copy is None
     text = (
-        f"{format_card_block(card)}\n\n"
+        f"{format_card_block(card, serial_number=getattr(uc, 'serial_number', None), state_label=getattr(uc, 'card_state', 'OWNED'))}\n\n"
         f"📦 <b>Sizdagi nusxalar soni:</b> {qty} ta\n"
         f"🆔 <b>Nusxa ID:</b> <code>{target_uc_id}</code>\n"
         f"📌 <b>Holati:</b> {'🔒 Marketda/Transferda band' if is_locked else '🟢 Sotish/Transferga tayyor'}"
@@ -256,6 +290,8 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         is_locked=is_locked,
         is_favorite=uc.is_favorite,
         char_rep_id=char_rep_id,
+        card_id=card.id,
+        is_showcased=bool(getattr(uc, "is_showcased", False)),
     )
     if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
         try:
@@ -277,6 +313,35 @@ async def cb_toggle_fav(callback: CallbackQuery, callback_data: CollectionCb, db
         await session.commit()
     await callback.answer("❤️ Sevimlilarga qo‘shildi!" if new_state else "💔 Sevimlilardan olindi.")
     await cb_card_detail(callback, callback_data, db_user)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "toggle_show"))
+async def cb_toggle_showcase(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    async with get_session() as session:
+        uc = await session.get(UserCard, callback_data.item_id)
+        if uc is None or uc.user_id != db_user.id:
+            await callback.answer("Karta topilmadi.", show_alert=True)
+            return
+        uc.is_showcased = not bool(getattr(uc, "is_showcased", False))
+        new_state = uc.is_showcased
+        await session.commit()
+    await callback.answer("🖼 Showcasega qo‘shildi!" if new_state else "🖼 Showcasedan olindi.")
+    await cb_card_detail(callback, callback_data, db_user)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "about"))
+async def cb_card_about(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    async with get_session() as session:
+        uc = await session.get(UserCard, callback_data.item_id)
+        if uc is None or uc.user_id != db_user.id:
+            await callback.answer("Karta topilmadi.", show_alert=True)
+            return
+        card = await session.get(Card, uc.card_id)
+    if card is None:
+        await callback.answer("Karta topilmadi.", show_alert=True)
+        return
+    kb = back_home_kb(callback.from_user.id, "cards")
+    await edit_or_answer(callback, format_card_about(card), reply_markup=kb)
 
 
 # ---------------------------------------------------------------------------

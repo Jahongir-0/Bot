@@ -321,3 +321,57 @@ class RankingService:
             score=score,
         )
 
+    @staticmethod
+    async def get_extended_top(
+        session: AsyncSession,
+        scope: str,
+        period: str = "all",
+        limit: int = 10,
+    ) -> List[Tuple[User, int]]:
+        from datetime import timedelta
+        from models.base import utcnow
+
+        cutoff = None
+        if period == "weekly":
+            cutoff = utcnow() - timedelta(days=7)
+        elif period == "monthly":
+            cutoff = utcnow() - timedelta(days=30)
+
+        if scope in ("rare", "mythic", "divine"):
+            rarity_map = {
+                "rare": ["Rare", "Epic", "Legendary", "Mythic", "Divine"],
+                "mythic": ["Mythic"],
+                "divine": ["Divine"],
+            }
+            stmt = (
+                select(User, func.count(UserCard.id).label("val"))
+                .join(UserCard, UserCard.user_id == User.id)
+                .join(Card, Card.id == UserCard.card_id)
+                .where(User.is_banned.is_(False), Card.rarity.in_(rarity_map[scope]))
+            )
+            if cutoff is not None:
+                stmt = stmt.where(UserCard.created_at >= cutoff)
+            rows = (
+                await session.execute(stmt.group_by(User.id).order_by(func.count(UserCard.id).desc()).limit(limit))
+            ).all()
+            return [(r[0], int(r[1])) for r in rows]
+
+        col_map = {
+            "coins": User.coins,
+            "xp": User.xp,
+            "level": User.level,
+            "quiz": User.quiz_wins,
+            "games": User.game_wins,
+            "trades": User.trade_count,
+            "auction": User.auction_wins,
+            "refs": User.referral_count,
+            "activity": User.xp,
+        }
+        col = col_map.get(scope, User.total_cards)
+        stmt = select(User, col.label("val")).where(User.is_banned.is_(False))
+        if cutoff is not None:
+            stmt = stmt.where(User.last_activity >= cutoff)
+        rows = (await session.execute(stmt.order_by(col.desc(), User.id.asc()).limit(limit))).all()
+        return [(r[0], int(r[1] or 0)) for r in rows]
+
+

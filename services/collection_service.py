@@ -360,3 +360,60 @@ class CollectionService:
             .limit(1)
         )
         return res.scalar_one_or_none()
+
+    @staticmethod
+    async def get_filtered_user_cards(
+        session: AsyncSession,
+        user_id: int,
+        filter_tab: str = "all",
+        sort_by: str = "newest",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[List[Tuple[UserCard, Card]], int]:
+        stmt = (
+            select(UserCard, Card)
+            .join(Card, Card.id == UserCard.card_id)
+            .where(UserCard.user_id == user_id)
+        )
+        cnt_stmt = (
+            select(func.count(UserCard.id))
+            .join(Card, Card.id == UserCard.card_id)
+            .where(UserCard.user_id == user_id)
+        )
+        if filter_tab == "anime":
+            cond = Card.media_type == "Anime"
+        elif filter_tab == "manga":
+            cond = Card.media_type.in_(["Manga", "Manhwa", "Manhua"])
+        elif filter_tab == "movie":
+            cond = Card.media_type.in_(["Movie", "TV Series"])
+        elif filter_tab == "cartoon":
+            cond = Card.media_type.in_(["Cartoon", "Comic"])
+        elif filter_tab == "other":
+            cond = Card.media_type == "Other"
+        elif filter_tab in ("event", "limited"):
+            cond = Card.is_event_card.is_(True)
+        elif filter_tab == "favorites":
+            cond = UserCard.is_favorite.is_(True)
+        else:
+            cond = None
+
+        if cond is not None:
+            stmt = stmt.where(cond)
+            cnt_stmt = cnt_stmt.where(cond)
+
+        if sort_by == "oldest":
+            order_cols = (UserCard.id.asc(),)
+        elif sort_by == "rarest":
+            order_cols = (Card.base_value.desc(), UserCard.id.desc())
+        elif sort_by == "alpha":
+            order_cols = (Card.character_name.asc(), UserCard.id.desc())
+        elif sort_by == "media":
+            order_cols = (Card.media_type.asc(), Card.anime_name.asc(), UserCard.id.desc())
+        else:
+            order_cols = (UserCard.id.desc(),)
+
+        total = int((await session.execute(cnt_stmt)).scalar_one() or 0)
+        offset = (max(1, page) - 1) * page_size
+        rows = (await session.execute(stmt.order_by(*order_cols).offset(offset).limit(page_size))).all()
+        return [(r[0], r[1]) for r in rows], total
+

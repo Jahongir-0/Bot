@@ -1,4 +1,6 @@
 import logging
+import re
+import traceback
 from typing import Optional, Union
 
 from aiogram import Bot
@@ -10,9 +12,31 @@ from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
+_SECRET_PATTERNS = [
+    re.compile(r"\d{7,12}:[A-Za-z0-9_-]{25,}"),
+    re.compile(r"(postgres(?:ql)?(?:\+\w+)?://[^:\s]+:)([^@\s]+)(@)"),
+    re.compile(r"(redis://[^:\s]*:)([^@\s]+)(@)"),
+]
+
+
+def redact_secrets(text: str) -> str:
+    if not text:
+        return ""
+    settings = get_settings()
+    out = str(text)
+    for sec in (settings.bot_token, settings.stars_payment_secret):
+        if sec and len(sec) >= 6:
+            out = out.replace(sec, "***SECRET***")
+    for pat in _SECRET_PATTERNS:
+        if pat.groups >= 3:
+            out = pat.sub(r"\1***\3", out)
+        else:
+            out = pat.sub("***TOKEN***", out)
+    return out
+
 
 class NotCommandFilter(BaseFilter):
-    """FSM holatidagi handlerlar '/buyruq' xabarlarini ushlab olmasligi uchun (masalan /me, /cancel)."""
+    """FSM holatidagi handlerlar '/buyruq' xabarlarini ushlab olmasligi uchun."""
 
     async def __call__(self, message: Message) -> bool:
         return not (message.text or "").startswith("/")
@@ -22,7 +46,7 @@ def is_private_chat(message: Message) -> bool:
     return message.chat.type == "private"
 
 
-def is_admin_user(tg_user: Optional[TgUser]) -> bool:
+def is_super_admin(tg_user: Optional[TgUser]) -> bool:
     if tg_user is None:
         return False
     settings = get_settings()
@@ -31,6 +55,40 @@ def is_admin_user(tg_user: Optional[TgUser]) -> bool:
     if tg_user.username and tg_user.username.lower() in settings.admin_usernames:
         return True
     return False
+
+
+def is_admin_user(tg_user: Optional[TgUser]) -> bool:
+    return is_super_admin(tg_user)
+
+
+async def send_error_alert_to_super_admins(
+    bot: Bot,
+    module_name: str,
+    exc: BaseException,
+    user_tg_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
+    action: Optional[str] = None,
+) -> None:
+    """Super Adminlarga xavfsiz xato xabarnomasini yuboradi (hech qanday token/parolsiz)."""
+    settings = get_settings()
+    if not settings.admin_ids:
+        return
+    tb = redact_secrets("".join(traceback.format_exception_only(type(exc), exc))).strip()
+    short_tb = tb[:350]
+    lines = [
+        "🔴 <b>BOT ERROR</b>",
+        f"📦 Module: <code>{module_name}</code>",
+        f"👤 User: <code>{user_tg_id or '—'}</code> | 💬 Chat: <code>{chat_id or '—'}</code>",
+    ]
+    if action:
+        lines.append(f"⚡ Action: <code>{redact_secrets(action)[:120]}</code>")
+    lines.append(f"⚠️ Error: <code>{short_tb}</code>")
+    msg_text = "\n".join(lines)
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.send_message(chat_id=admin_id, text=msg_text)
+        except Exception:
+            pass
 
 
 async def edit_or_answer(
@@ -87,13 +145,10 @@ async def send_card_visual(
 
 
 def card_image_ref(card) -> str:
-    """Telegram file_id keshi bo'lsa shuni (tez), bo'lmasa URL/file_id ni qaytaradi."""
     return (getattr(card, "image_file_id", None) or card.image or "").strip()
 
 
 async def send_card_message(bot: Bot, chat_id: int, card, caption: str, reply_markup=None) -> Message:
-    """Karta rasmini yuboradi va birinchi muvaffaqiyatli yuborishdan keyin file_id ni keshlab qo'yadi
-    (keyingi yuborishlar URL'ni qayta yuklamaydi, ancha tezroq)."""
     msg = await send_card_visual(bot, chat_id, card_image_ref(card), caption, reply_markup)
     try:
         if msg.photo and not getattr(card, "image_file_id", None):
@@ -107,7 +162,6 @@ async def send_card_message(bot: Bot, chat_id: int, card, caption: str, reply_ma
                     row.image_file_id = file_id
                     await s.commit()
             card.image_file_id = file_id
-    except Exception as exc:  # kesh xatosi yuborishni buzmasin
+    except Exception as exc:
         logger.debug("file_id cache failed: %s", exc)
     return msg
-

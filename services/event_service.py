@@ -214,19 +214,26 @@ class EventService:
             )
 
         try:
-            session.add(UserCard(user_id=user_id, card_id=card.id, acquired_via="event"))
+            uc = UserCard(user_id=user_id, card_id=card.id, acquired_via="event", card_state="OWNED")
+            session.add(uc)
             await session.flush()
+            uc.serial_number = 10000 + uc.id
         except IntegrityError:
             await session.rollback()
             return EventResult(False, OWN_MSG, "owned", event=event, card=card)
 
-        # Oxirgi nusxa sotilgan bo'lsa event yopiladi
         await session.execute(
             update(LimitedEvent)
             .where(LimitedEvent.id == event.id, LimitedEvent.sold_count >= LimitedEvent.total_copies)
             .values(status="sold_out", updated_at=now)
         )
         await UserService.recompute_card_counts(session, user_id, add_xp=40)
+
+        from services.auction_wishlist_service import AuctionWishlistService
+        await AuctionWishlistService.record_history(
+            session, card.id, "event_bought", uc.id, to_user_id=user_id, details={"event_id": event.id}
+        )
+
         await session.flush()
         event.sold_count = int(event.sold_count) + 1
         return EventResult(True, "ok", "ok", event=event, card=card)

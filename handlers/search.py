@@ -274,5 +274,6 @@ async def cb_search_catalog_inspect(
         mode=callback_data.mode,
         query=callback_data.query,
         page=callback_data.page,
+        card_id=card.id,
     )
     await edit_or_answer(callback, text, reply_markup=kb)

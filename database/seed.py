@@ -296,4 +296,60 @@ async def seed_initial_data(session: AsyncSession) -> None:
             )
         logger.info("Seeded %d starter anime cards.", len(STARTER_CARDS))
 
+    # V2: Season 1 va default Achievementlar (mavjud ma'lumotlarni o'chirmasdan)
+    from datetime import timedelta
+    from models.base import utcnow
+    from models.v2_features import Achievement, Season
+
+    existing_season = (await session.execute(select(Season.id).limit(1))).scalar_one_or_none()
+    if existing_season is None:
+        now = utcnow()
+        session.add(
+            Season(
+                season_number=1,
+                name="Season 1: Awakening",
+                description="Anime Card Collection V2 ilk rasmiy mavsumi!",
+                starts_at=now,
+                ends_at=now + timedelta(days=30),
+                status="active",
+                rewards_config={
+                    "top1_coins": 10000,
+                    "top2_coins": 5000,
+                    "top3_coins": 2500,
+                    "top10_coins": 1000,
+                    "top1_title": "👑 Mavsum Chempioni",
+                },
+            )
+        )
+
+    default_achievements = [
+        ("collector_10", "📦 Yosh Kolleksioner", "10 ta karta yig'ing", "📦", "total_cards", 10, 300, 50, "📦", None),
+        ("collector_100", "🏛️ Collector", "100 ta karta yig'ing", "🏛️", "total_cards", 100, 2000, 200, "🏛️", "Collector"),
+        ("collector_500", "⚔️ Master Collector", "500 ta karta yig'ing", "⚔️", "total_cards", 500, 7500, 500, "⚔️", "Master Collector"),
+        ("collector_1000", "👑 Grand Collector", "1000 ta karta yig'ing", "👑", "total_cards", 1000, 20000, 1000, "👑", "Grand Collector"),
+        ("quiz_10", "🧠 Bilimdon", "10 ta quiz savoliga to'g'ri javob bering", "🧠", "quiz_wins", 10, 1000, 150, "🧠", "Quiz Master"),
+        ("game_10", "🎲 Omadli", "10 marta mini o'yin yuting", "🎲", "game_wins", 10, 800, 100, "🎲", None),
+        ("trade_5", "🤝 Savdogar", "5 ta muvaffaqiyatli savdo/almashuv qiling", "🤝", "trade_count", 5, 1200, 150, "🤝", "Merchant"),
+        ("auction_1", "🔨 Auksion g'olibi", "1 ta auksionda g'olib bo'ling", "🔨", "auction_wins", 1, 1500, 200, "🔨", None),
+        ("ref_5", "📣 Elchi", "5 ta do'stni referal orqali taklif qiling", "📣", "referral_count", 5, 2500, 250, "📣", "Ambassador"),
+    ]
+    for code, title, desc, icon, metric, target_val, r_coins, r_xp, badge, r_title in default_achievements:
+        exists = (await session.execute(select(Achievement.id).where(Achievement.code == code))).scalar_one_or_none()
+        if exists is None:
+            session.add(
+                Achievement(
+                    code=code,
+                    title=title,
+                    description=desc,
+                    icon=icon,
+                    metric=metric,
+                    target_value=target_val,
+                    reward_coins=r_coins,
+                    reward_xp=r_xp,
+                    reward_badge=badge,
+                    reward_title=r_title,
+                )
+            )
+
     await session.commit()
+

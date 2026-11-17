@@ -47,14 +47,16 @@ class CardService:
         drop_weight: Optional[int] = None,
         rank: int = 100,
         drop_limit: Optional[int] = None,
+        media_type: str = "Anime",
+        aliases: Optional[List[str]] = None,
+        metadata_json: Optional[dict] = None,
+        battle_stats: Optional[dict] = None,
     ) -> Card:
         meta = get_rarity_meta(rarity)
         code = await CardService.generate_next_card_code(session)
         character_name = normalize_name(character_name)[:128]
         anime_name = normalize_name(anime_name)[:128]
 
-        # Shu anime / personaj allaqachon bor bo'lsa, xuddi o'sha yozuvni (katta-kichik harf) va ID ni qayta ishlatamiz.
-        # Shunda yangi karta mavjud anime bo'limi va personaj ostiga qo'shiladi.
         anime_id = _slugify(anime_name, "anm")
         existing_anime = (
             await session.execute(
@@ -97,8 +99,25 @@ class CardService:
             dropped_count=0,
             is_available=True,
             is_deleted=False,
+            media_type=media_type or "Anime",
+            aliases=aliases or [],
+            card_state="AVAILABLE",
+            metadata_json=metadata_json or {},
+            battle_stats=battle_stats or {},
         )
         session.add(card)
+        await session.flush()
+        return card
+
+    @staticmethod
+    async def restore_card(session: AsyncSession, card_id: int) -> Optional[Card]:
+        card = await session.get(Card, card_id)
+        if card is None:
+            return None
+        card.is_deleted = False
+        card.is_available = True
+        card.archived_note = None
+        card.card_state = "EVENT" if card.is_event_card else "AVAILABLE"
         await session.flush()
         return card
 

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -7,8 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from database.redis_client import get_lock_manager
+from models.card import Card
 from models.transaction import DailyReward
 from models.user import User
+from services.community_service import CommunityService
+from services.gameplay_service import GameplayService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 
@@ -19,6 +23,7 @@ class DailyClaimResult:
     message: str
     coins_awarded: int = 0
     streak: int = 0
+    card_awarded: Optional[Card] = None
 
 
 class DailyService:
@@ -60,10 +65,13 @@ class DailyService:
                 cfg["max_streak_bonus"],
                 (new_streak - 1) * cfg["streak_step"],
             )
-            total_coins = cfg["base_coins"] + bonus
+            vip_mult = await CommunityService.get_vip_daily_multiplier(session, user)
+            total_coins = int(round((cfg["base_coins"] + bonus) * vip_mult))
 
             user.daily_streak = new_streak
             user.last_daily_date = today
+            user.xp = int(user.xp or 0) + 15
+            user.level = max(1, 1 + (user.xp // 250))
 
             session.add(
                 DailyReward(
@@ -81,6 +89,8 @@ class DailyService:
                 description=f"Daily bonus (Streak {new_streak})",
                 reference_id=f"daily:{user.id}:{today.isoformat()}",
             )
+            random_card = await GameplayService.pick_daily_random_card(session, user)
+            await GameplayService.add_season_points(session, user.id, points=5, xp=15)
             await session.flush()
 
             return DailyClaimResult(
@@ -88,4 +98,5 @@ class DailyService:
                 "Daily bonus berildi!",
                 coins_awarded=total_coins,
                 streak=new_streak,
+                card_awarded=random_card,
             )

@@ -43,6 +43,9 @@ class Group(Base, TimestampMixin):
     auto_drop_count: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     add_reward_claimed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     added_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_banned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    ban_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ban_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
 
 class GroupMember(Base, TimestampMixin):

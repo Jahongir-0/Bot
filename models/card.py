@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import Boolean, CheckConstraint, Index, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, Index, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base, TimestampMixin
@@ -14,6 +14,7 @@ class Card(Base, TimestampMixin):
         Index("ix_cards_character_name", "character_name"),
         Index("ix_cards_anime_name", "anime_name"),
         Index("ix_cards_rarity_avail", "rarity", "is_available", "is_deleted"),
+        Index("ix_cards_media_state", "media_type", "card_state"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -39,3 +40,11 @@ class Card(Base, TimestampMixin):
     limited_copies: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # Telegram file_id keshi: URL bilan har safar qayta yuklamaslik uchun (tezroq yuboriladi)
     image_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # V2: Media turi, aliaslar, holat mashinasi, kengaytirilgan metadata va battle arxitekturasi
+    media_type: Mapped[str] = mapped_column(String(24), nullable=False, default="Anime", index=True)
+    aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    card_state: Mapped[str] = mapped_column(String(24), nullable=False, default="AVAILABLE", index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    battle_stats: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    season_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)

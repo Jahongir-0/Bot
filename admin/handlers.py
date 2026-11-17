@@ -4,7 +4,7 @@ import re
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from aiogram import F, Router
+from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
-from admin.filters import IsAdminFilter
+from admin.filters import IsAdminFilter, has_admin_perm, resolve_admin_perms
 from config.settings import get_settings
 from database.session import get_session
 from keyboards.admin import (
@@ -37,6 +37,7 @@ from keyboards.admin import (
     admin_users_list_kb,
     admin_users_menu_kb,
 )
+from keyboards.v2 import admin_v2_cards_menu_kb, admin_v2_home_kb
 from app.event_announcer import announce_event
 from keyboards.event import (
     admin_evt_candidates_kb,
@@ -47,13 +48,13 @@ from keyboards.event import (
     admin_evt_price_type_kb,
     admin_evt_stars_kb,
 )
-from keyboards.main_menu import drop_claim_kb
 from models.card import Card
 from models.event import Event
 from models.group import Group
 from models.schedule import ActiveDrop
 from models.user import User
 from services.admin_service import AdminService
+from services.auction_wishlist_service import AuctionWishlistService
 from services.event_service import EventService
 from services.card_service import CardService
 from services.drop_service import DropService
@@ -61,7 +62,7 @@ from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import AdminCb, NavCb
-from utils.constants import EVENT_DURATION_HOURS, PAGE_SIZE, RankingMode, get_rarity_meta, list_rarities
+from utils.constants import EVENT_DURATION_HOURS, MEDIA_TYPES, PAGE_SIZE, RankingMode, get_rarity_meta, list_rarities
 from utils.formatting import (
     esc,
     fmt_coins,
@@ -74,14 +75,48 @@ from utils.tg_helpers import NotCommandFilter, edit_or_answer, send_card_message
 
 logger = logging.getLogger(__name__)
 
+_LEGACY_SECTION_PERM_MAP = {
+    "home": None,
+    "cards": "cards",
+    "priority": "cards",
+    "schedule": "groups",
+    "groups": "groups",
+    "users": "users",
+    "ban": "users",
+    "events": "events",
+    "evt": "events",
+    "broadcast": "message",
+    "stars": "stars",
+    "stats": "stats",
+    "settings": "settings",
+}
+
+
+class _AdminRbacCallbackMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: CallbackQuery, data: dict):
+        if event.data and event.data.startswith("adm:"):
+            try:
+                cb = AdminCb.unpack(event.data)
+                req = _LEGACY_SECTION_PERM_MAP.get(cb.section)
+                if req and not has_admin_perm(event.from_user, data.get("admin_perms"), req):
+                    await event.answer("⛔ Bu bo‘limga ruxsatingiz yo‘q.", show_alert=True)
+                    return None
+            except Exception:
+                pass
+        return await handler(event, data)
+
+
 router = Router(name="admin")
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+router.callback_query.middleware(_AdminRbacCallbackMiddleware())
 
 
 class AdminStates(StatesGroup):
     add_card_character = State()
+    add_card_media_type = State()
     add_card_anime = State()
+    add_card_meta = State()
     add_card_image = State()
     add_card_rarity = State()
     add_card_value = State()
@@ -114,17 +149,20 @@ class AdminStates(StatesGroup):
 
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, state: FSMContext) -> None:
+async def cmd_admin(message: Message, state: FSMContext, admin_perms: set | None = None) -> None:
     await state.clear()
+    perms = resolve_admin_perms(message.from_user, admin_perms)
     await message.answer(
-        "🛡️ <b>ADMIN PANEL</b>\n\nBoshqaruv bo‘limini tanlang:",
-        reply_markup=admin_home_kb(message.from_user.id),
+        "🛡️ <b>ADMIN PANEL V2</b>\n\nBoshqaruv bo‘limini tanlang:",
+        reply_markup=admin_v2_home_kb(message.from_user.id, perms),
     )
 
 
 @router.message(Command("drop"))
-async def cmd_admin_instant_drop(message: Message, db_group: Optional[Group] = None) -> None:
-    """Admin-only instant card drop inside the current group."""
+async def cmd_admin_instant_drop(message: Message, db_group: Optional[Group] = None, admin_perms: set | None = None) -> None:
+    """Admin-only instant card drop inside the current group (V2 hidden-name reply drop)."""
+    if not has_admin_perm(message.from_user, admin_perms, "cards") and not has_admin_perm(message.from_user, admin_perms, "groups"):
+        return
     if db_group is None:
         await message.answer("⚠️ Bu buyruq guruh ichida ishlaydi.")
         return
@@ -144,7 +182,7 @@ async def cmd_admin_instant_drop(message: Message, db_group: Optional[Group] = N
         await session.commit()
 
     caption = format_drop_message(card, active_event=active_event)
-    sent_msg = await send_card_message(message.bot, group.telegram_chat_id, card, caption, drop_claim_kb(drop.id))
+    sent_msg = await send_card_message(message.bot, group.telegram_chat_id, card, caption, reply_markup=None)
     async with get_session() as session:
         d_row = await session.get(ActiveDrop, drop.id)
         if d_row is not None:
@@ -153,12 +191,13 @@ async def cmd_admin_instant_drop(message: Message, db_group: Optional[Group] = N
 
 
 @router.callback_query(AdminCb.filter(F.section == "home"))
-async def cb_admin_home(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_admin_home(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
     await state.clear()
+    perms = resolve_admin_perms(callback.from_user, admin_perms)
     await edit_or_answer(
         callback,
-        "🛡️ <b>ADMIN PANEL</b>\n\nBoshqaruv bo‘limini tanlang:",
-        reply_markup=admin_home_kb(callback.from_user.id),
+        "🛡️ <b>ADMIN PANEL V2</b>\n\nBoshqaruv bo‘limini tanlang:",
+        reply_markup=admin_v2_home_kb(callback.from_user.id, perms),
     )
 
 
@@ -166,11 +205,15 @@ async def cb_admin_home(callback: CallbackQuery, state: FSMContext) -> None:
 # STATISTICS
 # ---------------------------------------------------------------------------
 @router.callback_query(AdminCb.filter(F.section == "stats"))
-async def cb_admin_stats(callback: CallbackQuery) -> None:
+async def cb_admin_stats(callback: CallbackQuery, admin_perms: set | None = None) -> None:
+    if not has_admin_perm(callback.from_user, admin_perms, "stats"):
+        await callback.answer("⛔ Bu bo‘limga ruxsatingiz yo‘q.", show_alert=True)
+        return
     async with get_session() as session:
         st = await AdminService.get_global_stats(session)
+    perms = resolve_admin_perms(callback.from_user, admin_perms)
     text = (
-        "📊 <b>BOT STATISTIKASI</b>\n\n"
+        "📊 <b>BOT STATISTIKASI V2</b>\n\n"
         f"👤 Jami foydalanuvchilar: <b>{st['total_users']:,}</b>\n"
         f"🚫 Ban qilinganlar: <b>{st['banned_users']:,}</b>\n"
         f"👥 Ro‘yxatdan o‘tgan guruhlar: <b>{st['total_groups']:,}</b>\n"
@@ -179,22 +222,27 @@ async def cb_admin_stats(callback: CallbackQuery) -> None:
         f"🛒 Faol market e'lonlari: <b>{st['active_listings']:,}</b>\n"
         f"🪙 Iqtisodiyotdagi jami coinlar: <b>{st['total_coins']:,}</b>"
     )
-    await edit_or_answer(callback, text, reply_markup=admin_home_kb(callback.from_user.id))
+    await edit_or_answer(callback, text, reply_markup=admin_v2_home_kb(callback.from_user.id, perms))
 
 
 # ---------------------------------------------------------------------------
 # CARD MANAGEMENT (Menu, Add, Inline Delete List, Inline Card List + Drop)
 # ---------------------------------------------------------------------------
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "menu")))
-async def cb_admin_cards_menu(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_admin_cards_menu(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
+    if not has_admin_perm(callback.from_user, admin_perms, "cards"):
+        await callback.answer("⛔ Bu bo‘limga ruxsatingiz yo‘q.", show_alert=True)
+        return
     await state.clear()
     await edit_or_answer(
         callback,
-        "🎴 <b>CARD BO‘LIMI</b>\n\n"
-        "• <b>➕ Karta qo‘shish</b> — yangi anime karta yaratish\n"
-        "• <b>🗑 Karta o‘chirish</b> — ro‘yxatdan tanlab o‘chirish\n"
-        "• <b>📋 Kartalar ro‘yxati</b> — karta rasmi, egasi va guruhga tashlash",
-        reply_markup=admin_cards_menu_kb(callback.from_user.id),
+        "🎴 <b>CARD BO‘LIMI V2</b>\n\n"
+        "• <b>➕ Add Card</b> — yangi karta (9 media turi + tavsif)\n"
+        "• <b>📦 ZIP Import</b> — ommaviy ZIP arxivdan yuklash\n"
+        "• <b>👁 View Card</b> — 9 ta tab + 20/sahifa + batafsil boshqaruv\n"
+        "• <b>✏️ Edit Card</b> — har bir maydonni alohida tahrirlash\n"
+        "• <b>🗑 Delete / ♻️ Restore</b> — xavfsiz o‘chirish va tiklash",
+        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id),
     )
 
 
@@ -466,7 +514,7 @@ async def cb_admin_card_drop_to_group(callback: CallbackQuery, callback_data: Ad
             chat_id=group.telegram_chat_id,
             image=card.image,
             caption=caption,
-            reply_markup=drop_claim_kb(drop.id),
+            reply_markup=None,
         )
         async with get_session() as s2:
             d2 = await s2.get(ActiveDrop, drop.id)
@@ -597,13 +645,36 @@ def _clean_name(raw: str) -> str:
     return " ".join((raw or "").split())
 
 
+def _media_type_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for i in range(0, len(MEDIA_TYPES), 3):
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=mt,
+                    callback_data=AdminCb(owner_id=owner_id, section="cards", action="add_mtype", extra=mt).pack(),
+                )
+                for mt in MEDIA_TYPES[i : i + 3]
+            ]
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ BEKOR", callback_data=AdminCb(owner_id=owner_id, section="cards", action="menu").pack()
+        )
+    )
+    return builder.as_markup()
+
+
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_start")))
-async def cb_admin_add_card_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_admin_add_card_start(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
+    if not has_admin_perm(callback.from_user, admin_perms, "cards"):
+        await callback.answer("⛔ Ruxsatingiz yo‘q.", show_alert=True)
+        return
     await state.clear()
     await state.set_state(AdminStates.add_card_character)
     await edit_or_answer(
         callback,
-        "➕ <b>YANGI KARTA QO‘SHISH</b>\n\n1/4: <b>Personaj ismini</b> yozing "
+        "➕ <b>YANGI KARTA QO‘SHISH (V2)</b>\n\n1/6: <b>Personaj ismini</b> yozing "
         "(masalan: <code>Gojo Satoru</code>):\n<i>Bekor qilish: /cancel</i>",
     )
 
@@ -615,8 +686,23 @@ async def fsm_add_card_char(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ Personaj ismini matn bilan yozing (1–128 belgi).")
         return
     await state.update_data(character_name=name)
+    await state.set_state(AdminStates.add_card_media_type)
+    await message.answer(
+        "2/6: <b>Media turini</b> tanlang:",
+        reply_markup=_media_type_pick_kb(message.from_user.id),
+    )
+
+
+@router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_mtype")))
+async def cb_admin_add_card_mtype(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
+    mtype = callback_data.extra if callback_data.extra in MEDIA_TYPES else "Anime"
+    await state.update_data(media_type=mtype)
     await state.set_state(AdminStates.add_card_anime)
-    await message.answer("2/4: <b>Anime nomini</b> yozing (masalan: <code>Jujutsu Kaisen</code>):")
+    await edit_or_answer(
+        callback,
+        f"✅ Media turi: <b>{esc(mtype)}</b>\n\n"
+        f"3/6: <b>{esc(mtype)} nomini</b> yozing (masalan: <code>Jujutsu Kaisen</code>):",
+    )
 
 
 def _rarity_pick_kb(owner_id: int, cfg: dict) -> InlineKeyboardMarkup:
@@ -641,12 +727,33 @@ def _rarity_pick_kb(owner_id: int, cfg: dict) -> InlineKeyboardMarkup:
 async def fsm_add_card_anime(message: Message, state: FSMContext) -> None:
     anime = _clean_name(message.text or "")
     if not anime or len(anime) > 128:
-        await message.answer("⚠️ Anime nomini matn bilan yozing (1–128 belgi).")
+        await message.answer("⚠️ Media nomini matn bilan yozing (1–128 belgi).")
         return
-    data = await state.get_data()
     await state.update_data(anime_name=anime)
-    await state.set_state(AdminStates.add_card_rarity)
+    await state.set_state(AdminStates.add_card_meta)
+    skip_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⏭ O‘tkazib yuborish",
+                    callback_data=AdminCb(owner_id=message.from_user.id, section="cards", action="add_meta_skip").pack(),
+                )
+            ]
+        ]
+    )
+    await message.answer(
+        "4/6: <b>Personaj haqida ma’lumot (ixtiyoriy)</b>\n"
+        "Tavsif yozing (yoki format: <code>Tavsif | Tug‘ilgan kun | Qobiliyatlar | Alias1,Alias2</code>)\n"
+        "Yoki o‘tkazib yuborish tugmasini bosing:",
+        reply_markup=skip_kb,
+    )
 
+
+async def _proceed_to_rarity_pick(target, state: FSMContext, owner_id: int) -> None:
+    data = await state.get_data()
+    anime = data.get("anime_name", "")
+    char_name = data.get("character_name", "")
+    await state.set_state(AdminStates.add_card_rarity)
     async with get_session() as session:
         cfg = await SettingsService.get_rarity_config(session)
         anime_exists = (
@@ -659,23 +766,50 @@ async def fsm_add_card_anime(message: Message, state: FSMContext) -> None:
                 select(Card.id)
                 .where(
                     func.lower(func.trim(Card.anime_name)) == anime.lower(),
-                    func.lower(func.trim(Card.character_name)) == data["character_name"].lower(),
+                    func.lower(func.trim(Card.character_name)) == char_name.lower(),
                     Card.is_deleted.is_(False),
                 )
                 .limit(1)
             )
         ).first()
-
     hint = ""
     if char_exists:
-        hint = "\nℹ️ Bu personaj shu anime bo‘limida allaqachon bor — yangi karta uning ostiga qo‘shiladi.\n"
+        hint = "\nℹ️ Bu personaj shu bo‘limda allaqachon bor — yangi variant qo‘shiladi.\n"
     elif anime_exists:
-        hint = "\nℹ️ Bu anime bo‘limi mavjud — personaj shu bo‘lim ichiga qo‘shiladi.\n"
-    await message.answer(
-        f"✅ {esc(data['character_name'])} · {esc(anime)}\n{hint}\n"
-        "3/4: <b>Rankni</b> tanlang — karta narxi va tashlash soni avtomatik qo‘yiladi:",
-        reply_markup=_rarity_pick_kb(message.from_user.id, cfg),
+        hint = "\nℹ️ Bu media bo‘limi mavjud — personaj shu bo‘limga qo‘shiladi.\n"
+    text = (
+        f"✅ {esc(char_name)} · {esc(anime)} ({esc(data.get('media_type', 'Anime'))})\n{hint}\n"
+        "5/6: <b>Rankni</b> tanlang — karta narxi va tashlash soni avtomatik qo‘yiladi:"
     )
+    kb = _rarity_pick_kb(owner_id, cfg)
+    if isinstance(target, CallbackQuery):
+        await edit_or_answer(target, text, reply_markup=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
+
+
+@router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_meta_skip")))
+async def cb_admin_add_meta_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(metadata_json={}, aliases=[])
+    await _proceed_to_rarity_pick(callback, state, callback.from_user.id)
+
+
+@router.message(AdminStates.add_card_meta, NotCommandFilter())
+async def fsm_add_card_meta(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    parts = [p.strip() for p in raw.split("|")]
+    meta_dict = {}
+    aliases = []
+    if parts and parts[0]:
+        meta_dict["description"] = parts[0]
+    if len(parts) > 1 and parts[1]:
+        meta_dict["birthday"] = parts[1]
+    if len(parts) > 2 and parts[2]:
+        meta_dict["abilities"] = parts[2]
+    if len(parts) > 3 and parts[3]:
+        aliases = [a.strip() for a in parts[3].split(",") if a.strip()]
+    await state.update_data(metadata_json=meta_dict, aliases=aliases)
+    await _proceed_to_rarity_pick(message, state, message.from_user.id)
 
 
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_rarity")))
@@ -694,7 +828,7 @@ async def cb_admin_add_card_rarity(callback: CallbackQuery, callback_data: Admin
         callback,
         f"✅ Rank: {meta.emoji} <b>{esc(rarity)}</b>\n"
         f"💰 Narx: <b>{cfg['value']:,}</b> coin · 🔁 Tashlash soni: <b>{cfg['drops']}</b> ta (avtomatik)\n\n"
-        "4/4: <b>Karta rasmini</b> yuboring:\n"
+        "6/6: <b>Karta rasmini</b> yuboring:\n"
         "• Telegram’da <b>foto</b> sifatida, yoki\n"
         "• to‘g‘ri havola: <code>https://...jpg</code> / png / webp\n"
         "<i>Noto‘g‘ri havola yoki boshqa format qabul qilinmaydi.</i>",
@@ -710,7 +844,7 @@ async def fsm_add_card_image(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if not all(k in data for k in ("character_name", "anime_name", "rarity")):
         await state.clear()
-        await message.answer("⚠️ Jarayon eskirgan. Qaytadan boshlang.", reply_markup=admin_cards_menu_kb(message.from_user.id))
+        await message.answer("⚠️ Jarayon eskirgan. Qaytadan boshlang.", reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
         return
     await state.clear()
 
@@ -724,16 +858,22 @@ async def fsm_add_card_image(message: Message, state: FSMContext) -> None:
             rarity=data["rarity"],
             base_value=cfg["value"],
             drop_limit=cfg["drops"],
+            media_type=data.get("media_type", "Anime"),
+            aliases=data.get("aliases") or [],
+            metadata_json=data.get("metadata_json") or {},
         )
         if file_id:
             card.image_file_id = file_id
+        await AuctionWishlistService.record_history(
+            session, card.id, "created", details={"admin_tg_id": message.from_user.id}
+        )
         await AdminService.log_action(
             session,
             message.from_user.id,
             "create_card",
             "card",
             str(card.id),
-            {"code": card.card_code, "character": card.character_name, "rarity": card.rarity},
+            {"code": card.card_code, "character": card.character_name, "rarity": card.rarity, "media_type": card.media_type},
         )
         await session.commit()
 
@@ -742,9 +882,9 @@ async def fsm_add_card_image(message: Message, state: FSMContext) -> None:
         f"🔁 Tashlash soni: <b>{card.drop_limit}</b> ta"
     )
     try:
-        await send_card_message(message.bot, message.chat.id, card, text, admin_cards_menu_kb(message.from_user.id))
+        await send_card_message(message.bot, message.chat.id, card, text, admin_v2_cards_menu_kb(message.from_user.id))
     except Exception:
-        await message.answer(text, reply_markup=admin_cards_menu_kb(message.from_user.id))
+        await message.answer(text, reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
 
 
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "edit_image")))
@@ -1059,7 +1199,7 @@ async def cb_admin_group_control(callback: CallbackQuery, callback_data: AdminCb
                 chat_id=group.telegram_chat_id,
                 image=card.image,
                 caption=caption,
-                reply_markup=drop_claim_kb(drop.id),
+                reply_markup=None,
             )
             async with get_session() as s2:
                 d2 = await s2.get(ActiveDrop, drop.id)

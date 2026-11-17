@@ -23,6 +23,7 @@ class User(Base, TimestampMixin):
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     first_name: Mapped[str] = mapped_column(String(128), nullable=False, default="Collector")
     coins: Mapped[int] = mapped_column(BigInteger, nullable=False, default=100)
+    locked_coins: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     total_cards: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     unique_cards: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -33,6 +34,20 @@ class User(Base, TimestampMixin):
     referral_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stats: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     is_banned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    is_frozen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ban_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ban_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    vip_tier: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    vip_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    equipped_frame: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    equipped_title: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    equipped_badge: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    equipped_bg: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    suspicion_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quiz_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    game_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trade_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    auction_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_activity: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
