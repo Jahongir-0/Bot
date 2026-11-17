@@ -6,7 +6,8 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.card import Card
-from models.group import GroupMember
+from models.group import Group, GroupMember
+from models.schedule import ActiveDrop
 from models.user import User
 from models.user_card import UserCard
 from services.settings_service import SettingsService
@@ -26,6 +27,16 @@ class RankEntry:
     unique_cards: int
     legendary_cards: int
     mythic_cards: int
+
+
+@dataclass
+class GroupRankEntry:
+    rank: int
+    group: Group
+    active_users: int
+    claimed_cards: int
+    member_count: int
+    score: int
 
 
 def _cache_get(key: Tuple[Any, ...]) -> Any:
@@ -200,3 +211,113 @@ class RankingService:
             if is_member is not None:
                 group_rank = await RankingService._rank_of(session, mode, user_id, group_id)
         return global_rank, group_rank
+
+    @staticmethod
+    async def get_groups_top(session: AsyncSession, limit: int = 10) -> List[GroupRankEntry]:
+        key = ("groups_top", RankingService._scope(session), limit)
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        users_sq = (
+            select(GroupMember.group_id.label("gid"), func.count(GroupMember.id).label("u_cnt"))
+            .group_by(GroupMember.group_id)
+            .subquery()
+        )
+        claims_sq = (
+            select(ActiveDrop.group_id.label("gid"), func.count(ActiveDrop.id).label("c_cnt"))
+            .where(ActiveDrop.is_claimed.is_(True))
+            .group_by(ActiveDrop.group_id)
+            .subquery()
+        )
+        active_users_expr = func.coalesce(users_sq.c.u_cnt, 0)
+        claimed_expr = func.coalesce(claims_sq.c.c_cnt, 0)
+        score_expr = active_users_expr * 10 + claimed_expr * 5
+
+        rows = (
+            await session.execute(
+                select(Group, active_users_expr.label("au"), claimed_expr.label("cc"), score_expr.label("sc"))
+                .outerjoin(users_sq, users_sq.c.gid == Group.id)
+                .outerjoin(claims_sq, claims_sq.c.gid == Group.id)
+                .where(Group.is_active.is_(True))
+                .order_by(
+                    score_expr.desc(),
+                    claimed_expr.desc(),
+                    active_users_expr.desc(),
+                    func.coalesce(Group.member_count, 0).desc(),
+                    Group.id.asc(),
+                )
+                .limit(limit)
+            )
+        ).all()
+
+        entries = [
+            GroupRankEntry(
+                rank=idx,
+                group=grp,
+                active_users=int(au or 0),
+                claimed_cards=int(cc or 0),
+                member_count=int(grp.member_count or 0),
+                score=int(sc or 0),
+            )
+            for idx, (grp, au, cc, sc) in enumerate(rows, start=1)
+        ]
+        _cache_put(key, entries)
+        return entries
+
+    @staticmethod
+    async def get_group_standing(session: AsyncSession, group_id: int) -> Optional[GroupRankEntry]:
+        grp = await session.get(Group, group_id)
+        if grp is None:
+            return None
+        au = int(
+            (
+                await session.execute(select(func.count(GroupMember.id)).where(GroupMember.group_id == group_id))
+            ).scalar_one()
+            or 0
+        )
+        cc = int(
+            (
+                await session.execute(
+                    select(func.count(ActiveDrop.id)).where(
+                        ActiveDrop.group_id == group_id, ActiveDrop.is_claimed.is_(True)
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        score = au * 10 + cc * 5
+
+        users_sq = (
+            select(GroupMember.group_id.label("gid"), func.count(GroupMember.id).label("u_cnt"))
+            .group_by(GroupMember.group_id)
+            .subquery()
+        )
+        claims_sq = (
+            select(ActiveDrop.group_id.label("gid"), func.count(ActiveDrop.id).label("c_cnt"))
+            .where(ActiveDrop.is_claimed.is_(True))
+            .group_by(ActiveDrop.group_id)
+            .subquery()
+        )
+        other_score = func.coalesce(users_sq.c.u_cnt, 0) * 10 + func.coalesce(claims_sq.c.c_cnt, 0) * 5
+        better = int(
+            (
+                await session.execute(
+                    select(func.count(Group.id))
+                    .select_from(Group)
+                    .outerjoin(users_sq, users_sq.c.gid == Group.id)
+                    .outerjoin(claims_sq, claims_sq.c.gid == Group.id)
+                    .where(Group.is_active.is_(True), other_score > score)
+                )
+            ).scalar_one()
+            or 0
+        )
+        return GroupRankEntry(
+            rank=better + 1,
+            group=grp,
+            active_users=au,
+            claimed_cards=cc,
+            member_count=int(grp.member_count or 0),
+            score=score,
+        )
+

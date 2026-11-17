@@ -12,6 +12,7 @@ from database.session import get_session
 from keyboards.event import event_buy_kb
 from models.group import Group
 from models.limited_event import EventBroadcast, LimitedEvent
+from models.user import User
 from services.event_service import EventService
 from utils.formatting import format_event_message
 from utils.tg_helpers import send_card_message
@@ -21,7 +22,7 @@ _SEND_CONCURRENCY = 8
 
 
 async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0) -> int:
-    """Hamma faol guruhlarga 'event boshlandi' e'lonini yuboradi. Yuborilgan guruhlar soni qaytariladi."""
+    """Hamma faol guruhlar va barcha foydalanuvchilarga 'event boshlandi' e'lonini yuboradi."""
     tz = get_settings().timezone
     async with get_session() as session:
         pair = await EventService.get_event_with_card(session, event_id)
@@ -29,39 +30,55 @@ async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0) -> i
             return 0
         event, card = pair
         groups = list((await session.execute(select(Group).where(Group.is_active.is_(True)))).scalars().all())
+        users = list((await session.execute(select(User).where(User.is_banned.is_(False)))).scalars().all())
 
     caption = format_event_message(card, event, tz, "active")
     kb = event_buy_kb(event)
     sem = asyncio.Semaphore(_SEND_CONCURRENCY)
     sent: List[EventBroadcast] = []
     dead_group_ids: List[int] = []
+    group_sent = 0
+    user_sent = 0
 
-    async def _send(group: Group) -> None:
+    async def _send_target(chat_id: int, group_id: int | None) -> None:
+        nonlocal group_sent, user_sent
         async with sem:
-            for attempt in range(2):
+            for _attempt in range(2):
                 try:
-                    msg = await send_card_message(bot, group.telegram_chat_id, card, caption, kb)
+                    msg = await send_card_message(bot, chat_id, card, caption, kb)
                     sent.append(
                         EventBroadcast(
                             event_id=event.id,
-                            telegram_chat_id=group.telegram_chat_id,
+                            telegram_chat_id=chat_id,
                             telegram_message_id=msg.message_id,
                             is_photo=bool(msg.photo),
                         )
                     )
+                    if group_id is not None:
+                        group_sent += 1
+                    else:
+                        user_sent += 1
                     break
                 except TelegramRetryAfter as exc:
                     await asyncio.sleep(float(exc.retry_after) + 0.5)
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
-                    logger.warning("Event announce failed for %s: %s", group.telegram_chat_id, exc)
-                    dead_group_ids.append(group.id)
+                    if group_id is not None:
+                        logger.warning("Event announce failed for group %s: %s", chat_id, exc)
+                        dead_group_ids.append(group_id)
                     break
                 except Exception as exc:
-                    logger.warning("Event announce error for %s: %s", group.telegram_chat_id, exc)
+                    logger.warning("Event announce error for %s: %s", chat_id, exc)
                     break
             await asyncio.sleep(0.04)
 
-    await asyncio.gather(*[_send(g) for g in groups])
+    tasks = [_send_target(g.telegram_chat_id, g.id) for g in groups]
+    seen_chats = {g.telegram_chat_id for g in groups}
+    for u in users:
+        if u.telegram_id not in seen_chats:
+            seen_chats.add(u.telegram_id)
+            tasks.append(_send_target(u.telegram_id, None))
+
+    await asyncio.gather(*tasks)
 
     async with get_session() as session:
         session.add_all(sent)
@@ -75,7 +92,11 @@ async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0) -> i
         try:
             await bot.send_message(
                 notify_admin_id,
-                f"📢 Event #{event_id} e'loni {len(sent)}/{len(groups)} ta guruhga yuborildi.",
+                (
+                    f"📢 <b>Event #{event_id} e'loni yuborildi!</b>\n"
+                    f"🏰 Guruhlarga: <b>{group_sent}/{len(groups)}</b>\n"
+                    f"👤 Foydalanuvchilarga: <b>{user_sent}/{len(users)}</b>"
+                ),
             )
         except Exception:
             pass

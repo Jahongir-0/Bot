@@ -29,6 +29,8 @@ class User(Base, TimestampMixin):
     level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     daily_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_daily_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    referred_by_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    referral_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stats: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     is_banned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     last_activity: Mapped[datetime] = mapped_column(

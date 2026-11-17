@@ -8,6 +8,7 @@ from handlers.event import router as event_router
 from handlers.market import router as market_router
 from handlers.offer import router as offer_router
 from handlers.profile import router as profile_router
+from handlers.quests import router as quests_router
 from handlers.ranking import router as ranking_router
 from handlers.search import router as search_router
 from handlers.stars import router as stars_router
@@ -27,5 +28,6 @@ def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(offer_router)
     dp.include_router(search_router)
     dp.include_router(ranking_router)
+    dp.include_router(quests_router)
     dp.include_router(stars_router)
     dp.include_router(event_router)

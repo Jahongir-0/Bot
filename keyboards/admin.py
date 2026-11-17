@@ -41,7 +41,7 @@ def admin_home_kb(owner_id: int) -> InlineKeyboardMarkup:
         ),
         InlineKeyboardButton(
             text="🎯 EVENTLAR",
-            callback_data=AdminCb(owner_id=owner_id, section="events", action="list").pack(),
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="menu").pack(),
         ),
     )
     builder.row(
@@ -701,6 +701,12 @@ def admin_settings_kb(owner_id: int, ranking_mode: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="🎖 RANK NARXI VA TASHLASH SONI",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="rank_menu").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🤝 REFERAL VA GURUH MUKOFOTLARI",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="rewards_menu").pack(),
         )
     )
     for r in list_rarities():

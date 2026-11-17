@@ -41,8 +41,8 @@ class MarketCb(CallbackData, prefix="mkt"):
 
 class SearchCb(CallbackData, prefix="srch"):
     owner_id: int
-    action: str  # menu, mode, results, inspect, random
-    mode: str = "character"  # character, anime, rarity, card_id, random
+    action: str  # menu, mode, results, inspect, cat, random
+    mode: str = "character"  # character, anime, rarity, card_id, any, random
     query: str = ""
     page: int = 1
     user_card_id: int = 0
@@ -64,7 +64,12 @@ class TransferCb(CallbackData, prefix="trf"):
 
 class RankingCb(CallbackData, prefix="rnk"):
     owner_id: int
-    scope: str  # global, group
+    scope: str  # global, group, groups
+
+
+class QuestCb(CallbackData, prefix="qst"):
+    owner_id: int
+    action: str  # view, claim_all
 
 
 class StarsCb(CallbackData, prefix="str"):
@@ -75,7 +80,7 @@ class StarsCb(CallbackData, prefix="str"):
 
 class AdminCb(CallbackData, prefix="adm"):
     owner_id: int
-    section: str  # home, cards, users, coins, settings, stats, ranking, broadcast, ban, events, schedule, groups, priority
+    section: str  # home, cards, users, coins, settings, stats, ranking, broadcast, ban, events, evt, schedule, groups, priority
     action: str = "view"
     target_id: int = 0
     extra: str = ""

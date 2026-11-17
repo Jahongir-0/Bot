@@ -65,6 +65,7 @@ class EventService:
             Card.is_deleted.is_(False),
             Card.is_event_card.is_(False),
             Card.dropped_count == 0,
+            Card.drop_limit > 0,
             ~has_owner,
         ]
 
@@ -96,6 +97,8 @@ class EventService:
     ) -> EventResult:
         if not (1 <= int(total_copies) <= MAX_EVENT_COPIES):
             return EventResult(False, f"Nusxa soni 1 dan {MAX_EVENT_COPIES:,} gacha bo‘lishi kerak.", "invalid")
+        if not (1 <= int(hours) <= 720):
+            return EventResult(False, "Event davomiyligi 1 dan 720 soatgacha (30 kun) bo‘lishi kerak.", "invalid")
         if not price_coins and not price_stars:
             return EventResult(False, "Kamida bitta narx (coin yoki Stars) belgilanishi kerak.", "no_price")
 
@@ -110,6 +113,8 @@ class EventService:
         now = utcnow()
         card.is_event_card = True
         card.limited_copies = int(total_copies)
+        card.drop_limit = 0
+        card.drop_weight = 0
         event = LimitedEvent(
             card_id=card.id,
             total_copies=int(total_copies),
@@ -117,7 +122,7 @@ class EventService:
             price_coins=int(price_coins) if price_coins else None,
             price_stars=int(price_stars) if price_stars else None,
             starts_at=now,
-            ends_at=now + timedelta(hours=hours),
+            ends_at=now + timedelta(hours=int(hours)),
             status="active",
             created_by_tg_id=admin_telegram_id,
         )
@@ -238,18 +243,22 @@ class EventService:
         if not event.price_coins:
             return EventResult(False, "Bu event kartasi coin bilan sotilmaydi. ⭐ Stars bilan oling.", "no_price")
 
-        res = await EventService._allocate(session, event, card, user.id)
-        if not res.success:
-            return res
+        if user.coins < int(event.price_coins):
+            return EventResult(False, "❌ Coinlaringiz yetarli emas!", "funds", event=event, card=card)
+
         try:
-            await UserService.debit_coins(
-                session=session,
-                user_id=user.id,
-                amount=int(event.price_coins),
-                tx_type="event_buy",
-                description=f"Event card: {card.character_name}",
-                reference_id=f"event:{event.id}",
-            )
+            async with session.begin_nested():
+                res = await EventService._allocate(session, event, card, user.id)
+                if not res.success:
+                    return res
+                await UserService.debit_coins(
+                    session=session,
+                    user_id=user.id,
+                    amount=int(event.price_coins),
+                    tx_type="event_buy",
+                    description=f"Event card: {card.character_name}",
+                    reference_id=f"event:{event.id}",
+                )
         except InsufficientCoinsError:
             return EventResult(False, "❌ Coinlaringiz yetarli emas!", "funds", event=event, card=card)
 

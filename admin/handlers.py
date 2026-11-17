@@ -42,6 +42,7 @@ from keyboards.event import (
     admin_evt_candidates_kb,
     admin_evt_confirm_kb,
     admin_evt_detail_kb,
+    admin_evt_duration_kb,
     admin_evt_menu_kb,
     admin_evt_price_type_kb,
     admin_evt_stars_kb,
@@ -60,7 +61,7 @@ from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import AdminCb, NavCb
-from utils.constants import PAGE_SIZE, RankingMode, get_rarity_meta, list_rarities
+from utils.constants import EVENT_DURATION_HOURS, PAGE_SIZE, RankingMode, get_rarity_meta, list_rarities
 from utils.formatting import (
     esc,
     fmt_coins,
@@ -102,9 +103,14 @@ class AdminStates(StatesGroup):
 
     evt_copies = State()
     evt_price_coins = State()
+    evt_price_stars = State()
+    evt_duration = State()
     edit_card_limit = State()
     edit_rank_value = State()
     edit_rank_drops = State()
+    edit_ref_inviter = State()
+    edit_ref_invitee = State()
+    edit_group_reward = State()
 
 
 @router.message(Command("admin"))
@@ -1279,6 +1285,30 @@ async def cb_admin_ban_toggle(callback: CallbackQuery, callback_data: AdminCb) -
 # ---------------------------------------------------------------------------
 @router.callback_query(AdminCb.filter(F.section == "settings"))
 async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
+    if callback_data.action == "rewards_menu":
+        await state.clear()
+        await _render_rewards_menu(callback)
+        return
+    if callback_data.action in ("edit_ref_inviter", "edit_ref_invitee", "edit_group_reward"):
+        prompts = {
+            "edit_ref_inviter": (
+                AdminStates.edit_ref_inviter,
+                "🤝 Taklif qiluvchi foydalanuvchi uchun yangi <b>referal coin mukofotini</b> kiriting (0–1,000,000,000):",
+            ),
+            "edit_ref_invitee": (
+                AdminStates.edit_ref_invitee,
+                "🆕 Referal orqali kirgan yangi foydalanuvchi uchun <b>coin mukofotini</b> kiriting (0–1,000,000,000):",
+            ),
+            "edit_group_reward": (
+                AdminStates.edit_group_reward,
+                "🏰 Botni guruhga qo‘shganlik uchun <b>coin mukofotini</b> kiriting (0–1,000,000,000):\n"
+                "<i>(Eslatma: coin bilan birga 1 ta tashlanmagan Epic karta ham avtomatik beriladi.)</i>",
+            ),
+        }
+        st, txt = prompts[callback_data.action]
+        await state.set_state(st)
+        await edit_or_answer(callback, f"{txt}\n<i>Bekor qilish: /cancel</i>")
+        return
     if callback_data.action == "rank_menu":
         await state.clear()
         await _render_rank_menu(callback)
@@ -1317,16 +1347,106 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
 
         rewards = await SettingsService.get_rarity_rewards(session)
         rank_mode = await SettingsService.get_ranking_mode(session)
+        ref_cfg = await SettingsService.get_referral_config(session)
+        grp_coins = await SettingsService.get_group_add_reward_coins(session)
 
     lines = ["🔧 <b>BOT SOZLAMALARI</b>\n\n🪙 <b>Rarity Coin Rewards:</b>"]
     for r, val in rewards.items():
         lines.append(f"• {r}: <b>{val:,} 🪙</b>")
-    lines.append(f"\n🏆 <b>Ranking Mode:</b> <code>{esc(rank_mode)}</code>")
+    lines.append(
+        f"\n🤝 <b>Referal:</b> Taklif qiluvchiga <b>{ref_cfg['inviter_coins']:,} 🪙</b> · "
+        f"Yangi userga <b>{ref_cfg['invitee_coins']:,} 🪙</b>"
+    )
+    lines.append(f"🏰 <b>Guruhga qo‘shish:</b> <b>{grp_coins:,} 🪙</b> + 🟣 1 Epic karta")
+    lines.append(f"🏆 <b>Ranking Mode:</b> <code>{esc(rank_mode)}</code>")
     await edit_or_answer(
         callback,
         "\n".join(lines),
         reply_markup=admin_settings_kb(callback.from_user.id, rank_mode),
     )
+
+
+async def _rewards_menu_text_and_kb(owner_id: int):
+    async with get_session() as session:
+        ref_cfg = await SettingsService.get_referral_config(session)
+        grp_coins = await SettingsService.get_group_add_reward_coins(session)
+    text = (
+        "🤝 <b>REFERAL VA GURUH MUKOFOTLARI</b>\n\n"
+        f"👤 Taklif qiluvchi mukofoti: <b>{ref_cfg['inviter_coins']:,} 🪙</b>\n"
+        f"🆕 Yangi foydalanuvchi mukofoti: <b>{ref_cfg['invitee_coins']:,} 🪙</b>\n"
+        f"🏰 Botni guruhga qo‘shish mukofoti: <b>{grp_coins:,} 🪙</b> + 🟣 1 ta tashlanmagan Epic karta\n\n"
+        "O‘zgartirish uchun quyidagi tugmalardan birini bosing:"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="👤 Taklif qiluvchi coin",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="edit_ref_inviter").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🆕 Yangi user coin",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="edit_ref_invitee").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🏰 Guruhga qo‘shish coin",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="edit_group_reward").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ ORQAGA",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="view").pack(),
+        )
+    )
+    return text, builder.as_markup()
+
+
+async def _render_rewards_menu(callback: CallbackQuery) -> None:
+    text, kb = await _rewards_menu_text_and_kb(callback.from_user.id)
+    await edit_or_answer(callback, text, reply_markup=kb)
+
+
+async def _save_reward_coin_setting(message: Message, state: FSMContext, kind: str) -> None:
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Faqat musbat butun son (yoki 0) kiriting.")
+        return
+    val = int(raw)
+    try:
+        async with get_session() as session:
+            if kind == "inviter":
+                await SettingsService.set_referral_config(session, inviter_coins=val)
+            elif kind == "invitee":
+                await SettingsService.set_referral_config(session, invitee_coins=val)
+            else:
+                await SettingsService.set_group_add_reward_coins(session, val)
+            await AdminService.log_action(
+                session, message.from_user.id, f"edit_{kind}_reward", "settings", kind, {"coins": val}
+            )
+            await session.commit()
+    except ValueError as exc:
+        await message.answer(f"⚠️ {esc(str(exc))}")
+        return
+    await state.clear()
+    text, kb = await _rewards_menu_text_and_kb(message.from_user.id)
+    await message.answer("✅ Saqlandi!\n\n" + text, reply_markup=kb)
+
+
+@router.message(AdminStates.edit_ref_inviter, NotCommandFilter())
+async def fsm_edit_ref_inviter(message: Message, state: FSMContext) -> None:
+    await _save_reward_coin_setting(message, state, "inviter")
+
+
+@router.message(AdminStates.edit_ref_invitee, NotCommandFilter())
+async def fsm_edit_ref_invitee(message: Message, state: FSMContext) -> None:
+    await _save_reward_coin_setting(message, state, "invitee")
+
+
+@router.message(AdminStates.edit_group_reward, NotCommandFilter())
+async def fsm_edit_group_reward(message: Message, state: FSMContext) -> None:
+    await _save_reward_coin_setting(message, state, "group")
 
 
 async def _rank_menu_text_and_kb(owner_id: int):
@@ -1417,7 +1537,7 @@ async def fsm_edit_rarity_reward(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(AdminCb.filter(F.section == "events"))
 async def cb_admin_events(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
-    if callback_data.action in ("view", ""):
+    if callback_data.action in ("view", "list", ""):
         await state.clear()
         await _render_evt_menu(callback)
         return
@@ -1725,6 +1845,7 @@ def _evt_summary(data: dict) -> str:
         prices.append(f"🪙 <b>{int(data['price_coins']):,}</b> coin")
     if data.get("price_stars"):
         prices.append(f"⭐ <b>{int(data['price_stars']):,}</b> Stars")
+    hours = int(data.get("hours", EVENT_DURATION_HOURS))
     meta = get_rarity_meta(data.get("rarity", "Common"))
     return (
         "🎯 <b>EVENTNI TASDIQLASH</b>\n\n"
@@ -1732,28 +1853,38 @@ def _evt_summary(data: dict) -> str:
         f"📺 Anime: {esc(data.get('anime_name', ''))}\n"
         f"📦 Nusxa soni: <b>{data.get('copies')}</b> ta\n"
         f"💳 Narx: {'  yoki  '.join(prices)}\n"
-        "⏳ Davomiyligi: <b>24 soat</b>\n\n"
-        "Karta guruhlarga <b>tashlanmaydi</b>, faqat event orqali olinadi. "
-        "Event boshlanganda barcha faol guruhlarga e’lon yuboriladi."
+        f"⏳ Davomiyligi: <b>{hours} soat</b>\n\n"
+        "🔒 Karta guruhlarga <b>tashlanmaydi</b>, faqat event orqali olinadi (coin reward berilmaydi).\n"
+        "📢 Event boshlanganda barcha faol guruhlar va foydalanuvchilarga e’lon yuboriladi."
     )
 
 
 async def _show_stars_choice(target, state: FSMContext, owner_id: int) -> None:
     async with get_session() as session:
         packages = await SettingsService.get_stars_packages(session)
-    if not packages:
-        await edit_or_answer(
-            target,
-            "⚠️ Stars tariflari yo‘q. Avval Admin → ⭐ STARS TARIFLAR bo‘limida tarif qo‘shing.",
-        ) if isinstance(target, CallbackQuery) else await target.answer(
-            "⚠️ Stars tariflari yo‘q. Avval Admin → ⭐ STARS TARIFLAR bo‘limida tarif qo‘shing."
-        )
-        return
+    await state.set_state(AdminStates.evt_price_stars)
     text = (
-        "⭐ <b>Stars narxini tanlang</b>\n\nTarifdagi Stars miqdori karta narxi bo‘ladi "
-        "(foydalanuvchi shuncha Stars to‘laydi va <b>coin emas, kartaning o‘zini</b> oladi):"
+        "⭐ <b>Stars narxini belgilang</b>\n\n"
+        "Pastdagi tariflardan birini tanlang <b>YOKI</b> istalgan Stars sonini yozib yuboring "
+        "(masalan: <code>75</code> yoki <code>250</code>):\n"
+        "<i>Foydalanuvchi shuncha Stars to‘laydi va faqat event kartaning o‘zini oladi. Bekor qilish: /cancel</i>"
     )
     kb = admin_evt_stars_kb(owner_id, packages)
+    if isinstance(target, CallbackQuery):
+        await edit_or_answer(target, text, reply_markup=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
+
+
+async def _ask_evt_duration(target, state: FSMContext, owner_id: int) -> None:
+    await state.set_state(AdminStates.evt_duration)
+    text = (
+        "⏳ <b>Event qancha vaqt faol bo‘lsin?</b>\n\n"
+        "Quyidagi tugmalardan tanlang <b>YOKI</b> soat sonini yozing "
+        "(1 dan 720 soatgacha, masalan: <code>12</code>, <code>24</code>, <code>48</code>):\n"
+        "<i>Bekor qilish: /cancel</i>"
+    )
+    kb = admin_evt_duration_kb(owner_id)
     if isinstance(target, CallbackQuery):
         await edit_or_answer(target, text, reply_markup=kb)
     else:
@@ -1831,7 +1962,19 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
             await callback.answer("Tarif topilmadi.", show_alert=True)
             return
         await state.update_data(price_stars=int(pkg["stars"]))
+        await _ask_evt_duration(callback, state, admin_id)
+        return
+
+    if action == "dur":
+        if not callback_data.extra.isdigit() or not (1 <= int(callback_data.extra) <= 720):
+            await callback.answer("Noto‘g‘ri vaqt.", show_alert=True)
+            return
+        await state.update_data(hours=int(callback_data.extra))
+        await state.set_state(None)
         data = await state.get_data()
+        if "card_id" not in data or "copies" not in data:
+            await callback.answer("Jarayon eskirgan. Qaytadan boshlang.", show_alert=True)
+            return
         await edit_or_answer(callback, _evt_summary(data), reply_markup=admin_evt_confirm_kb(admin_id))
         return
 
@@ -1840,6 +1983,7 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
         if not all(k in data for k in ("card_id", "copies")):
             await callback.answer("Jarayon eskirgan. Qaytadan boshlang.", show_alert=True)
             return
+        hours = int(data.get("hours", EVENT_DURATION_HOURS))
         async with get_session() as session:
             res = await EventService.create_event(
                 session=session,
@@ -1848,11 +1992,12 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
                 total_copies=int(data["copies"]),
                 price_coins=data.get("price_coins"),
                 price_stars=data.get("price_stars"),
+                hours=hours,
             )
             if res.success:
                 await AdminService.log_action(
                     session, admin_id, "create_limited_event", "event", str(res.event.id),
-                    {"card_id": data["card_id"], "copies": data["copies"]},
+                    {"card_id": data["card_id"], "copies": data["copies"], "hours": hours},
                 )
                 await session.commit()
             else:
@@ -1868,7 +2013,8 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
         await edit_or_answer(
             callback,
             f"✅ <b>Event #{res.event.id} boshlandi!</b>\n\n🎴 {esc(res.card.character_name)} · "
-            f"{res.event.total_copies} nusxa · 24 soat\n📢 E’lon barcha faol guruhlarga yuborilmoqda...",
+            f"{res.event.total_copies} nusxa · {hours} soat\n"
+            "📢 E’lon barcha guruhlar va foydalanuvchilarga yuborilmoqda...",
             reply_markup=admin_evt_menu_kb(admin_id, []),
         )
         return
@@ -1931,6 +2077,31 @@ async def fsm_evt_price_coins(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("mode") == "both":
         await _show_stars_choice(message, state, message.from_user.id)
+        return
+    await _ask_evt_duration(message, state, message.from_user.id)
+
+
+@router.message(AdminStates.evt_price_stars, NotCommandFilter())
+async def fsm_evt_price_stars(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or not (1 <= int(raw) <= 100_000):
+        await message.answer("⚠️ Stars narxi 1 dan 100,000 gacha butun son bo‘lishi kerak (yoki tugmadan tanlang).")
+        return
+    await state.update_data(price_stars=int(raw))
+    await _ask_evt_duration(message, state, message.from_user.id)
+
+
+@router.message(AdminStates.evt_duration, NotCommandFilter())
+async def fsm_evt_duration(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or not (1 <= int(raw) <= 720):
+        await message.answer("⚠️ Davomiylik 1 dan 720 soatgacha (30 kun) butun son bo‘lishi kerak.")
+        return
+    await state.update_data(hours=int(raw))
+    await state.set_state(None)
+    data = await state.get_data()
+    if "card_id" not in data or "copies" not in data:
+        await message.answer("⚠️ Jarayon eskirgan. Qaytadan boshlang.", reply_markup=admin_home_kb(message.from_user.id))
         return
     await message.answer(_evt_summary(data), reply_markup=admin_evt_confirm_kb(message.from_user.id))
 

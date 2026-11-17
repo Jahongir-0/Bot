@@ -323,12 +323,24 @@ class DropService:
         if priority_id is not None:
             await SettingsService.set_next_priority_card_id(session, None)
             p_card = await session.get(Card, priority_id)
-            if p_card is not None and p_card.is_available and not p_card.is_deleted and not p_card.is_event_card:
+            if (
+                p_card is not None
+                and p_card.is_available
+                and not p_card.is_deleted
+                and not p_card.is_event_card
+                and p_card.drop_limit > 0
+            ):
                 return p_card, True
 
         if preferred_card_id is not None:
             cand = await session.get(Card, preferred_card_id)
-            if cand is not None and cand.is_available and not cand.is_deleted and not cand.is_event_card:
+            if (
+                cand is not None
+                and cand.is_available
+                and not cand.is_deleted
+                and not cand.is_event_card
+                and cand.drop_limit > 0
+            ):
                 return cand, True
 
         rules = await SettingsService.get_drop_rules(session)

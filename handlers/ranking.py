@@ -25,6 +25,43 @@ async def _show_ranking(
     if scope == "group" and not in_group:
         scope = "global"
 
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+    if scope == "groups":
+        async with get_session() as session:
+            grp_entries = await RankingService.get_groups_top(session, limit=10)
+            standing = (
+                await RankingService.get_group_standing(session, db_group.id)
+                if db_group is not None
+                else None
+            )
+
+        header = "🏰 <b>GURUHLAR TOP 10 REYTINGI</b>"
+        if not grp_entries:
+            text = f"{header}\n\n📭 Hozircha faol guruhlar reytingi bo‘sh."
+        else:
+            lines = [f"{header}\n<i>(Faol bot foydalanuvchilari va olingan kartalar bo‘yicha)</i>\n"]
+            for g in grp_entries:
+                prefix = medals.get(g.rank, f"<b>#{g.rank}</b>")
+                members_info = f" · 💬{g.member_count}" if g.member_count else ""
+                lines.append(
+                    f"{prefix} <b>{esc(g.group.title)}</b> — "
+                    f"👤 {g.active_users} faol | 🎴 {g.claimed_cards} karta{members_info} · ⭐ {g.score}"
+                )
+            if standing is not None and standing.rank > 10:
+                lines.append(
+                    f"\n📍 Ushbu guruh o‘rni: <b>#{standing.rank}</b> "
+                    f"(👤 {standing.active_users} faol · 🎴 {standing.claimed_cards} karta · ⭐ {standing.score})"
+                )
+            text = "\n".join(lines)
+
+        await edit_or_answer(
+            target,
+            text,
+            reply_markup=ranking_kb(owner_id=owner_id, current_scope=scope, in_group=in_group),
+        )
+        return
+
     async with get_session() as session:
         if scope == "group" and db_group is not None:
             entries = await RankingService.get_group_top(session, db_group.id, limit=10)
@@ -36,7 +73,6 @@ async def _show_ranking(
     if not entries:
         text = f"{header}\n\n📭 Hozircha reyting ma'lumotlari yo‘q."
     else:
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         lines = [f"{header}\n"]
         for e in entries:
             prefix = medals.get(e.rank, f"<b>#{e.rank}</b>")

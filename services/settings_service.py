@@ -230,3 +230,54 @@ class SettingsService:
     @staticmethod
     async def set_next_priority_card_id(session: AsyncSession, card_id: Optional[int]) -> None:
         await SettingsService.set_value(session, "next_priority_card_id", card_id)
+
+    @staticmethod
+    async def get_referral_config(session: AsyncSession) -> Dict[str, int]:
+        raw = await SettingsService.get_value(
+            session,
+            "referral_config",
+            DEFAULT_SETTINGS["referral_config"],
+        )
+        cfg = dict(raw) if isinstance(raw, dict) else {}
+        return {
+            "inviter_coins": max(0, int(cfg.get("inviter_coins", 500))),
+            "invitee_coins": max(0, int(cfg.get("invitee_coins", 250))),
+        }
+
+    @staticmethod
+    async def set_referral_config(
+        session: AsyncSession,
+        inviter_coins: Optional[int] = None,
+        invitee_coins: Optional[int] = None,
+    ) -> Dict[str, int]:
+        cfg = await SettingsService.get_referral_config(session)
+        if inviter_coins is not None:
+            val = int(inviter_coins)
+            if not (0 <= val <= COINS_MAX):
+                raise ValueError(f"Taklif qiluvchi mukofoti 0 dan {COINS_MAX:,} gacha bo‘lishi kerak.")
+            cfg["inviter_coins"] = val
+        if invitee_coins is not None:
+            val = int(invitee_coins)
+            if not (0 <= val <= COINS_MAX):
+                raise ValueError(f"Yangi foydalanuvchi mukofoti 0 dan {COINS_MAX:,} gacha bo‘lishi kerak.")
+            cfg["invitee_coins"] = val
+        await SettingsService.set_value(session, "referral_config", cfg)
+        return cfg
+
+    @staticmethod
+    async def get_group_add_reward_coins(session: AsyncSession) -> int:
+        val = await SettingsService.get_value(
+            session,
+            "group_add_reward_coins",
+            DEFAULT_SETTINGS["group_add_reward_coins"],
+        )
+        return max(0, int(val))
+
+    @staticmethod
+    async def set_group_add_reward_coins(session: AsyncSession, coins: int) -> int:
+        val = int(coins)
+        if not (0 <= val <= COINS_MAX):
+            raise ValueError(f"Guruh mukofoti 0 dan {COINS_MAX:,} gacha bo‘lishi kerak.")
+        await SettingsService.set_value(session, "group_add_reward_coins", val)
+        return val
+

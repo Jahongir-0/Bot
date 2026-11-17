@@ -27,7 +27,7 @@ def format_card_block(card: Card, show_status: bool = False) -> str:
     ]
     if card.is_event_card:
         total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
-        lines.append(f"🎯 <b>EVENT KARTA</b> — cheklangan nusxa ({total})")
+        lines.append(f"🎯 <b>EVENT KARTA</b> · cheklangan nusxa ({total})")
     if show_status:
         status_text = "🟢 Mavjud" if (card.is_available and not card.is_deleted) else "🔴 O'chirilgan/Nofaol"
         lines.append(f"📌 <b>Status:</b> {status_text} (Weight: {card.drop_weight})")
@@ -38,7 +38,7 @@ def format_card_block(card: Card, show_status: bool = False) -> str:
 
 def event_tag(card: Card) -> str:
     """Kolleksiya ro'yxatlarida event/cheklangan kartani belgilash uchun."""
-    return "🎯 " if getattr(card, "is_event_card", False) else ""
+    return "🎯 [EVENT] " if getattr(card, "is_event_card", False) else ""
 
 
 def format_drop_message(card: Card, active_event: Optional[Event] = None) -> str:
@@ -135,15 +135,20 @@ def format_group_settings(group: Group) -> str:
 
 
 def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", state: str = "active") -> str:
-    """Limitli karta eventi e'loni (guruhlarga va /event bo'limida)."""
-    from datetime import timezone as _tz
+    """Limitli karta eventi e'loni (guruhlarga, shaxsiy chatlarga va /event bo'limida)."""
     from zoneinfo import ZoneInfo
 
-    from models.base import ensure_utc
+    from models.base import ensure_utc, utcnow
 
     meta = get_rarity_meta(card.rarity)
-    ends_local = ensure_utc(event.ends_at).astimezone(ZoneInfo(tz_name))
+    ends_utc = ensure_utc(event.ends_at)
+    ends_local = ends_utc.astimezone(ZoneInfo(tz_name))
     remaining = max(0, int(event.total_copies) - int(event.sold_count))
+
+    secs_left = max(0, int((ends_utc - utcnow()).total_seconds()))
+    hours_left = secs_left // 3600
+    mins_left = (secs_left % 3600) // 60
+    dur_str = f"{hours_left} soat {mins_left} daq." if hours_left > 0 else f"{mins_left} daqiqa"
 
     prices = []
     if event.price_coins:
@@ -156,7 +161,7 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
     elif state == "ended":
         title = "⌛ <b>EVENT TUGADI</b>"
     else:
-        title = "🎯 <b>LIMITLI EVENT BOSHLANDI!</b> 🎯"
+        title = "🎯 <b>YANGI LIMITLI EVENT BOSHLANDI!</b> 🎯"
 
     lines = [
         title,
@@ -168,12 +173,16 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
         f"📦 Cheklangan nusxa: <b>{event.total_copies} ta</b>",
     ]
     if state == "active":
-        lines.append(f"✅ Qoldi: <b>{remaining} ta</b>")
-        lines.append("🔒 Bu karta guruhlarga <b>tashlanmaydi</b> — faqat shu event orqali olinadi!")
-        lines.append(f"💳 Narxi: {'  yoki  '.join(prices)}")
-        lines.append(f"⏳ Tugaydi: <b>{ends_local:%d.%m.%Y %H:%M}</b>")
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append("👇 Pastdagi tugma orqali oling! (Bir kishi — bitta nusxa)")
+        lines.extend(
+            [
+                f"✅ Qolgan nusxa: <b>{remaining} ta</b>",
+                "✨ <i>Bu karta boshqa hech kimda yo‘q va guruhlarga tashlanmaydi!</i>",
+                f"💳 Narxi: {'  yoki  '.join(prices)}",
+                f"⏳ Amal qiladi: <b>{ends_local:%d.%m.%Y %H:%M}</b> gacha ({dur_str})",
+                "━━━━━━━━━━━━━━━",
+                "👇 Pastdagi tugma yoki /event orqali oling! (Har bir odamga 1 ta nusxa)",
+            ]
+        )
     else:
         lines.append(f"🏁 Sotilgan: <b>{event.sold_count}/{event.total_copies}</b>")
         lines.append("━━━━━━━━━━━━━━━")

@@ -539,6 +539,12 @@ def ranking_kb(owner_id: int, current_scope: str, in_group: bool) -> InlineKeybo
     builder.row(*buttons)
     builder.row(
         InlineKeyboardButton(
+            text=("• 🏰 GURUHLAR TOP 10 •" if current_scope == "groups" else "🏰 GURUHLAR TOP 10"),
+            callback_data=RankingCb(owner_id=owner_id, scope="groups").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="⬅️ ORQAGA",
             callback_data=NavCb(owner_id=owner_id, target="profile").pack(),
         ),

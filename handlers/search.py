@@ -7,6 +7,8 @@ from aiogram.types import CallbackQuery, Message
 from database.session import get_session
 from keyboards.main_menu import back_home_kb
 from keyboards.market import (
+    search_catalog_inspect_kb,
+    search_catalog_results_kb,
     search_inspect_kb,
     search_menu_kb,
     search_rarity_kb,
@@ -16,7 +18,7 @@ from models.user import User
 from services.search_service import SearchService
 from utils.callback_data import NavCb, SearchCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
-from utils.formatting import esc, fmt_coins, format_card_block
+from utils.formatting import esc, event_tag, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
 router = Router(name="search")
@@ -41,10 +43,18 @@ async def _render_results(
             page=page,
             page_size=PAGE_SIZE,
         )
+        catalog_cards = []
+        catalog_total = 0
+        if total == 0:
+            catalog_cards, catalog_total = await SearchService.search_catalog_cards(
+                session=session,
+                mode=mode,
+                query=query,
+                page=page,
+                page_size=PAGE_SIZE,
+            )
 
-    if not items:
-        text = f"🔍 <b>GLOBAL QIDIRUV</b>\n\nSo‘rov: <code>{esc(query or mode)}</code>\n📭 Hech qanday karta topilmadi."
-    else:
+    if total > 0:
         lines = [f"🔍 <b>GLOBAL QIDIRUV NATIJALARI</b> (Jami: {total})\n"]
         for item in items:
             meta = get_rarity_meta(item.card.rarity)
@@ -54,22 +64,62 @@ async def _render_results(
                 else "🔴 Sotuvda emas"
             )
             lines.append(
-                f"🎴 <b>{esc(item.card.character_name)}</b>\n"
+                f"🎴 {event_tag(item.card)}<b>{esc(item.card.character_name)}</b>\n"
                 f"📺 {esc(item.card.anime_name)} · {meta.emoji} {esc(item.card.rarity)}\n"
                 f"👤 Owner: {esc(item.owner.display_name)} | {status_line}\n"
             )
-        text = "\n".join(lines)
+        await edit_or_answer(
+            target,
+            "\n".join(lines),
+            reply_markup=search_results_kb(
+                owner_id=owner_id,
+                items=items,
+                mode=mode,
+                query=query,
+                page=page,
+                total=total,
+                page_size=PAGE_SIZE,
+            ),
+        )
+        return
 
+    if catalog_cards:
+        lines = [
+            f"📖 <b>KATALOGDAN TOPILGAN KARTALAR</b> (Jami: {catalog_total})\n"
+            "<i>Hali foydalanuvchilarda yo‘q, umumiy katalogdan topildi:</i>\n"
+        ]
+        for card in catalog_cards:
+            meta = get_rarity_meta(card.rarity)
+            lines.append(
+                f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(card.rarity)}\n"
+                f"📺 {esc(card.anime_name)} · 💰 {fmt_coins(card.base_value)} 🪙 · <code>{esc(card.card_code)}</code>\n"
+            )
+        await edit_or_answer(
+            target,
+            "\n".join(lines),
+            reply_markup=search_catalog_results_kb(
+                owner_id=owner_id,
+                cards=catalog_cards,
+                mode=mode,
+                query=query,
+                page=page,
+                total=catalog_total,
+                page_size=PAGE_SIZE,
+            ),
+        )
+        return
+
+    text = f"🔍 <b>GLOBAL QIDIRUV</b>\n\nSo‘rov: <code>{esc(query or mode)}</code>\n📭 Hech qanday karta topilmadi."
     await edit_or_answer(
         target,
         text,
         reply_markup=search_results_kb(
             owner_id=owner_id,
-            items=items,
+            items=[],
             mode=mode,
             query=query,
-            page=page,
-            total=total,
+            page=1,
+            total=0,
             page_size=PAGE_SIZE,
         ),
     )
@@ -80,11 +130,13 @@ async def cmd_search(message: Message, state: FSMContext) -> None:
     await state.clear()
     parts = message.text.split(maxsplit=1) if message.text else []
     if len(parts) == 2 and parts[1].strip():
-        await _render_results(message, message.from_user.id, "character", parts[1].strip(), 1)
+        q = parts[1].strip()
+        await state.update_data(last_search_query=q, last_search_mode="any")
+        await _render_results(message, message.from_user.id, "any", q, 1)
         return
     await message.answer(
         "🔍 <b>GLOBAL KARTA QIDIRUVI</b>\n\n"
-        "Barcha guruhlardagi barcha foydalanuvchilar kartalaridan qidiring:",
+        "Barcha foydalanuvchilar kartalari va umumiy katalogdan qidiring:",
         reply_markup=search_menu_kb(message.from_user.id),
     )
 
@@ -123,7 +175,7 @@ async def cb_search_mode(
     await state.update_data(search_mode=callback_data.mode, owner_tg_id=callback.from_user.id)
     await edit_or_answer(
         callback,
-        prompts.get(callback_data.mode, "Qidiruv so‘zini yozing:"),
+        prompts.get(callback_data.mode, "Qidiruv so‘zini yozing:") + "\n<i>Bekor qilish: /cancel</i>",
         reply_markup=back_home_kb(callback.from_user.id, "search"),
     )
 
@@ -134,6 +186,9 @@ async def fsm_search_query(message: Message, state: FSMContext) -> None:
     if data.get("owner_tg_id") != message.from_user.id:
         return
     query = (message.text or "").strip()
+    if not query:
+        await message.answer("⚠️ Qidiruv so‘zini yozing.")
+        return
     mode = data.get("search_mode", "character")
     await state.set_state(None)
     await state.update_data(last_search_query=query, last_search_mode=mode)
@@ -147,10 +202,10 @@ async def cb_search_results(
     state: FSMContext,
 ) -> None:
     query = callback_data.query
-    if callback_data.mode != "random" and callback_data.mode != "rarity":
+    if callback_data.mode not in ("random", "rarity"):
         data = await state.get_data()
         saved_q = data.get("last_search_query", "")
-        if saved_q and saved_q.startswith(query):
+        if saved_q and (not query or saved_q.startswith(query)):
             query = saved_q
     await _render_results(
         callback,
@@ -189,6 +244,33 @@ async def cb_search_inspect(
         owner_id=callback.from_user.id,
         item=item,
         is_self_owner=(item.owner.id == db_user.id),
+        mode=callback_data.mode,
+        query=callback_data.query,
+        page=callback_data.page,
+    )
+    await edit_or_answer(callback, text, reply_markup=kb)
+
+
+@router.callback_query(SearchCb.filter(F.action == "cat"))
+async def cb_search_catalog_inspect(
+    callback: CallbackQuery,
+    callback_data: SearchCb,
+) -> None:
+    async with get_session() as session:
+        card = await SearchService.inspect_catalog_card(session, callback_data.user_card_id)
+
+    if card is None:
+        await callback.answer("Karta topilmadi.", show_alert=True)
+        return
+
+    extra = (
+        "🎯 Bu karta limitli event kartasi."
+        if card.is_event_card
+        else f"🔁 Guruhlarga tashlanishi: <b>{card.dropped_count}/{card.drop_limit}</b>"
+    )
+    text = f"{format_card_block(card)}\n\n📖 <i>Umumiy katalogdan</i>\n{extra}"
+    kb = search_catalog_inspect_kb(
+        owner_id=callback.from_user.id,
         mode=callback_data.mode,
         query=callback_data.query,
         page=callback_data.page,

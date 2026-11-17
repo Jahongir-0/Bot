@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _col_defs(dialect: str):
     bool_false = "FALSE" if dialect == "postgresql" else "0"
+    bool_true = "TRUE" if dialect == "postgresql" else "1"
     dt = "TIMESTAMP WITH TIME ZONE" if dialect == "postgresql" else "DATETIME"
     return {
         "cards": [
@@ -28,7 +29,13 @@ def _col_defs(dialect: str):
         "groups": [
             ("member_count", "INTEGER"),
             ("member_count_updated_at", dt),
-            ("auto_drop_count", "BOOLEAN NOT NULL DEFAULT " + ("TRUE" if dialect == "postgresql" else "1")),
+            ("auto_drop_count", f"BOOLEAN NOT NULL DEFAULT {bool_true}"),
+            ("add_reward_claimed", f"BOOLEAN NOT NULL DEFAULT {bool_false}"),
+            ("added_by_user_id", "INTEGER"),
+        ],
+        "users": [
+            ("referred_by_id", "INTEGER"),
+            ("referral_count", "INTEGER NOT NULL DEFAULT 0"),
         ],
     }
 

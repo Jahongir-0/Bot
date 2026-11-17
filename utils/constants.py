@@ -119,12 +119,28 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     },
     "ranking_mode": RankingMode.WEIGHTED.value,
     "offer_expiry_hours": 24,
+    "referral_config": {
+        "inviter_coins": 500,
+        "invitee_coins": 250,
+    },
+    "group_add_reward_coins": 1000,
     "stars_packages": [
         {"id": "pack_100", "stars": 100, "coins": 10000, "label": "⭐ 100 Stars → 10,000 coins"},
         {"id": "pack_500", "stars": 500, "coins": 60000, "label": "⭐ 500 Stars → 60,000 coins"},
         {"id": "pack_1000", "stars": 1000, "coins": 135000, "label": "⭐ 1000 Stars → 135,000 coins"},
     ],
 }
+
+QUEST_DEFINITIONS: List[Dict[str, object]] = [
+    {"id": "first_card", "title": "🎴 Ilk qadam", "desc": "Kamida 1 ta karta yig‘ing", "metric": "total_cards", "target": 1, "reward": 150},
+    {"id": "cards_10", "title": "📦 Kolleksioner", "desc": "10 ta karta yig‘ing", "metric": "total_cards", "target": 10, "reward": 400},
+    {"id": "cards_25", "title": "🏛️ Karta Ustasi", "desc": "25 ta karta yig‘ing", "metric": "total_cards", "target": 25, "reward": 1000},
+    {"id": "rare_hunter", "title": "💎 Noyob ovchi", "desc": "Epic, Legendary yoki Mythic karta oling", "metric": "high_rarity", "target": 1, "reward": 500},
+    {"id": "streak_3", "title": "🔥 3 kunlik seriya", "desc": "Ketma-ket 3 kun /daily oling", "metric": "daily_streak", "target": 3, "reward": 300},
+    {"id": "streak_7", "title": "🌟 Haftalik faollik", "desc": "Ketma-ket 7 kun /daily oling", "metric": "daily_streak", "target": 7, "reward": 800},
+    {"id": "ref_1", "title": "🤝 Ilk do‘st", "desc": "1 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 1, "reward": 300},
+    {"id": "ref_5", "title": "📣 Jamoa yetakchisi", "desc": "5 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 5, "reward": 1500},
+]
 
 PAGE_SIZE = 5
 MAX_CARD_PRICE = 10_000_000

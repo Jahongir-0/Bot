@@ -130,6 +130,40 @@ def admin_evt_stars_kb(owner_id: int, packages: List[dict]) -> InlineKeyboardMar
     return builder.as_markup()
 
 
+def admin_evt_duration_kb(owner_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="⏱ 6 soat",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="dur", extra="6").pack(),
+        ),
+        InlineKeyboardButton(
+            text="⏱ 12 soat",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="dur", extra="12").pack(),
+        ),
+        InlineKeyboardButton(
+            text="⏱ 24 soat",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="dur", extra="24").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📆 48 soat (2 kun)",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="dur", extra="48").pack(),
+        ),
+        InlineKeyboardButton(
+            text="📆 72 soat (3 kun)",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="dur", extra="72").pack(),
+        ),
+        InlineKeyboardButton(
+            text="📆 7 kun (168 soat)",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="dur", extra="168").pack(),
+        ),
+    )
+    _back_row(builder, owner_id, AdminCb(owner_id=owner_id, section="evt", action="menu").pack())
+    return builder.as_markup()
+
+
 def admin_evt_confirm_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(

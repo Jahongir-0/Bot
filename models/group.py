@@ -41,6 +41,8 @@ class Group(Base, TimestampMixin):
     member_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     member_count_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     auto_drop_count: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    add_reward_claimed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    added_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class GroupMember(Base, TimestampMixin):

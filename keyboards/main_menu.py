@@ -48,6 +48,16 @@ def main_menu_kb(owner_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(
+            text="🤝 REFERAL",
+            callback_data=NavCb(owner_id=owner_id, target="referral").pack(),
+        ),
+        InlineKeyboardButton(
+            text="📋 VAZIFALAR",
+            callback_data=NavCb(owner_id=owner_id, target="quests").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="❓ YORDAM",
             callback_data=NavCb(owner_id=owner_id, target="help").pack(),
         )
@@ -92,6 +102,16 @@ def profile_kb(owner_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⭐ COINS OLISH",
             callback_data=NavCb(owner_id=owner_id, target="stars").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🤝 REFERAL",
+            callback_data=NavCb(owner_id=owner_id, target="referral").pack(),
+        ),
+        InlineKeyboardButton(
+            text="📋 VAZIFALAR",
+            callback_data=NavCb(owner_id=owner_id, target="quests").pack(),
         ),
     )
     builder.row(
