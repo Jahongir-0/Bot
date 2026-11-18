@@ -1,7 +1,7 @@
 import logging
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import SkipHandler, TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from database.session import get_session
@@ -67,15 +67,15 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
     """V2 Asosiy Drop Mexanikasi: guruhda drop xabariga personaj ismini REPLY qilib yozish orqali olish."""
     txt = (message.text or "").strip()
     if not txt or txt.startswith("/"):
-        return
+        raise SkipHandler()
     replied = message.reply_to_message
     if replied is None or replied.from_user is None or not replied.from_user.is_bot:
-        return
+        raise SkipHandler()
 
     async with get_session() as session:
         drops = await DropService.get_recent_unclaimed_drops(session, message.chat.id, limit=10)
         if not drops:
-            return
+            raise SkipHandler()
 
         target_drop = None
         target_card = None
@@ -85,10 +85,11 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
                 break
 
         if target_drop is None or target_card is None:
-            return
+            logger.info("Drop reply: reply xabar (%s) faol dropga mos emas (chat %s)", replied.message_id, message.chat.id)
+            raise SkipHandler()
 
         if not DropService.matches_character_guess(target_card, txt):
-            return
+            raise SkipHandler()
 
         result = await DropService.claim_drop(
             session=session,
