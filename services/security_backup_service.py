@@ -31,18 +31,6 @@ _BOT_ROOT = Path(__file__).resolve().parent.parent
 BACKUP_DIR = _BOT_ROOT / "backups"
 MEDIA_CARDS_DIR = _BOT_ROOT / "media_cards"
 MAX_ZIP_BYTES = 50 * 1024 * 1024
-MAX_ZIP_ENTRIES = 2000
-
-
-@dataclass
-class ZipImportReport:
-    total_files: int = 0
-    total_cards: int = 0
-    total_images: int = 0
-    added: int = 0
-    duplicates: int = 0
-    failed: int = 0
-    failed_files: List[str] = field(default_factory=list)
 
 
 class SecurityBackupService:
@@ -241,169 +229,12 @@ class SecurityBackupService:
         await session.flush()
         return int((u_res.rowcount or 0) + (g_res.rowcount or 0))
 
-    # ------------------------------------------------------------------
-    # ZIP Card Importer (xavfsiz: ZipSlip & size limits)
-    # ------------------------------------------------------------------
+    # ZIP Card Importer -> services/card_zip_import.py (v3)
     @staticmethod
-    def _is_safe_zip_member(name: str) -> bool:
-        if not name or name.startswith("/") or "\\" in name:
-            return False
-        parts = Path(name).parts
-        return ".." not in parts
+    async def import_cards_from_zip(session, zip_bytes: bytes, admin_tg_id: int, bot, progress=None):
+        from services.card_zip_import import import_cards_from_zip as _imp
 
-    @staticmethod
-    async def import_cards_from_zip(
-        session: AsyncSession, zip_bytes: bytes, admin_tg_id: int
-    ) -> ZipImportReport:
-        report = ZipImportReport()
-        if len(zip_bytes) > MAX_ZIP_BYTES:
-            report.failed = 1
-            report.failed_files.append("ZIP hajmi 50MB dan katta.")
-            return report
-
-        try:
-            zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-        except zipfile.BadZipFile:
-            report.failed = 1
-            report.failed_files.append("Yaroqsiz ZIP arxiv.")
-            return report
-
-        with zf:
-            infos = [i for i in zf.infolist() if not i.is_dir()]
-            if len(infos) > MAX_ZIP_ENTRIES:
-                report.failed = 1
-                report.failed_files.append(f"Fayllar soni juda ko‘p ({len(infos)} > {MAX_ZIP_ENTRIES}).")
-                return report
-
-            total_uncomp = sum(i.file_size for i in infos)
-            if total_uncomp > MAX_ZIP_BYTES * 2:
-                report.failed = 1
-                report.failed_files.append("ZIP ichidagi fayllar hajmi xavfsiz limitdan oshib ketdi.")
-                return report
-
-            report.total_files = len(infos)
-            img_exts = {".jpg", ".jpeg", ".png", ".webp"}
-            MEDIA_CARDS_DIR.mkdir(parents=True, exist_ok=True)
-            extracted_images: Dict[str, str] = {}
-            manifest_records: List[Dict[str, Any]] = []
-
-            for info in infos:
-                if not SecurityBackupService._is_safe_zip_member(info.filename):
-                    report.failed += 1
-                    report.failed_files.append(f"{info.filename} (xavfli yo‘l)")
-                    continue
-                fname = Path(info.filename).name
-                ext = Path(fname).suffix.lower()
-                data = zf.read(info.filename)
-
-                if ext in img_exts:
-                    report.total_images += 1
-                    safe_out = MEDIA_CARDS_DIR / fname
-                    safe_out.write_bytes(data)
-                    extracted_images[fname.lower()] = str(safe_out)
-                    extracted_images[info.filename.lower()] = str(safe_out)
-                elif ext == ".json":
-                    try:
-                        parsed = json.loads(data.decode("utf-8"))
-                        if isinstance(parsed, list):
-                            manifest_records.extend(p for p in parsed if isinstance(p, dict))
-                    except Exception as exc:
-                        report.failed += 1
-                        report.failed_files.append(f"{fname}: JSON xato ({exc})")
-                elif ext == ".csv":
-                    try:
-                        reader = csv.DictReader(io.StringIO(data.decode("utf-8")))
-                        manifest_records.extend(dict(r) for r in reader)
-                    except Exception as exc:
-                        report.failed += 1
-                        report.failed_files.append(f"{fname}: CSV xato ({exc})")
-
-            # Agar JSON/CSV bo'lmasa, rasm fayl nomlaridan: "Character - Anime - Rank.jpg"
-            if not manifest_records and extracted_images:
-                seen_paths = set()
-                for _, fpath in extracted_images.items():
-                    if fpath in seen_paths:
-                        continue
-                    seen_paths.add(fpath)
-                    stem = Path(fpath).stem
-                    parts = [p.strip() for p in stem.split(" - ")]
-                    char_name = parts[0] if parts else stem
-                    anime_name = parts[1] if len(parts) > 1 else "Anime"
-                    rank_name = parts[2] if len(parts) > 2 else "Common"
-                    manifest_records.append(
-                        {
-                            "character_name": char_name,
-                            "anime_name": anime_name,
-                            "rarity": rank_name,
-                            "image": fpath,
-                        }
-                    )
-
-            rcfg = await SettingsService.get_rarity_config(session)
-            report.total_cards = len(manifest_records)
-
-            for idx, rec in enumerate(manifest_records, start=1):
-                char_name = str(rec.get("character_name") or rec.get("character") or "").strip()
-                anime_name = str(rec.get("anime_name") or rec.get("anime") or rec.get("media") or "").strip()
-                rarity = str(rec.get("rarity") or rec.get("rank") or "Common").strip().title()
-                mtype = str(rec.get("media_type") or "Anime").strip()
-                if mtype not in MEDIA_TYPES:
-                    mtype = "Anime"
-                if rarity not in RARITY_REGISTRY:
-                    rarity = "Common"
-                img_ref = str(rec.get("image") or rec.get("image_url") or "").strip()
-                if img_ref and img_ref.lower() in extracted_images:
-                    img_ref = extracted_images[img_ref.lower()]
-
-                if not char_name or not anime_name or not img_ref:
-                    report.failed += 1
-                    report.failed_files.append(f"Row #{idx}: character/anime/image yetishmaydi")
-                    continue
-
-                dup = (
-                    await session.execute(
-                        select(Card.id).where(
-                            func.lower(Card.character_name) == char_name.lower(),
-                            func.lower(Card.anime_name) == anime_name.lower(),
-                            func.lower(Card.rarity) == rarity.lower(),
-                            Card.is_deleted.is_(False),
-                        )
-                    )
-                ).first()
-                if dup is not None:
-                    report.duplicates += 1
-                    continue
-
-                base_val = int(rec.get("base_value") or rcfg.get(rarity, {}).get("value", 1000))
-                drop_lim = int(rec.get("drop_limit") or rcfg.get(rarity, {}).get("drops", 1))
-                card = await CardService.create_card(
-                    session,
-                    character_name=char_name,
-                    anime_name=anime_name,
-                    image=img_ref,
-                    rarity=rarity,
-                    base_value=base_val,
-                    drop_limit=drop_lim,
-                )
-                card.media_type = mtype
-                if isinstance(rec.get("aliases"), list):
-                    card.aliases = [str(a) for a in rec["aliases"] if a]
-                report.added += 1
-
-        await CommunityService.log_audit(
-            session,
-            admin_tg_id,
-            "zip_import",
-            "cards",
-            details={
-                "cards": report.total_cards,
-                "added": report.added,
-                "duplicates": report.duplicates,
-                "failed": report.failed,
-            },
-        )
-        await session.flush()
-        return report
+        return await _imp(session, zip_bytes, admin_tg_id, bot, progress)
 
     # ------------------------------------------------------------------
     # Full ZIP Backup & Safe Restore (Memory)

@@ -227,6 +227,12 @@ def admin_user_detail_kb(owner_id: int, target_user: User) -> InlineKeyboardMark
             callback_data=AdminCb(owner_id=owner_id, section="ban", action="temp_menu", target_id=target_user.id).pack(),
         ),
     )
+    builder.row(
+        InlineKeyboardButton(
+            text="💎 VIP berish / olish",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_menu", target_id=target_user.id).pack(),
+        ),
+    )
     ban_btn = (
         InlineKeyboardButton(
             text="🔓 Bandan chiqarish",

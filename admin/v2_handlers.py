@@ -199,17 +199,45 @@ async def cb_v2_add_choice(callback: CallbackQuery, state: FSMContext, admin_per
 async def cb_v2_zip_prompt(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
+    from services.card_zip_import import rank_table
+
     await state.set_state(AdminV2States.waiting_zip_cards)
     await state.update_data(owner_tg_id=callback.from_user.id)
+    ranks = "\n".join(f"   <b>{rid}</b> = {esc(name)}" for rid, name in rank_table())
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="📥 Namuna ZIP olish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="zip_sample").pack()))
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="v").pack()))
     await edit_or_answer(
         callback,
-        "📦 <b>ZIP CARD IMPORT</b>\n\n"
-        "Botga <code>.zip</code> arxiv faylini yuboring (max 50 MB).\n"
-        "• Ichida <code>cards.json</code> yoki <code>cards.csv</code> + rasmlar bo‘lishi mumkin;\n"
-        "• Yoki rasmlar nomini <code>Personaj - Anime - Rank.jpg</code> ko‘rinishida joylang.\n"
-        "<i>Bekor qilish: /cancel</i>",
-        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
+        "📦 <b>ZIP ORQALI KARTA QO‘SHISH</b>\n\n"
+        "ZIP ichida <code>cards.json</code> (yoki <code>cards.csv</code>) va rasmlar bo‘lsin.\n\n"
+        "<b>Majburiy maydonlar</b> (bittasi yo‘q bo‘lsa karta qo‘shilmaydi):\n"
+        "• <code>image</code> — rasm fayl nomi\n"
+        "• <code>character_name</code> — personaj ismi\n"
+        "• <code>media_type</code> — Anime, Manga, Manhwa, Manhua, Comic, Cartoon, Movie, TV Series, Other\n"
+        "• <code>media_name</code> — asar nomi\n"
+        "• <code>rank_id</code> — rank raqami:\n"
+        f"{ranks}\n\n"
+        "ℹ️ Rank nomini o‘zgartirsangiz ham raqami o‘zgarmaydi.\n"
+        "📥 Namuna ZIP ichida sun’iy intellekt uchun tayyor ko‘rsatma ham bor.\n\n"
+        "Endi <b>.zip</b> faylni yuboring:",
+        reply_markup=kb.as_markup(),
     )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "zip_sample")))
+async def cb_v2_zip_sample(callback: CallbackQuery, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    from aiogram.types import BufferedInputFile
+
+    from services.card_zip_sample import build_sample_zip
+
+    await callback.message.answer_document(
+        BufferedInputFile(build_sample_zip(), filename="namuna_kartalar.zip"),
+        caption="📥 Namuna ZIP. Ichida: cards.json, images/ va PROMPT_FOR_AI.txt (AI ga berish uchun).",
+    )
+    await callback.answer()
 
 
 @router.message(AdminV2States.waiting_zip_cards, F.document)
@@ -219,36 +247,64 @@ async def fsm_v2_zip_upload(message: Message, state: FSMContext) -> None:
         return
     doc = message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
-        await message.answer("⚠️ Faqat <code>.zip</code> arxiv fayl yuboring.")
+        await message.answer("⚠️ Faqat <code>.zip</code> fayl yuboring.")
         return
     if (doc.file_size or 0) > MAX_ZIP_BYTES:
-        await message.answer("⚠️ ZIP fayl hajmi 50 MB dan oshmasligi kerak.")
+        await message.answer("⚠️ ZIP hajmi 50 MB dan oshmasligi kerak.")
         return
     await state.clear()
-    wait_msg = await message.answer("⏳ ZIP arxiv tekshirilmoqda va ma’lumotlar o‘rniga qo‘shilmoqda...")
+    wait_msg = await message.answer("⏳ ZIP tekshirilmoqda...")
 
     buf = io.BytesIO()
     await message.bot.download(doc, destination=buf)
-    async with get_session() as session:
-        rep = await SecurityBackupService.import_cards_from_zip(session, buf.getvalue(), message.from_user.id)
-        await session.commit()
 
-    status_hdr = "✅ <b>MA’LUMOTLAR QO‘SHILDI!</b>" if rep.added > 0 else "⚠️ <b>HECH QANDAY YANGI KARTA QO‘SHILMADI</b>"
+    async def _progress(text: str) -> None:
+        await wait_msg.edit_text(text)
+
+    try:
+        async with get_session() as session:
+            rep = await SecurityBackupService.import_cards_from_zip(
+                session, buf.getvalue(), message.from_user.id, message.bot, _progress
+            )
+            await session.commit()
+    except Exception as exc:  # kutilmagan xato
+        logger.exception("ZIP import crashed")
+        await wait_msg.edit_text(f"❌ ZIP import to‘xtadi: <code>{esc(str(exc)[:200])}</code>", reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
+        return
+
+    if rep.fatal:
+        await wait_msg.edit_text(f"❌ <b>QO‘SHILMADI</b>\n\nSabab: {esc(rep.fatal)}", reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
+        return
+
+    head = "✅ <b>KARTALAR QO‘SHILDI!</b>" if rep.added and not rep.failed else (
+        "⚠️ <b>QISMAN QO‘SHILDI</b>" if rep.added else "❌ <b>HECH QANDAY KARTA QO‘SHILMADI</b>"
+    )
     lines = [
-        status_hdr,
-        "",
-        f"📁 Jami fayllar: <b>{rep.total_files}</b>",
-        f"🎴 Aniqlangan kartalar: <b>{rep.total_cards}</b>",
-        f"🖼 Rasmlar: <b>{rep.total_images}</b>",
-        f"✅ Qo‘shildi: <b>{rep.added}</b> ta",
-        f"♻️ Takroriy (o‘tkazildi): <b>{rep.duplicates}</b> ta",
-        f"❌ Qo‘shilmadi (xato): <b>{rep.failed}</b> ta",
+        head, "",
+        f"📁 Fayllar: <b>{rep.total_files}</b>  |  🖼 Rasmlar: <b>{rep.total_images}</b>",
+        f"🎴 Ro‘yxatdagi kartalar: <b>{rep.total_cards}</b>",
+        f"✅ Qo‘shildi: <b>{rep.added}</b>",
+        f"♻️ Takroriy (o‘tkazildi): <b>{rep.duplicates}</b>",
+        f"❌ Qo‘shilmadi: <b>{rep.failed}</b>",
     ]
+    if rep.added_by_rank:
+        lines.append("\n<b>Rank bo‘yicha:</b> " + ", ".join(f"{esc(k)} — {v}" for k, v in rep.added_by_rank.items()))
+    if rep.added_by_media:
+        lines.append("<b>Tur bo‘yicha:</b> " + ", ".join(f"{esc(k)} — {v}" for k, v in rep.added_by_media.items()))
     if rep.failed_files:
-        lines.append("\n<b>Qo‘shilmagan fayllar/sabablari:</b>")
-        for idx, item in enumerate(rep.failed_files[:15], start=1):
-            lines.append(f"{idx}. {esc(item)}")
+        lines.append("\n<b>Qo‘shilmaganlar va sababi:</b>")
+        for item in rep.failed_files[:10]:
+            lines.append(f"• {esc(item)}")
+        if len(rep.failed_files) > 10:
+            lines.append(f"… va yana {len(rep.failed_files) - 10} ta (to‘liq ro‘yxat fayl ichida)")
     await wait_msg.edit_text("\n".join(lines), reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
+    if len(rep.failed_files) > 10:
+        from aiogram.types import BufferedInputFile
+
+        await message.answer_document(
+            BufferedInputFile("\n".join(rep.failed_files).encode("utf-8"), filename="qoshilmaganlar.txt"),
+            caption="❌ Qo‘shilmagan kartalarning to‘liq ro‘yxati",
+        )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_tabs")))

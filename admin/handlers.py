@@ -1090,6 +1090,105 @@ async def cb_admin_user_detail(callback: CallbackQuery, callback_data: AdminCb) 
     await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
 
 
+# ----------------------------------------------------------------------
+# USER VIP: admin tomonidan berish / olib tashlash
+# ----------------------------------------------------------------------
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_menu")))
+async def cb_admin_user_vip_menu(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    owner_id = callback.from_user.id
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+        user = await session.get(User, callback_data.target_id)
+    if user is None:
+        await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+        return
+    b = InlineKeyboardBuilder()
+    for key, t in (vcfg.get("tiers") or {}).items():
+        b.row(InlineKeyboardButton(
+            text=f"{t.get('emoji', '💎')} {t.get('name', key)}",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_days", target_id=user.id, extra=key).pack(),
+        ))
+    if CommunityService.is_vip_active(user):
+        b.row(InlineKeyboardButton(
+            text="❌ VIP ni olib tashlash",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_revoke", target_id=user.id).pack(),
+        ))
+    b.row(InlineKeyboardButton(
+        text="⬅️ ORQAGA",
+        callback_data=AdminCb(owner_id=owner_id, section="users", action="detail", target_id=user.id).pack(),
+    ))
+    cur = f"{esc(user.vip_tier)} ({ensure_utc(user.vip_until):%d.%m.%Y} gacha)" if CommunityService.is_vip_active(user) else "yo‘q"
+    await edit_or_answer(
+        callback,
+        f"💎 <b>VIP BERISH</b>\n\n👤 {esc(user.display_name)}\nHozirgi VIP: <b>{cur}</b>\n\nQaysi darajani beramiz?",
+        reply_markup=b.as_markup(),
+    )
+
+
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_days")))
+async def cb_admin_user_vip_days(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    owner_id = callback.from_user.id
+    b = InlineKeyboardBuilder()
+    for d in (7, 30, 90, 180, 365):
+        b.add(InlineKeyboardButton(
+            text=f"{d} kun",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_give", target_id=callback_data.target_id, extra=callback_data.extra, page=d).pack(),
+        ))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(
+        text="⬅️ ORQAGA",
+        callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_menu", target_id=callback_data.target_id).pack(),
+    ))
+    await edit_or_answer(callback, f"💎 <b>{esc(callback_data.extra)}</b> VIP — necha kunga beramiz?", reply_markup=b.as_markup())
+
+
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_give")))
+async def cb_admin_user_vip_give(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    days = max(1, min(3650, int(callback_data.page or 30)))
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+        if callback_data.extra not in (vcfg.get("tiers") or {}):
+            await callback.answer("VIP daraja topilmadi", show_alert=True)
+            return
+        user = await session.get(User, callback_data.target_id)
+        if user is None:
+            await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+            return
+        await CommunityService.grant_vip(session, user, callback_data.extra, days)
+        await CommunityService.log_audit(
+            session, callback.from_user.id, "vip_grant", "user", str(user.id),
+            details={"tier": callback_data.extra, "days": days},
+        )
+        tg_id = user.telegram_id
+        await session.commit()
+    try:
+        await callback.bot.send_message(tg_id, f"💎 Sizga admin tomonidan <b>{esc(callback_data.extra)} VIP</b> berildi ({days} kun)! 🎉")
+    except Exception:
+        pass
+    await callback.answer("✅ VIP berildi", show_alert=True)
+    await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
+
+
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_revoke")))
+async def cb_admin_user_vip_revoke(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    async with get_session() as session:
+        user = await session.get(User, callback_data.target_id)
+        if user is None:
+            await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+            return
+        user.vip_tier = None
+        user.vip_until = None
+        await CommunityService.log_audit(session, callback.from_user.id, "vip_revoke", "user", str(user.id), details={})
+        tg_id = user.telegram_id
+        await session.commit()
+    try:
+        await callback.bot.send_message(tg_id, "ℹ️ VIP obunangiz admin tomonidan bekor qilindi.")
+    except Exception:
+        pass
+    await callback.answer("✅ VIP olib tashlandi", show_alert=True)
+    await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
+
+
 @router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "search_prompt")))
 async def cb_admin_user_search(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.user_search)
@@ -1429,8 +1528,8 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
         for key, t in tiers.items():
             lines.append(f"{t.get('emoji', '💎')} <b>{esc(t.get('name', key))}</b>: {int(t.get('coins', 0)):,} 🪙 | {int(t.get('stars', 0)):,} ⭐ ({t.get('duration_days', 30)} kun)")
             b.row(
-                InlineKeyboardButton(text=f"🪙 {key} Coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}:coins").pack()),
-                InlineKeyboardButton(text=f"⭐ {key} Stars", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}:stars").pack()),
+                InlineKeyboardButton(text=f"🪙 {key} Coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}.coins").pack()),
+                InlineKeyboardButton(text=f"⭐ {key} Stars", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}.stars").pack()),
             )
         b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
         await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
@@ -1439,7 +1538,7 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
     if act == "vip_ed":
         await state.set_state(AdminStates.edit_vip_price)
         await state.update_data(owner_tg_id=owner_id, vip_key=callback_data.extra)
-        await edit_or_answer(callback, f"💎 <b>{esc(callback_data.extra)}</b> uchun yangi narxni kiriting:")
+        await edit_or_answer(callback, f"💎 <b>{esc(callback_data.extra.replace('.', ' — '))}</b> uchun yangi narxni kiriting (faqat son):")
         return
 
     async with get_session() as session:
@@ -1536,12 +1635,12 @@ async def fsm_edit_vip_price(message: Message, state: FSMContext) -> None:
     if not raw.isdigit() or int(raw) <= 0:
         await message.answer("⚠️ Musbat son kiriting.")
         return
-    tier_key, metric = data["vip_key"].split(":", 1)
+    tier_key, metric = data["vip_key"].rsplit(".", 1)
     await state.clear()
     async with get_session() as session:
         vcfg = await CommunityService.get_vip_config(session)
-        tiers = dict(vcfg.get("tiers") or {})
-        if tier_key in tiers:
+        tiers = {k: dict(v) for k, v in (vcfg.get("tiers") or {}).items()}
+        if tier_key in tiers and metric in ("coins", "stars"):
             tiers[tier_key][metric] = int(raw)
             vcfg["tiers"] = tiers
             await SettingsService.set_value(session, "vip_config", vcfg)

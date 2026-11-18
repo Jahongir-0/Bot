@@ -10,3 +10,4 @@ python-dotenv>=1.0.1
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
 uvloop>=0.19; sys_platform != "win32"
+Pillow>=10.0.0
