@@ -78,6 +78,9 @@ def admin_v2_cards_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
 def admin_v2_add_choice_kb(owner_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(
+        InlineKeyboardButton(text="⚡ Tezkor qo‘shish (tavsiya)", callback_data=AdmV2Cb(owner_id=owner_id, sec="qadd", act="start").pack()),
+    )
+    b.row(
         InlineKeyboardButton(text="📝 Qo‘lda qo‘shish", callback_data=AdminCb(owner_id=owner_id, section="cards", action="add_start").pack()),
         InlineKeyboardButton(text="📦 ZIP yuklash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="zip").pack()),
     )
