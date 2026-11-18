@@ -267,16 +267,33 @@ class DropService:
 
     @staticmethod
     def matches_character_guess(card: Card, guess_text: str) -> bool:
+        """Personaj ismini qulay tekshiradi:
+        - to'liq ism (so'z tartibi farqi yo'q: "Hayato Suo" = "Suo Hayato"),
+        - ismning bitta so'zi (kamida 3 harf): "Hayato" yoki "Suo",
+        - alias lar,
+        - kichik yozuv xatosi (masalan "Hayatto Suo").
+        """
+        from difflib import SequenceMatcher
+
         norm_guess = DropService.normalize_guess(guess_text)
         if not norm_guess or len(norm_guess) < 2:
             return False
-        candidates = [card.character_name] + list(getattr(card, "aliases", None) or [])
+        guess_tokens = norm_guess.split()
         compact_guess = norm_guess.replace(" ", "")
+        candidates = [card.character_name] + list(getattr(card, "aliases", None) or [])
         for cand in candidates:
             norm_cand = DropService.normalize_guess(str(cand))
             if not norm_cand:
                 continue
-            if norm_guess == norm_cand or compact_guess == norm_cand.replace(" ", ""):
+            cand_tokens = norm_cand.split()
+            compact_cand = norm_cand.replace(" ", "")
+            if norm_guess == norm_cand or compact_guess == compact_cand:
+                return True
+            if sorted(guess_tokens) == sorted(cand_tokens):
+                return True
+            if len(guess_tokens) == 1 and len(compact_guess) >= 3 and compact_guess in cand_tokens:
+                return True
+            if len(compact_guess) >= 5 and SequenceMatcher(None, compact_guess, compact_cand).ratio() >= 0.88:
                 return True
         return False
 
