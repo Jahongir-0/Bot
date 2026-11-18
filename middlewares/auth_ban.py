@@ -14,7 +14,7 @@ from services.community_service import CommunityService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import SupCb
-from utils.tg_helpers import is_super_admin
+from utils.tg_helpers import is_super_admin, schedule_delete
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,13 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
                 if now - _anon_hint_sent.get(event.chat.id, 0.0) > 120.0:
                     _anon_hint_sent[event.chat.id] = now
                     try:
-                        await event.reply(
+                        hint = await event.reply(
                             "⚠️ Siz guruh nomidan (<b>anonim</b>) yozyapsiz, shuning uchun bot sizni taniy olmaydi "
                             "va karta bera olmaydi.\n"
                             "Anonim rejimni o‘chiring: guruh sozlamalari → Administratorlar → o‘zingiz → "
                             "<b>«Anonim bo‘lish»</b> ni o‘chiring."
                         )
+                        schedule_delete(event.bot, event.chat.id, [hint.message_id], delay=20)
                     except Exception:
                         pass
             return None
