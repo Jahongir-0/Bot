@@ -31,9 +31,14 @@ def build_prompt_text() -> str:
     media = ", ".join(MEDIA_TYPES)
     return f"""KARTA ZIP TAYYORLASH KO'RSATMASI (sun'iy intellekt uchun)
 
-Men senga personaj rasmlarini beraman. Har bir rasm uchun personaj va u chiqqan asar
-haqida ma'lumotni topib, quyidagi formatdagi cards.json faylini tuzib ber.
-Rasmlarni "images" papkasiga joylab, rasm nomini "image" maydoniga yoz.
+Men senga personaj rasmlarini beraman. Har bir rasm uchun cards.json faylini tuzib ber.
+
+MUHIM QOIDALAR (xato ma'lumot ketmasligi uchun):
+1. FAQAT ishonching komil bo'lgan personajni yoz. Ishonmasang uni "cards" ga QO'SHMA,
+   rasm fayl nomini "unknown_images" ro'yxatiga yoz. Taxmin qilma, o'ylab topma.
+2. Ismlar va asar nomlari rasmiy ingliz (lotin) yozuvida bo'lsin, masalan "Naruto Uzumaki".
+3. Faqat MAJBURIY maydonlarni to'ldir. Ixtiyoriy maydonlarni (tug'ilgan kun, vazn va h.k.)
+   faqat 100% bilsang yoz, bilmasang UMUMAN yozma (bo'sh qoldir).
 
 MAJBURIY maydonlar (bittasi yo'q bo'lsa karta qo'shilmaydi):
   image           - rasm fayl nomi (masalan: naruto.jpg)
@@ -43,17 +48,21 @@ MAJBURIY maydonlar (bittasi yo'q bo'lsa karta qo'shilmaydi):
   rank_id         - rank raqami (faqat son):
 {ranks}
 
-IXTIYORIY maydonlar (bilsang yoz, bilmasang tashlab ket):
+IXTIYORIY maydonlar:
   description, birthday, age, height, weight, personality, history, abilities,
   aliases (ro'yxat: boshqa ismlari), base_value, drop_limit
 
-Javobni FAQAT to'g'ri JSON ro'yxat ko'rinishida ber, boshqa matn yozma.
+Javobni FAQAT to'g'ri JSON ko'rinishida ber, boshqa matn yozma:
+{{
+  "cards": [
+    {{"image": "naruto.jpg", "character_name": "Naruto Uzumaki", "media_type": "Anime",
+      "media_name": "Naruto", "rank_id": 3}}
+  ],
+  "unknown_images": ["rasm_7.jpg"]
+}}
 
-Namuna:
-[
-  {{"image": "naruto.jpg", "character_name": "Naruto Uzumaki", "media_type": "Anime",
-    "media_name": "Naruto", "rank_id": 3, "birthday": "10-oktabr", "personality": "Qat'iyatli, quvnoq"}}
-]
+ESLATMA: bir asardan ko'p karta bo'lsa, botdagi "⚡ Tezkor qo'shish" tezroq: asar nomi va rankni
+bir marta yozasiz, keyin rasmlarni izohi bilan (personaj ismi) yuborasiz.
 """
 
 
