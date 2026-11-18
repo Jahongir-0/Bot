@@ -1,7 +1,12 @@
 import logging
 
 from aiogram import F, Router
-from aiogram.exceptions import SkipHandler, TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest
+
+try:  # aiogram 3.x: SkipHandler joylashuvi versiyaga qarab farq qiladi
+    from aiogram.dispatcher.event.bases import SkipHandler
+except ImportError:  # pragma: no cover
+    from aiogram.exceptions import SkipHandler  # type: ignore
 from aiogram.types import CallbackQuery, Message
 
 from database.session import get_session
