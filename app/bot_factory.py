@@ -21,10 +21,18 @@ def create_bot(settings: Settings) -> Bot:
         raise RuntimeError(
             "BOT_TOKEN is not set! Please configure BOT_TOKEN in your .env file."
         )
-    return Bot(
+    bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    try:  # guruh tozalash: muvaffaqiyatsiz bo'lsa bot baribir ishlayveradi
+        from middlewares.group_cleanup import AVAILABLE, GroupCleanupRequestMiddleware
+
+        if AVAILABLE and GroupCleanupRequestMiddleware is not None:
+            bot.session.middleware(GroupCleanupRequestMiddleware())
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Group cleanup request middleware ulanmadi: %s", exc)
+    return bot
 
 
 def create_dispatcher(lock_manager: LockManager) -> Dispatcher:
@@ -42,6 +50,13 @@ def create_dispatcher(lock_manager: LockManager) -> Dispatcher:
     cb_guard = CallbackSecurityMiddleware()
 
     dp.message.outer_middleware(auth_mw)
+    try:
+        from middlewares.group_cleanup import AVAILABLE as _CLEAN_OK, GroupCleanupMiddleware
+
+        if _CLEAN_OK:
+            dp.message.outer_middleware(GroupCleanupMiddleware())
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Group cleanup middleware ulanmadi: %s", exc)
     dp.callback_query.outer_middleware(auth_mw)
     dp.pre_checkout_query.outer_middleware(auth_mw)
     dp.callback_query.middleware(cb_guard)
