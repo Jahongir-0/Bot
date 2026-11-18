@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _GROUP_TOUCH_TTL = 600.0
 _group_touched: Dict[Tuple[int, int], float] = {}
+_ANON_ADMIN_ID = 1087968824  # Telegram'ning GroupAnonymousBot ID si
+_anon_hint_sent: Dict[int, float] = {}
 
 
 class GlobalAuthAndBanMiddleware(BaseMiddleware):
@@ -39,6 +41,23 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         tg_user = getattr(event, "from_user", None)
+        if tg_user is not None and tg_user.id == _ANON_ADMIN_ID and isinstance(event, Message):
+            # Guruh nomidan (anonim admin) yozilgan xabar: foydalanuvchini aniqlab bo'lmaydi.
+            rep = event.reply_to_message
+            if rep is not None and rep.from_user is not None and rep.from_user.is_bot:
+                now = time.monotonic()
+                if now - _anon_hint_sent.get(event.chat.id, 0.0) > 120.0:
+                    _anon_hint_sent[event.chat.id] = now
+                    try:
+                        await event.reply(
+                            "⚠️ Siz guruh nomidan (<b>anonim</b>) yozyapsiz, shuning uchun bot sizni taniy olmaydi "
+                            "va karta bera olmaydi.\n"
+                            "Anonim rejimni o‘chiring: guruh sozlamalari → Administratorlar → o‘zingiz → "
+                            "<b>«Anonim bo‘lish»</b> ni o‘chiring."
+                        )
+                    except Exception:
+                        pass
+            return None
         if tg_user is None or tg_user.is_bot:
             return None
 
