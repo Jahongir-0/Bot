@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import traceback
@@ -165,3 +166,34 @@ async def send_card_message(bot: Bot, chat_id: int, card, caption: str, reply_ma
     except Exception as exc:
         logger.debug("file_id cache failed: %s", exc)
     return msg
+
+
+_BG_TASKS: set = set()
+
+
+async def safe_delete(bot: Bot, chat_id: int, message_id: Optional[int]) -> bool:
+    """Xabarni o'chiradi. Ruxsat yo'q yoki xabar allaqachon yo'q bo'lsa False qaytaradi (xato bermaydi)."""
+    if not message_id:
+        return False
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return True
+    except Exception as exc:
+        logger.debug("delete_message(%s,%s) bo'lmadi: %s", chat_id, message_id, exc)
+        return False
+
+
+def schedule_delete(bot: Bot, chat_id: int, message_ids, delay: float = 6.0) -> None:
+    """Bir necha xabarni `delay` soniyadan keyin o'chiradi (guruh toza turishi uchun)."""
+    ids = [m for m in message_ids if m]
+    if not ids:
+        return
+
+    async def _job() -> None:
+        await asyncio.sleep(delay)
+        for mid in ids:
+            await safe_delete(bot, chat_id, mid)
+
+    task = asyncio.create_task(_job())
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
