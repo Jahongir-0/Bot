@@ -158,10 +158,10 @@ async def test_find_cards_by_name_for_give(db_session):
 @pytest.mark.asyncio
 async def test_rank_defaults_and_admin_changes(db_session):
     cfg = await SettingsService.get_rarity_config(db_session)
-    assert cfg["Common"] == {"value": 1000, "drops": 3}
-    assert cfg["Rare"] == {"value": 2500, "drops": 2}
+    assert cfg["Basic"] == {"value": 1000, "drops": 3}
+    assert cfg["Elita"] == {"value": 2500, "drops": 2}
     assert cfg["Epic"] == {"value": 5000, "drops": 2}
-    assert cfg["Legendary"] == {"value": 10000, "drops": 1}
+    assert cfg["Legend"] == {"value": 10000, "drops": 1}
     assert cfg["Mythic"] == {"value": 25000, "drops": 1}
 
     await SettingsService.set_rarity_config(db_session, "Epic", value=6000, drops=4)

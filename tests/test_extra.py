@@ -252,14 +252,14 @@ async def test_v2_dynamic_ranks_must_sum_to_100(db_session):
     with pytest.raises(ValueError):
         await GameplayService.save_rank_definitions(
             db_session,
-            [{"name": "Common", "emoji": "⚪", "chance": 50.0, "value": 1000, "drops": 3}],
+            [{"name": "Basic", "emoji": "⚪", "chance": 50.0, "value": 1000, "drops": 3}],
         )
 
     await GameplayService.save_rank_definitions(
         db_session,
         [
-            {"name": "Common", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
-            {"name": "Rare", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
+            {"name": "Basic", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
+            {"name": "Elita", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
         ],
     )
     ranks = await GameplayService.get_rank_definitions(db_session)
@@ -376,8 +376,8 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
     await GameplayService.save_rank_definitions(
         db_session,
         [
-            {"name": "Common", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
-            {"name": "Rare", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
+            {"name": "Basic", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
+            {"name": "Elita", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
         ],
     )
     await GameplayService.update_single_rank_attr(db_session, 0, "chance", "70")
@@ -388,7 +388,7 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
     # Auction cancel refunds highest bidder
     bidder = await UserService.upsert_user(db_session, 9801, "aucb", "AucB")
     await UserService.credit_coins(db_session, bidder.id, 3000, "test", "seed")
-    c = await CardService.create_card(db_session, "Cancel Auc", "Auc World", "https://x/ca.png", "Rare", 2000)
+    c = await CardService.create_card(db_session, "Cancel Auc", "Auc World", "https://x/ca.png", "Elita", 2000)
     ok, _, auc = await AuctionWishlistService.create_auction(db_session, c.id, 500, 3, 999999, min_step=50)
     assert ok and auc is not None
     ok_b, _ = await AuctionWishlistService.place_bid(db_session, auc.id, bidder, 800)

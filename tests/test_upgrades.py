@@ -61,17 +61,43 @@ async def test_coinflip_and_lucky_card_do_not_consume_dice_limit(db_session):
 
 
 @pytest.mark.asyncio
-async def test_pack_open_and_duplicate_cashback(db_session):
-    u = await UserService.upsert_user(db_session, 9301, "packer", "Packer")
-    await UserService.credit_coins(db_session, u.id, 5000, "test", "seed")
+async def test_pack_open_daily_limit_and_duplicate_cashback(db_session):
+    u1 = await UserService.upsert_user(db_session, 9301, "packer", "Packer")
+    await UserService.credit_coins(db_session, u1.id, 5000, "test", "seed")
 
-    res = await PackService.open_pack(db_session, u.id, "bronze")
+    res = await PackService.open_pack(db_session, u1.id, "bronze")
     assert res.success is True
     assert res.card is not None
 
-    # Bir xil kartalar kam bo'lsa, dublikat tushganda keshbek qaytishini tekshirish
-    res2 = await PackService.open_pack(db_session, u.id, "bronze")
-    assert res2.success is True
+    # Kuniga 1 marta limiti: 2-urinish rad etilishi kerak
+    res_limit = await PackService.open_pack(db_session, u1.id, "bronze")
+    assert res_limit.success is False
+    assert "limit" in res_limit.message.lower()
+
+    # Dublikat tushganda 50% keshbek qaytishini 2-user orqali tekshiramiz
+    u2 = await UserService.upsert_user(db_session, 9302, "packer2", "Packer 2")
+    await UserService.credit_coins(db_session, u2.id, 5000, "test", "seed")
+    cards = (await db_session.execute(select(Card))).scalars().all()
+    for c in cards:
+        db_session.add(UserCard(user_id=u2.id, card_id=c.id, acquired_via="drop"))
+    await db_session.flush()
+
+    res_dup = await PackService.open_pack(db_session, u2.id, "bronze")
+    assert res_dup.success is True
+    assert res_dup.is_duplicate is True
+    assert res_dup.cashback_coins >= 250
+
+
+@pytest.mark.asyncio
+async def test_coinflip_status_with_int_and_insufficient_coins(db_session):
+    u = await UserService.upsert_user(db_session, 9350, "flipper", "Flipper")
+    ok, msg, _won, _delta = await GameplayService.play_coin_flip(db_session, u, "heads", 500)
+    assert ok is False
+    assert "yetarli" in msg.lower()
+    enabled, used, limit = await GameplayService.get_coinflip_status(db_session, u.id)
+    assert enabled is True
+    assert used == 0
+    assert limit >= 1
 
 
 @pytest.mark.asyncio
