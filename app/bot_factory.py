@@ -32,6 +32,12 @@ def create_bot(settings: Settings) -> Bot:
             bot.session.middleware(GroupCleanupRequestMiddleware())
     except Exception as exc:  # pragma: no cover
         logger.warning("Group cleanup request middleware ulanmadi: %s", exc)
+    try:  # premium emoji: xato bo'lsa bot oddiy emoji bilan ishlayveradi
+        from middlewares.premium_emoji import PremiumEmojiRequestMiddleware
+
+        bot.session.middleware(PremiumEmojiRequestMiddleware())
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Premium emoji middleware ulanmadi: %s", exc)
     return bot
 
 
