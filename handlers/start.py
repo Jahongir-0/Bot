@@ -47,11 +47,13 @@ HELP_TEXT = (
 
 def _home_text(db_user: User, welcome: str = WELCOME_TEXT) -> str:
     return (
-        f"🏠 <b>BOSH MENU</b>\n\n"
+        "🏠 <b>BOSH MENU</b>\n"
+        "━━━━━━━━━━━━━━━\n"
         f"👤 <b>{esc(db_user.display_name)}</b>\n"
-        f"🪙 <b>{fmt_coins(db_user.coins)}</b> coin  ·  ⭐ <b>{db_user.level}</b>-daraja  ·  ✨ <b>{fmt_coins(db_user.xp)}</b> XP\n\n"
+        f"🪙 <b>{fmt_coins(db_user.coins)}</b>  ·  ⚡ <b>{db_user.level}</b>-daraja  ·  🎴 <b>{db_user.total_cards}</b> karta\n"
+        "━━━━━━━━━━━━━━━\n"
         f"{welcome}\n\n"
-        "👇 Bo‘limni tanlang:"
+        "👇 Bo‘limni tanlang. Kartalar, bonus va VIP — <b>PROFILIM</b> ichida."
     )
 
 
@@ -177,11 +179,18 @@ async def cb_home(
     await edit_or_answer(callback, _home_text(db_user), reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin))
 
 
-@router.callback_query(NavCb.filter(F.target.in_({"grp_play", "grp_trade", "grp_vip"})))
+@router.callback_query(NavCb.filter(F.target == "grp_play"))
 async def cb_group_menu(callback: CallbackQuery, callback_data: NavCb) -> None:
     group = callback_data.target
     await edit_or_answer(callback, GROUP_MENUS[group], reply_markup=group_menu_kb(callback.from_user.id, group))
     await callback.answer()
+
+
+@router.callback_query(NavCb.filter(F.target.in_({"grp_trade", "grp_vip"})))
+async def cb_old_group_menu(callback: CallbackQuery, db_user: User, is_bot_admin: bool = False) -> None:
+    """Eski xabarlardagi tugmalar uchun: bosh menyuga qaytaradi."""
+    is_admin = is_bot_admin or is_admin_user(callback.from_user)
+    await edit_or_answer(callback, _home_text(db_user), reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin))
 
 
 @router.callback_query(NavCb.filter(F.target == "help"))

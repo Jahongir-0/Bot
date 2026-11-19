@@ -83,15 +83,16 @@ async def cb_v2_collection_list(callback: CallbackQuery, callback_data: Collecti
             rows, total = await CollectionService.get_filtered_user_cards(
                 session, db_user.id, filter_tab=filter_tab, sort_by=sort_by, page=1, page_size=PAGE_SIZE
             )
-    lines = [f"🗂 <b>KARTALARIM ({filter_tab.upper()})</b> — Jami: <b>{total}</b> ta (20/sahifa)\n"]
+    tab_names = {"all": "Hammasi", "anime": "Anime", "manga": "Manga", "movie": "Kino", "cartoon": "Multfilm", "event": "Event", "limited": "Limitli", "favorites": "Sevimlilar"}
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    lines = [
+        f"🗂 <b>KARTALARIM · {tab_names.get(filter_tab, filter_tab.title())}</b>",
+        f"━━━━━━━━━━━━━━━\n📦 Jami: <b>{total}</b> ta  ·  📄 Sahifa: <b>{page}/{pages}</b>\n",
+    ]
     if not rows:
         lines.append("📭 Bu bo‘limda kartalar topilmadi.")
     else:
-        for uc, c in rows:
-            meta = get_rarity_meta(c.rarity)
-            fav = "❤️ " if uc.is_favorite else ""
-            ser = f"#{uc.serial_number}" if getattr(uc, "serial_number", None) else ""
-            lines.append(f"{fav}{event_tag(c)}{meta.emoji} <b>{esc(c.character_name)}</b> · {esc(c.anime_name)} {ser}")
+        lines.append("👇 Kartani tanlang (❤️ sevimli · 🖼 vitrinada):")
     await edit_or_answer(
         callback,
         "\n".join(lines),

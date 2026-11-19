@@ -15,12 +15,14 @@ from config.settings import get_settings
 from database.session import get_session
 from keyboards.main_menu import back_home_kb, main_menu_kb
 from keyboards.v2 import (
+    VIP_ONLY_FRAMES,
     auction_detail_kb,
     auctions_list_kb,
     dice_pick_kb,
     games_menu_kb,
     notifications_kb,
-    profile_custom_kb,
+    ach_kb,
+    profile_style_kb,
     quiz_list_kb,
     quiz_question_kb,
     support_menu_kb,
@@ -37,7 +39,7 @@ from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
 from services.user_service import UserService
 from utils.callback_data import AchCb, AucCb, GameCb, NavCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
-from utils.constants import get_rarity_meta
+from utils.constants import PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
 from utils.formatting import esc, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_admin_user, send_card_message
 
@@ -522,35 +524,59 @@ async def cb_vip_buy_stars(callback: CallbackQuery, callback_data: VipCb) -> Non
 # ------------------------------------------------------------------
 # ACHIEVEMENTS, PROFILE CUSTOMIZATION & SEASON
 # ------------------------------------------------------------------
+def _ach_text(all_ach, unlocked) -> str:
+    done = [a for a in all_ach if a.id in unlocked]
+    todo = [a for a in all_ach if a.id not in unlocked]
+    lines = [
+        "🏅 <b>YUTUQLAR</b>",
+        "━━━━━━━━━━━━━━━",
+        f"✅ Ochilgan: <b>{len(done)}</b> / {len(all_ach)}",
+    ]
+    if done:
+        lines += ["", "🏆 <b>Sizning nishonlaringiz</b>"]
+        lines += [f"{a.icon} <b>{esc(a.title)}</b> — {esc(a.description)}" for a in done]
+    if todo:
+        lines += ["", "🔒 <b>Hali ochilmagan</b>"]
+        lines += [f"{a.icon} {esc(a.title)} — {esc(a.description)}  <i>(+{a.reward_coins:,} 🪙)</i>" for a in todo]
+    return "\n".join(lines)
+
+
 @router.message(Command("achievements", "season"))
 async def cmd_ach(message: Message, db_user: User) -> None:
     async with get_session() as session:
         all_ach, unlocked = await GameplayService.get_user_achievements(session, db_user.id)
-    lines = [f"🏅 <b>YUTUQLAR</b> ({len(unlocked)}/{len(all_ach)})\n"]
-    for a in all_ach:
-        mark = "✅" if a.id in unlocked else "🔒"
-        lines.append(f"{mark} {a.icon} <b>{esc(a.title)}</b> — {esc(a.description)} (+{a.reward_coins:,} 🪙)")
-    await message.answer("\n".join(lines), reply_markup=profile_custom_kb(message.from_user.id))
+    await message.answer(_ach_text(all_ach, unlocked), reply_markup=ach_kb(message.from_user.id))
 
 
 @router.callback_query(AchCb.filter(F.act == "v"))
 async def cb_ach_list(callback: CallbackQuery, db_user: User) -> None:
     async with get_session() as session:
         all_ach, unlocked = await GameplayService.get_user_achievements(session, db_user.id)
-    lines = [f"🏅 <b>YUTUQLAR</b> ({len(unlocked)}/{len(all_ach)})\n"]
-    for a in all_ach:
-        mark = "✅" if a.id in unlocked else "🔒"
-        lines.append(f"{mark} {a.icon} <b>{esc(a.title)}</b> — {esc(a.description)}")
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=profile_custom_kb(callback.from_user.id))
+    await edit_or_answer(callback, _ach_text(all_ach, unlocked), reply_markup=ach_kb(callback.from_user.id))
+    await callback.answer()
+
+
+async def _render_style(callback: CallbackQuery, user_id: int) -> None:
+    async with get_session() as session:
+        u = await session.get(User, user_id)
+    is_vip = CommunityService.is_vip_active(u)
+    frame = u.equipped_frame or "default"
+    bg = u.equipped_bg or "classic"
+    text = (
+        "🎨 <b>PROFIL BEZAGI</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"🖼 Ramka: <b>{esc(PROFILE_FRAMES.get(frame, '—'))}</b>\n"
+        f"🌌 Fon: <b>{esc(PROFILE_BACKGROUNDS.get(bg, '—'))}</b>\n\n"
+        "✅ — hozir tanlangan   🔒 — faqat 💎 VIP uchun\n"
+        "👇 Tanlang, profilingiz shu zahoti o‘zgaradi:"
+    )
+    await edit_or_answer(callback, text, reply_markup=profile_style_kb(callback.from_user.id, frame, bg, is_vip))
 
 
 @router.callback_query(AchCb.filter(F.act == "frames"))
-async def cb_profile_custom(callback: CallbackQuery) -> None:
-    await edit_or_answer(
-        callback,
-        "🎨 <b>PROFIL BEZAGI</b>\n\nRamka yoki orqa fonni tanlang:",
-        reply_markup=profile_custom_kb(callback.from_user.id),
-    )
+async def cb_profile_custom(callback: CallbackQuery, db_user: User) -> None:
+    await _render_style(callback, db_user.id)
+    await callback.answer()
 
 
 @router.callback_query(AchCb.filter(F.act == "equip"))
@@ -559,10 +585,17 @@ async def cb_equip_item(callback: CallbackQuery, callback_data: AchCb, db_user: 
     kind, val = ("frame", code[2:]) if code.startswith("f_") else ("bg", code[2:])
     async with get_session() as session:
         u = await session.get(User, db_user.id)
+        if kind == "frame" and val in VIP_ONLY_FRAMES and not CommunityService.is_vip_active(u):
+            await callback.answer("🔒 Bu ramka faqat 💎 VIP a’zolar uchun.", show_alert=True)
+            return
         ok = await GameplayService.equip_profile_item(session, u, kind, val)
         if ok:
             await session.commit()
-    await callback.answer("✅ Profil bezagi yangilandi!" if ok else "❌ Topilmadi.", show_alert=True)
+    if not ok:
+        await callback.answer("❌ Topilmadi.", show_alert=True)
+        return
+    await callback.answer("✅ Saqlandi!")
+    await _render_style(callback, db_user.id)
 
 
 @router.callback_query(AchCb.filter(F.act == "season"))
