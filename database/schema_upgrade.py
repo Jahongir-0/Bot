@@ -101,7 +101,17 @@ def _col_defs(dialect: str):
     }
 
 
-_DEFAULT_DROPS = {"Common": 3, "Rare": 2, "Epic": 2, "Legendary": 1, "Mythic": 1, "Divine": 1}
+_DEFAULT_DROPS = {
+    "Basic": 3,
+    "Elita": 2,
+    "Epic": 2,
+    "Legend": 1,
+    "Mythic": 1,
+    "Divine": 1,
+    "Common": 3,
+    "Rare": 2,
+    "Legendary": 1,
+}
 
 
 def upgrade_schema_sync(conn: Connection) -> None:
