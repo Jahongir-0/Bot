@@ -21,9 +21,8 @@ async def _set_bot_commands(bot) -> None:
         BotCommand(command="me", description="Shaxsiy profilim va VIP status"),
         BotCommand(command="cards", description="Kartalar kolleksiyam (filter + showcase)"),
         BotCommand(command="daily", description="Kunlik bonus"),
-        BotCommand(command="pack", description="Karta paketlari (Bronze, Silver, Gold)"),
         BotCommand(command="quiz", description="Kunlik anime quizlar"),
-        BotCommand(command="game", description="Mini o‘yinlar (Coin Flip, Dice, Lucky Card)"),
+        BotCommand(command="game", description="Mini o‘yinlar (Dice Roll)"),
         BotCommand(command="auction", description="Jonli karta auksionlari"),
         BotCommand(command="wishlist", description="Sevimli kartalar ro‘yxati"),
         BotCommand(command="vip", description="VIP obunalar va ustunliklar"),
@@ -34,6 +33,7 @@ async def _set_bot_commands(bot) -> None:
         BotCommand(command="top", description="Global, Guruh va Season TOP"),
         BotCommand(command="notif", description="Bildirishnomalar"),
         BotCommand(command="support", description="Support va muammo yuborish"),
+        BotCommand(command="lang", description="Tilni tanlash / Language / Язык"),
         BotCommand(command="help", description="Yordam va buyruqlar"),
     ]
     await bot.set_my_commands(commands)
@@ -55,8 +55,7 @@ async def main() -> None:
     await init_db()
     async with get_session() as session:
         await seed_initial_data(session)
-        await GameplayService.sync_runtime_and_legacy_ranks(session)
-        await session.commit()
+        await GameplayService.get_rank_definitions(session)
 
     lock_manager = await init_lock_manager(settings.redis_url)
     bot = create_bot(settings)
