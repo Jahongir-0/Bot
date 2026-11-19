@@ -463,26 +463,31 @@ def admin_group_settings_kb(owner_id: int, group: Group) -> InlineKeyboardMarkup
     return builder.as_markup()
 
 
-def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = False) -> InlineKeyboardMarkup:
+def admin_settings_kb(
+    owner_id: int,
+    ranking_mode: str,
+    maintenance_on: bool = False,
+    pack_daily_limit: int = 1,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
+        InlineKeyboardButton(
+            text=f"🎁 Paket limiti ({pack_daily_limit}/kun)",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="pack_limit").pack(),
+        ),
         InlineKeyboardButton(
             text="🎁 Kunlik bonus",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_menu").pack(),
         ),
+    )
+    builder.row(
         InlineKeyboardButton(
             text="🤝 Referal & Guruh",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="rewards_menu").pack(),
         ),
-    )
-    builder.row(
         InlineKeyboardButton(
             text="📡 Drop qoidalari",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="drop_rules").pack(),
-        ),
-        InlineKeyboardButton(
-            text="👋 Kirish matni",
-            callback_data=AdminCb(owner_id=owner_id, section="settings", action="welcome_edit").pack(),
         ),
     )
     builder.row(
@@ -500,6 +505,12 @@ def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = F
             text="💎 VIP Narxlari",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_menu").pack(),
         ),
+        InlineKeyboardButton(
+            text="👋 Kirish matni",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="welcome_edit").pack(),
+        ),
+    )
+    builder.row(
         InlineKeyboardButton(
             text=("🔴 Texnik rejim: YOQILGAN" if maintenance_on else "🟢 Texnik rejim: O‘CHIQ"),
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="maint_tog").pack(),

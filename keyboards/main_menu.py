@@ -21,10 +21,11 @@ def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=NavCb(owner_id=owner_id, target=target).pack())
 
 
-def main_menu_kb(owner_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
-    """BOSH MENU: faqat umumiy bo'limlar. Shaxsiy narsalar (kartalar, bonus, VIP, do'stlar...) PROFILda."""
+def main_menu_kb(owner_id: int, is_admin: bool = False, pack_daily_limit: int = 1) -> InlineKeyboardMarkup:
+    """BOSH MENU: toza, ixcham 2-ustunli tartib."""
+    pack_lbl = f"🎁 PAKET ({pack_daily_limit}/kun)" if pack_daily_limit > 0 else "🎁 PAKETLAR"
     b = InlineKeyboardBuilder()
-    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, "🎁 PAKET (1/kun)", "packs"))
+    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, pack_lbl, "packs"))
     b.row(
         _nav(owner_id, "🛒 BOZOR", "market"),
         InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
@@ -45,29 +46,30 @@ def main_menu_kb(owner_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
 
 GROUP_MENUS = {
     "grp_play": (
-        "🎮 <b>O‘YINLAR</b>\n"
+        "🎮 <b>O‘YINLAR VA BONUSLAR MARKAZI</b>\n"
         "━━━━━━━━━━━━━━━\n"
         "O‘ynang, coin va XP yutib oling:\n\n"
-        "🎲 <b>Tosh o‘yini</b> — sonni toping, coin yuting\n"
+        "🎲 <b>Tosh o‘yini</b> — raqamni toping, coin yuting\n"
         "🪙 <b>Tanga tashlash</b> — 2x garov o‘yini\n"
         "🃏 <b>Omadli karta</b> — kunlik bepul omad sovg‘asi\n"
         "🧠 <b>Viktorina</b> — savollarga birinchi javob bering\n"
         "🎯 <b>Event</b> — cheklangan maxsus kartalar\n"
         "📋 <b>Vazifalar</b> — bajaring, mukofot oling\n"
-        "🎁 <b>Paketlar (/pack)</b> — kuniga 1 marta coin evaziga karta paketi oching"
+        "🎁 <b>Paketlar (/pack)</b> — coin evaziga karta paketi oching"
     ),
 }
 
 
-def group_menu_kb(owner_id: int, group: str) -> InlineKeyboardMarkup:
+def group_menu_kb(owner_id: int, group: str, pack_daily_limit: int = 1) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     if group == "grp_play":
+        pack_lbl = f"🎁 PAKETLAR ({pack_daily_limit}/kun)" if pack_daily_limit > 0 else "🎁 PAKETLAR"
         b.row(
             InlineKeyboardButton(text="🎲 MINI O‘YINLAR", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
             InlineKeyboardButton(text="🧠 VIKTORINA", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
         )
         b.row(_nav(owner_id, "🎯 EVENTLAR", "event"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
-        b.row(_nav(owner_id, "🎁 PAKETLAR (1/kun)", "packs"))
+        b.row(_nav(owner_id, pack_lbl, "packs"))
     b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
     return b.as_markup()
 

@@ -26,8 +26,16 @@ from utils.callback_data import (
 from utils.constants import ADMIN_PERMISSION_SECTIONS, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_pack_configs, get_rarity_meta
 
 
-def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboardMarkup:
-    """Admin Panel V2 asosiy menyusi (RBAC bo'yicha 2 ustunli tugmalar)."""
+ADMIN_HUB_CATEGORIES: List[Tuple[str, str, str, Tuple[str, ...]]] = [
+    ("cards_evt", "🎴 Kartalar & Event", "Kartalar, eventlar, ranklar va auksionlarni boshqarish", ("cards", "events", "ranks", "auction")),
+    ("community", "👥 User & Guruhlar", "Foydalanuvchilar, guruhlar, adminlar va kanallar", ("users", "groups", "admins", "channels")),
+    ("gameplay", "🎮 O‘yin & Iqtisod", "Viktorina, mini-o‘yinlar, paket limiti, Stars va mavsum", ("quiz", "games", "stars", "season")),
+    ("comms", "📣 Aloqa & Reklama", "Barchaga xabar yuborish, reklama va murojaatlar", ("message", "reklama", "support")),
+    ("system", "⚙️ Tizim & Hisobot", "Bot sozlamalari, statistika, xavfsizlik va backup", ("settings", "stats", "report", "security", "memory", "logs")),
+]
+
+
+def _admin_section_cb(owner_id: int, sec_key: str) -> str:
     legacy_routes = {
         "events": AdminCb(owner_id=owner_id, section="evt", action="menu").pack(),
         "users": AdminCb(owner_id=owner_id, section="users", action="menu").pack(),
@@ -36,17 +44,48 @@ def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboar
         "stats": AdminCb(owner_id=owner_id, section="stats", action="view").pack(),
         "settings": AdminCb(owner_id=owner_id, section="settings", action="view").pack(),
     }
+    return legacy_routes.get(sec_key) or AdmV2Cb(owner_id=owner_id, sec=sec_key, act="v").pack()
+
+
+def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboardMarkup:
+    """Admin Panel asosiy markazi: ixcham 5 ta toifa (RBAC ruxsatlariga mos)."""
+    builder = InlineKeyboardBuilder()
+    cat_btns: List[InlineKeyboardButton] = []
+    for cat_key, title, _desc, secs in ADMIN_HUB_CATEGORIES:
+        if any(s in allowed_sections for s in secs):
+            cat_btns.append(
+                InlineKeyboardButton(
+                    text=title,
+                    callback_data=AdmV2Cb(owner_id=owner_id, sec="hub", act="v", ext=cat_key).pack(),
+                )
+            )
+    for i in range(0, len(cat_btns), 2):
+        builder.row(*cat_btns[i : i + 2])
+    builder.row(
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack())
+    )
+    return builder.as_markup()
+
+
+def admin_v2_hub_kb(owner_id: int, cat_key: str, allowed_sections: Set[str]) -> InlineKeyboardMarkup:
+    """Tanlangan admin toifasi ichidagi bo'limlar."""
+    sec_labels = dict(ADMIN_PERMISSION_SECTIONS)
+    target_secs = next((secs for k, _t, _d, secs in ADMIN_HUB_CATEGORIES if k == cat_key), ())
     builder = InlineKeyboardBuilder()
     btns: List[InlineKeyboardButton] = []
-    for sec_key, label in ADMIN_PERMISSION_SECTIONS:
-        if sec_key not in allowed_sections:
-            continue
-        cb = legacy_routes.get(sec_key) or AdmV2Cb(owner_id=owner_id, sec=sec_key, act="v").pack()
-        btns.append(InlineKeyboardButton(text=label, callback_data=cb))
+    for sec_key in target_secs:
+        if sec_key in allowed_sections:
+            btns.append(
+                InlineKeyboardButton(
+                    text=sec_labels.get(sec_key, sec_key.title()),
+                    callback_data=_admin_section_cb(owner_id, sec_key),
+                )
+            )
     for i in range(0, len(btns), 2):
         builder.row(*btns[i : i + 2])
     builder.row(
-        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack())
+        InlineKeyboardButton(text="⬅️ Admin Panel", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
     return builder.as_markup()
 
@@ -547,15 +586,15 @@ def coinflip_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
     for bet in (50, 100, 250, 500):
         b.row(
             InlineKeyboardButton(
-                text=f"🦅 Gerb ({bet} 🪙)",
+                text=f"🦅 Gerb · {bet} 🪙",
                 callback_data=GameCb(owner_id=owner_id, act="flip_go", val=bet, extra="heads").pack(),
             ),
             InlineKeyboardButton(
-                text=f"🔢 Raqam ({bet} 🪙)",
+                text=f"🪙 Raqam · {bet} 🪙",
                 callback_data=GameCb(owner_id=owner_id, act="flip_go", val=bet, extra="tails").pack(),
             ),
         )
-    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
     return b.as_markup()
 
 
@@ -566,7 +605,7 @@ def lucky_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🃏 #2", callback_data=GameCb(owner_id=owner_id, act="lucky_pick", val=2).pack()),
         InlineKeyboardButton(text="🃏 #3", callback_data=GameCb(owner_id=owner_id, act="lucky_pick", val=3).pack()),
     )
-    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
     return b.as_markup()
 
 
@@ -581,7 +620,10 @@ def packs_menu_kb(owner_id: int, can_open: bool = True) -> InlineKeyboardMarkup:
                 )
             )
     else:
-        b.row(InlineKeyboardButton(text="🎮 Mini o‘yinlarga o‘tish", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+        b.row(
+            InlineKeyboardButton(text="🎮 Mini o‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
+            InlineKeyboardButton(text="🛒 Bozor", callback_data=NavCb(owner_id=owner_id, target="market").pack()),
+        )
     b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return b.as_markup()
 

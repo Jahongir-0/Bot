@@ -97,7 +97,7 @@ def v2_collection_list_kb(
                 for k, lbl in tabs[i : i + 4]
             ]
         )
-    sorts = [("newest", "🆕 Yangi"), ("rarest", "💎 Noyob"), ("alpha", "🔤 A-Z"), ("media", "📺 Asar")]
+    sorts = [("newest", "🆕 Yangi"), ("rarest", "💎 Qiymatli"), ("alpha", "🔤 A-Z"), ("media", "📺 Asar")]
     builder.row(
         *[
             InlineKeyboardButton(
