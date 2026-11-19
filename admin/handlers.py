@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import logging
 import re
 from typing import Optional
@@ -45,9 +44,11 @@ from keyboards.event import (
 from keyboards.v2 import admin_v2_cards_menu_kb, admin_v2_home_kb
 from models.base import ensure_utc
 from models.card import Card
+from models.event import Event
 from models.group import Group, GroupMember
 from models.schedule import ActiveDrop
 from models.user import User
+from models.v2_features import SecurityIncident, SupportTicket
 from services.admin_service import AdminService
 from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
@@ -59,7 +60,7 @@ from services.ranking_service import RankingService
 from services.security_backup_service import SecurityBackupService
 from services.settings_service import SettingsService
 from utils.callback_data import AdmV2Cb, AdminCb, NavCb
-from utils.constants import EVENT_DURATION_HOURS, MEDIA_TYPES, PAGE_SIZE, RankingMode, get_rarity_meta
+from utils.constants import EVENT_DURATION_HOURS, MEDIA_TYPES, PAGE_SIZE, RARITY_REGISTRY, RankingMode, get_rarity_meta
 from utils.formatting import (
     esc,
     fmt_coins,
@@ -81,6 +82,7 @@ _LEGACY_SECTION_PERM_MAP = {
     "users": "users",
     "ban": "users",
     "evt": "events",
+    "events": "events",
     "stars": "stars",
     "stats": "stats",
     "settings": "settings",
@@ -142,6 +144,7 @@ class AdminStates(StatesGroup):
     edit_drop_rule_field = State()
     edit_welcome_text = State()
     edit_vip_price = State()
+    edit_pack_limit = State()
 
     # Stars
     stars_add = State()
@@ -153,13 +156,38 @@ class AdminStates(StatesGroup):
     evt_price_stars = State()
     evt_duration = State()
 
+    # Bonus event
+    bonus_name = State()
+    bonus_hours = State()
+
+
+async def _build_admin_home_text() -> str:
+    async with get_session() as session:
+        u_cnt = int((await session.execute(select(func.count(User.id)))).scalar_one() or 0)
+        g_cnt = int((await session.execute(select(func.count(Group.id)).where(Group.is_active.is_(True)))).scalar_one() or 0)
+        c_cnt = int((await session.execute(select(func.count(Card.id)).where(Card.is_deleted.is_(False)))).scalar_one() or 0)
+        open_sup = int((await session.execute(select(func.count(SupportTicket.id)).where(SupportTicket.status == "open"))).scalar_one() or 0)
+        sec_cnt = int((await session.execute(select(func.count(SecurityIncident.id)).where(SecurityIncident.is_resolved.is_(False)))).scalar_one() or 0)
+        gcfg = await GameplayService.get_game_config(session)
+        maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
+    pack_lim = int(gcfg.get("pack_daily_limit", 1))
+    maint_txt = "🔴 Yoqilgan" if (isinstance(maint, dict) and maint.get("enabled")) else "🟢 O‘chiq"
+    return (
+        "🛡️ <b>ADMIN BOSHQARUV MARKAZI</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"👤 Userlar: <b>{u_cnt:,}</b>  ·  👥 Guruhlar: <b>{g_cnt:,}</b>  ·  🎴 Kartalar: <b>{c_cnt:,}</b>\n"
+        f"🎁 Paket limiti: <b>{pack_lim}/kun</b>  ·  💬 Murojaat: <b>{open_sup}</b>  ·  🔐 Hodisa: <b>{sec_cnt}</b>\n"
+        f"🛠 Texnik rejim: {maint_txt}\n\n"
+        "👇 Kerakli boshqaruv toifasini tanlang:"
+    )
+
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext, admin_perms: set | None = None) -> None:
     await state.clear()
     perms = resolve_admin_perms(message.from_user, admin_perms)
     await message.answer(
-        "🛡️ <b>ADMIN PANEL</b>\n\nBoshqaruv bo‘limini tanlang:",
+        await _build_admin_home_text(),
         reply_markup=admin_v2_home_kb(message.from_user.id, perms),
     )
 
@@ -201,7 +229,7 @@ async def cb_admin_home(callback: CallbackQuery, state: FSMContext, admin_perms:
     perms = resolve_admin_perms(callback.from_user, admin_perms)
     await edit_or_answer(
         callback,
-        "🛡️ <b>ADMIN PANEL</b>\n\nBoshqaruv bo‘limini tanlang:",
+        await _build_admin_home_text(),
         reply_markup=admin_v2_home_kb(callback.from_user.id, perms),
     )
 
@@ -653,27 +681,28 @@ async def cb_admin_priority(callback: CallbackQuery, callback_data: AdminCb) -> 
         p_card = await session.get(Card, pid) if pid else None
 
     if p_card:
+        pm = get_rarity_meta(p_card.rarity)
         text = (
-            f"🎯 <b>NEXT PRIORITY CARD</b>\n\n"
-            f"🎴 {esc(p_card.character_name)} ({esc(p_card.rarity)}) [<code>{esc(p_card.card_code)}</code>]\n"
-            f"Keyingi dropda shu karta tushadi va priority avtomatik o‘chadi."
+            f"🎯 <b>NAVBATDAGI MAXSUS KARTA</b>\n━━━━━━━━━━━━━━━\n"
+            f"🎴 {esc(p_card.character_name)} ({pm.emoji} {esc(pm.name)}) [<code>{esc(p_card.card_code)}</code>]\n"
+            f"Keyingi dropda shu karta tushadi va navbat avtomatik o‘chadi."
         )
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Priorityni bekor qilish", callback_data=AdminCb(owner_id=callback.from_user.id, section="priority", action="clear").pack())],
-                [InlineKeyboardButton(text="⬅️ Settings", callback_data=AdminCb(owner_id=callback.from_user.id, section="settings").pack())],
+                [InlineKeyboardButton(text="❌ Bekor qilish", callback_data=AdminCb(owner_id=callback.from_user.id, section="priority", action="clear").pack())],
+                [InlineKeyboardButton(text="⬅️ Sozlamalar", callback_data=AdminCb(owner_id=callback.from_user.id, section="settings").pack())],
             ]
         )
     else:
         text = (
-            "🎯 <b>NEXT PRIORITY CARD</b>\n\n"
-            "Hozircha priority karta tanlanmagan.\n"
+            "🎯 <b>NAVBATDAGI MAXSUS KARTA</b>\n━━━━━━━━━━━━━━━\n"
+            "Hozircha navbatdagi karta tanlanmagan.\n"
             "Jadvaldagi istalgan bo‘sh slotga karta tanlashingiz mumkin."
         )
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📅 Drop jadvali", callback_data=AdminCb(owner_id=callback.from_user.id, section="schedule", action="overview").pack())],
-                [InlineKeyboardButton(text="⬅️ Settings", callback_data=AdminCb(owner_id=callback.from_user.id, section="settings").pack())],
+                [InlineKeyboardButton(text="⬅️ Sozlamalar", callback_data=AdminCb(owner_id=callback.from_user.id, section="settings").pack())],
             ]
         )
     await edit_or_answer(callback, text, reply_markup=kb)
@@ -699,7 +728,7 @@ async def cb_schedule_overview(callback: CallbackQuery) -> None:
     else:
         for sched, grp, card in upcoming:
             t_str = sched.scheduled_at.astimezone(tz).strftime("%H:%M")
-            c_name = f"{card.character_name} ({card.rarity})" if card else "Random"
+            c_name = f"{card.character_name} ({get_rarity_meta(card.rarity).name})" if card else "Tasodifiy"
             mark = "⭐" if sched.is_priority_override else "⏰"
             lines.append(f"{mark} <code>{t_str}</code> — <b>{esc(grp.title)}</b> → {esc(c_name)}")
     await edit_or_answer(
@@ -749,11 +778,11 @@ async def _render_schedule_detail(callback: CallbackQuery, group_id: int) -> Non
         lines = [f"📅 <b>BUGUNGI JADVAL — {esc(group.title)}</b> ({group.daily_drop_count}/kun)\n"]
         for sc in schedules:
             local_t = sc.scheduled_at.astimezone(tz).strftime("%H:%M")
-            card_label = "Random"
+            card_label = "Tasodifiy"
             if sc.card_id:
                 c = await session.get(Card, sc.card_id)
                 if c:
-                    card_label = f"{c.character_name} ({c.rarity})"
+                    card_label = f"{c.character_name} ({get_rarity_meta(c.rarity).name})"
             st_icon = "✅" if sc.status == "sent" else ("⭐" if sc.is_priority_override else "⏳")
             lines.append(f"{st_icon} <code>{local_t}</code> — {esc(card_label)} [#{sc.id}]")
         text = "\n".join(lines) if schedules else "Bugun uchun drop rejalashtirilmagan."
@@ -1069,11 +1098,7 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
             ban_str = "🚫 Umrbod BANNED"
     else:
         ban_str = "🟢 Active"
-    vip_str = (
-        f"💎 {esc(user.vip_tier)} ({ensure_utc(user.vip_until):%d.%m.%Y} gacha)"
-        if CommunityService.is_vip_active(user)
-        else "▫️ Oddiy"
-    )
+    vip_str = f"💎 {esc(user.vip_tier)}" if CommunityService.is_vip_active(user) else "▫️ Oddiy"
     groups_str = ", ".join(esc(g) for g in groups[:5]) if groups else "—"
     text = (
         f"👤 <b>USER BOSHQARUVI</b>\n\n"
@@ -1092,6 +1117,105 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
 
 @router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "detail")))
 async def cb_admin_user_detail(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
+
+
+# ----------------------------------------------------------------------
+# USER VIP: admin tomonidan berish / olib tashlash
+# ----------------------------------------------------------------------
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_menu")))
+async def cb_admin_user_vip_menu(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    owner_id = callback.from_user.id
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+        user = await session.get(User, callback_data.target_id)
+    if user is None:
+        await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+        return
+    b = InlineKeyboardBuilder()
+    for key, t in (vcfg.get("tiers") or {}).items():
+        b.row(InlineKeyboardButton(
+            text=f"{t.get('emoji', '💎')} {t.get('name', key)}",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_days", target_id=user.id, extra=key).pack(),
+        ))
+    if CommunityService.is_vip_active(user):
+        b.row(InlineKeyboardButton(
+            text="❌ VIP ni olib tashlash",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_revoke", target_id=user.id).pack(),
+        ))
+    b.row(InlineKeyboardButton(
+        text="⬅️ ORQAGA",
+        callback_data=AdminCb(owner_id=owner_id, section="users", action="detail", target_id=user.id).pack(),
+    ))
+    cur = f"{esc(user.vip_tier)} ({ensure_utc(user.vip_until):%d.%m.%Y} gacha)" if CommunityService.is_vip_active(user) else "yo‘q"
+    await edit_or_answer(
+        callback,
+        f"💎 <b>VIP BERISH</b>\n\n👤 {esc(user.display_name)}\nHozirgi VIP: <b>{cur}</b>\n\nQaysi darajani beramiz?",
+        reply_markup=b.as_markup(),
+    )
+
+
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_days")))
+async def cb_admin_user_vip_days(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    owner_id = callback.from_user.id
+    b = InlineKeyboardBuilder()
+    for d in (7, 30, 90, 180, 365):
+        b.add(InlineKeyboardButton(
+            text=f"{d} kun",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_give", target_id=callback_data.target_id, extra=callback_data.extra, page=d).pack(),
+        ))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(
+        text="⬅️ ORQAGA",
+        callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_menu", target_id=callback_data.target_id).pack(),
+    ))
+    await edit_or_answer(callback, f"💎 <b>{esc(callback_data.extra)}</b> VIP — necha kunga beramiz?", reply_markup=b.as_markup())
+
+
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_give")))
+async def cb_admin_user_vip_give(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    days = max(1, min(3650, int(callback_data.page or 30)))
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+        if callback_data.extra not in (vcfg.get("tiers") or {}):
+            await callback.answer("VIP daraja topilmadi", show_alert=True)
+            return
+        user = await session.get(User, callback_data.target_id)
+        if user is None:
+            await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+            return
+        await CommunityService.grant_vip(session, user, callback_data.extra, days)
+        await CommunityService.log_audit(
+            session, callback.from_user.id, "vip_grant", "user", str(user.id),
+            details={"tier": callback_data.extra, "days": days},
+        )
+        tg_id = user.telegram_id
+        await session.commit()
+    try:
+        await callback.bot.send_message(tg_id, f"💎 Sizga admin tomonidan <b>{esc(callback_data.extra)} VIP</b> berildi ({days} kun)! 🎉")
+    except Exception:
+        pass
+    await callback.answer("✅ VIP berildi", show_alert=True)
+    await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
+
+
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_revoke")))
+async def cb_admin_user_vip_revoke(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    async with get_session() as session:
+        user = await session.get(User, callback_data.target_id)
+        if user is None:
+            await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+            return
+        user.vip_tier = None
+        user.vip_until = None
+        await CommunityService.log_audit(session, callback.from_user.id, "vip_revoke", "user", str(user.id), details={})
+        tg_id = user.telegram_id
+        await session.commit()
+    try:
+        await callback.bot.send_message(tg_id, "ℹ️ VIP obunangiz admin tomonidan bekor qilindi.")
+    except Exception:
+        pass
+    await callback.answer("✅ VIP olib tashlandi", show_alert=True)
     await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
 
 
@@ -1198,7 +1322,7 @@ async def cb_admin_give_card_exec(callback: CallbackQuery, callback_data: AdminC
     if card:
         if u:
             try:
-                await callback.bot.send_message(u.telegram_id, f"🎁 Admin sizga <b>{esc(card.character_name)}</b> ({esc(card.rarity)}) kartasini sovg‘a qildi!")
+                await callback.bot.send_message(u.telegram_id, f"🎁 Admin sizga <b>{esc(card.character_name)}</b> ({esc(get_rarity_meta(card.rarity).name)}) kartasini sovg‘a qildi!")
             except Exception:
                 pass
         await callback.answer(f"✅ {card.character_name} berildi!", show_alert=True)
@@ -1290,127 +1414,6 @@ async def fsm_admin_user_dm(message: Message, state: FSMContext) -> None:
     await _render_admin_user(message, message.from_user.id, uid)
 
 
-@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_menu")))
-async def cb_admin_user_vip_menu(callback: CallbackQuery, callback_data: AdminCb) -> None:
-    uid = callback_data.target_id
-    owner_id = callback.from_user.id
-    async with get_session() as session:
-        user = await session.get(User, uid)
-        vcfg = await CommunityService.get_vip_config(session)
-    if user is None:
-        await callback.answer("Foydalanuvchi topilmadi.", show_alert=True)
-        return
-    tiers = vcfg.get("tiers") or {}
-    cur_vip = (
-        f"{esc(user.vip_tier)} ({ensure_utc(user.vip_until):%d.%m.%Y %H:%M} UTC gacha)"
-        if CommunityService.is_vip_active(user)
-        else "Oddiy (VIP yo‘q)"
-    )
-    b = InlineKeyboardBuilder()
-    for t_key, t in tiers.items():
-        em = t.get("emoji", "💎")
-        t_name = t.get("name", t_key)
-        b.row(
-            InlineKeyboardButton(
-                text=f"{em} {t_name} (7 kun)",
-                callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_set", target_id=uid, extra=f"{t_key}_7").pack(),
-            ),
-            InlineKeyboardButton(
-                text=f"{em} {t_name} (30 kun)",
-                callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_set", target_id=uid, extra=f"{t_key}_30").pack(),
-            ),
-        )
-        b.row(
-            InlineKeyboardButton(
-                text=f"{em} {t_name} (90 kun)",
-                callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_set", target_id=uid, extra=f"{t_key}_90").pack(),
-            ),
-            InlineKeyboardButton(
-                text=f"{em} {t_name} (365 kun)",
-                callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_set", target_id=uid, extra=f"{t_key}_365").pack(),
-            ),
-        )
-    if CommunityService.is_vip_active(user):
-        b.row(
-            InlineKeyboardButton(
-                text="❌ VIP ni olib tashlash",
-                callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_del", target_id=uid).pack(),
-            )
-        )
-    b.row(
-        InlineKeyboardButton(
-            text="⬅️ ORQAGA",
-            callback_data=AdminCb(owner_id=owner_id, section="users", action="detail", target_id=uid).pack(),
-        )
-    )
-    await edit_or_answer(
-        callback,
-        f"💎 <b>USER VIP BOSHQARUVI</b>\n\n👤 {esc(user.display_name)}\n📌 Hozirgi status: <b>{cur_vip}</b>\n\nVIP daraja va muddatni tanlang:",
-        reply_markup=b.as_markup(),
-    )
-
-
-@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_set")))
-async def cb_admin_user_vip_set(callback: CallbackQuery, callback_data: AdminCb) -> None:
-    uid = callback_data.target_id
-    if "_" not in callback_data.extra:
-        await callback.answer("Noto‘g‘ri VIP format.", show_alert=True)
-        return
-    tier_key, days_str = callback_data.extra.rsplit("_", 1)
-    days = int(days_str) if days_str.isdigit() else 30
-    async with get_session() as session:
-        user = await session.get(User, uid)
-        if user is None:
-            await callback.answer("Foydalanuvchi topilmadi.", show_alert=True)
-            return
-        await CommunityService.grant_vip(session, user, tier_key, days=days)
-        await CommunityService.log_audit(
-            session,
-            callback.from_user.id,
-            "grant_vip",
-            "user",
-            str(user.id),
-            new_value={"tier": tier_key, "days": days},
-        )
-        await session.commit()
-    try:
-        await callback.bot.send_message(
-            user.telegram_id,
-            f"💎 <b>Sizga {esc(tier_key)} VIP berildi!</b>\n⏳ Muddat: <b>{days} kun</b>",
-        )
-    except Exception:
-        pass
-    await callback.answer(f"✅ {tier_key} VIP ({days} kun) berildi!", show_alert=True)
-    await _render_admin_user(callback, callback.from_user.id, uid)
-
-
-@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "vip_del")))
-async def cb_admin_user_vip_del(callback: CallbackQuery, callback_data: AdminCb) -> None:
-    uid = callback_data.target_id
-    async with get_session() as session:
-        user = await session.get(User, uid)
-        if user is None:
-            await callback.answer("Foydalanuvchi topilmadi.", show_alert=True)
-            return
-        old_tier = user.vip_tier
-        await CommunityService.revoke_vip(session, user)
-        await CommunityService.log_audit(
-            session,
-            callback.from_user.id,
-            "revoke_vip",
-            "user",
-            str(user.id),
-            old_value={"tier": old_tier},
-        )
-        await session.commit()
-    try:
-        await callback.bot.send_message(user.telegram_id, "ℹ️ Sizning VIP obunangiz admin tomonidan bekor qilindi.")
-    except Exception:
-        pass
-    await callback.answer("❌ VIP olib tashlandi!", show_alert=True)
-    await _render_admin_user(callback, callback.from_user.id, uid)
-
-
 @router.callback_query(AdminCb.filter(F.section == "ban"))
 async def cb_admin_ban_toggle(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
     act = callback_data.action
@@ -1459,6 +1462,123 @@ async def fsm_user_temp_ban_reason(message: Message, state: FSMContext) -> None:
     await _render_admin_user(message, message.from_user.id, uid)
 
 
+_RANKING_MODE_LABELS = {
+    RankingMode.WEIGHTED.value: "⚖️ Rank vazni bo‘yicha",
+    RankingMode.UNIQUE_FIRST.value: "✨ Noyob kartalar birinchi",
+    RankingMode.TOTAL_CARDS.value: "🎴 Jami kartalar soni",
+}
+_DAILY_FIELD_LABELS = {
+    "base_coins": "🪙 Asosiy kunlik coin",
+    "streak_step": "🔥 Har kunlik seriya qo‘shimchasi (coin)",
+    "max_streak_bonus": "🏆 Maksimal seriya bonusi (coin)",
+}
+_DROP_RULE_LABELS = {
+    "members_per_card": "👥 Nechta a’zoga 1 ta karta (kamida 1)",
+    "min_per_day": "🔽 Kuniga eng kam tashlash soni (0+)",
+    "max_per_day": "🔼 Kuniga eng ko‘p tashlash soni (1+)",
+    "any_group_cooldown_hours": "⏳ Guruhlararo kutish vaqti (soat, 0+)",
+    "same_group_cooldown_days": "📅 Bir xil karta guruhga qayta tushishi (kun, 1+)",
+    "window_start_hour": "🌅 Boshlanish soati (0–23)",
+    "window_end_hour": "🌃 Tugash soati (1–24)",
+}
+
+
+def _settings_cancel_kb(owner_id: int, action: str = "view") -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(
+            text="❌ Bekor qilish",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action=action).pack(),
+        )
+    )
+    return b.as_markup()
+
+
+async def _render_settings_home(target, owner_id: int) -> None:
+    from utils.constants import get_rank_name_by_order
+
+    async with get_session() as session:
+        rank_mode = await SettingsService.get_ranking_mode(session)
+        ref_cfg = await SettingsService.get_referral_config(session)
+        grp_coins = await SettingsService.get_group_add_reward_coins(session)
+        dcfg = await SettingsService.get_daily_config(session)
+        gcfg = await GameplayService.get_game_config(session)
+        maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
+
+    maint_on = bool(isinstance(maint, dict) and maint.get("enabled"))
+    pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+    r3_name = get_rank_name_by_order(3, "Epic")
+    r3_meta = get_rarity_meta(r3_name)
+    mode_lbl = _RANKING_MODE_LABELS.get(rank_mode, rank_mode)
+    pack_txt = f"<b>{pack_lim}</b> marta/kun" if pack_lim > 0 else "🔴 O‘chirilgan (0)"
+    lines = [
+        "⚙️ <b>BOT SOZLAMALARI</b>\n━━━━━━━━━━━━━━━",
+        f"🎁 <b>Paket limiti (/pack):</b> {pack_txt}",
+        f"🎉 <b>Kunlik bonus:</b> {dcfg['base_coins']} 🪙 (+{dcfg['streak_step']}/kun, max +{dcfg['max_streak_bonus']})",
+        f"🤝 <b>Referal:</b> {ref_cfg['inviter_coins']:,} 🪙 / {ref_cfg['invitee_coins']:,} 🪙",
+        f"🏰 <b>Guruhga qo‘shish:</b> {grp_coins:,} 🪙 + {r3_meta.emoji} 1 {esc(r3_name)}",
+        f"🏆 <b>Reyting tartibi:</b> {esc(mode_lbl)}",
+        f"🛠 <b>Texnik rejim:</b> {'🔴 Yoqilgan' if maint_on else '🟢 O‘chirilgan'}",
+    ]
+    await edit_or_answer(
+        target,
+        "\n".join(lines),
+        reply_markup=admin_settings_kb(owner_id, rank_mode, maint_on, pack_daily_limit=pack_lim),
+    )
+
+
+async def _render_daily_menu(target, owner_id: int) -> None:
+    async with get_session() as session:
+        dcfg = await SettingsService.get_daily_config(session)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text=f"🪙 Asosiy coin: {dcfg['base_coins']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="base_coins").pack()))
+    b.row(InlineKeyboardButton(text=f"🔥 Streak qadam: +{dcfg['streak_step']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="streak_step").pack()))
+    b.row(InlineKeyboardButton(text=f"🏆 Max streak bonus: {dcfg['max_streak_bonus']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="max_streak_bonus").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
+    await edit_or_answer(target, "🎁 <b>KUNLIK BONUS SOZLAMALARI</b>", reply_markup=b.as_markup())
+
+
+async def _render_drop_rules(target, owner_id: int) -> None:
+    async with get_session() as session:
+        rules = await SettingsService.get_drop_rules(session)
+    b = InlineKeyboardBuilder()
+    ann = "✅ Ha" if rules.get("announce_in_group", True) else "❌ Yo‘q"
+    b.row(InlineKeyboardButton(text=f"📢 Guruhda e’lon: {ann}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_tog_ann").pack()))
+    b.row(
+        InlineKeyboardButton(text=f"👥 {rules['members_per_card']} a’zo/1 karta", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="members_per_card").pack()),
+        InlineKeyboardButton(text=f"🔽 Min/kun: {rules['min_per_day']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="min_per_day").pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text=f"🔼 Max/kun: {rules['max_per_day']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="max_per_day").pack()),
+        InlineKeyboardButton(text=f"⏳ Cooldown: {rules['any_group_cooldown_hours']} soat", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="any_group_cooldown_hours").pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text=f"📅 Qayta drop: {rules['same_group_cooldown_days']} kun", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="same_group_cooldown_days").pack()),
+        InlineKeyboardButton(text=f"🌅 Soat: {rules['window_start_hour']}:00", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="window_start_hour").pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text=f"🌃 Tugash: {rules['window_end_hour']}:00", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="window_end_hour").pack()),
+    )
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
+    await edit_or_answer(target, "📡 <b>DROP QOIDALARI</b>\n\nO‘zgartirish uchun bosing:", reply_markup=b.as_markup())
+
+
+async def _render_vip_menu(target, owner_id: int) -> None:
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+    tiers = vcfg.get("tiers") or {}
+    lines = ["💎 <b>VIP OBUNA NARXLARI</b>\n"]
+    b = InlineKeyboardBuilder()
+    for key, t in tiers.items():
+        lines.append(f"{t.get('emoji', '💎')} <b>{esc(t.get('name', key))}</b>: {int(t.get('coins', 0)):,} 🪙 | {int(t.get('stars', 0)):,} ⭐ ({t.get('duration_days', 30)} kun)")
+        b.row(
+            InlineKeyboardButton(text=f"🪙 {key} Coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}.coins").pack()),
+            InlineKeyboardButton(text=f"⭐ {key} Stars", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}.stars").pack()),
+        )
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
 # ---------------------------------------------------------------------------
 # BOT SETTINGS (Clean V2 controls: Daily, Referral, Drop Rules, Welcome, VIP, Maint, Ranking)
 # ---------------------------------------------------------------------------
@@ -1480,44 +1600,30 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
         }
         st, txt = prompts[act]
         await state.set_state(st)
-        await edit_or_answer(callback, f"{txt}\n<i>Bekor: /cancel</i>")
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, txt, reply_markup=_settings_cancel_kb(owner_id, "rewards_menu"))
         return
 
     if act == "daily_menu":
         await state.clear()
-        async with get_session() as session:
-            dcfg = await SettingsService.get_daily_config(session)
-        b = InlineKeyboardBuilder()
-        b.row(InlineKeyboardButton(text=f"🪙 Asosiy coin: {dcfg['base_coins']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="base_coins").pack()))
-        b.row(InlineKeyboardButton(text=f"🔥 Streak qadam: +{dcfg['streak_step']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="streak_step").pack()))
-        b.row(InlineKeyboardButton(text=f"🏆 Max streak bonus: {dcfg['max_streak_bonus']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="max_streak_bonus").pack()))
-        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
-        await edit_or_answer(callback, "🎁 <b>DAILY BONUS SOZLAMALARI</b>", reply_markup=b.as_markup())
+        await _render_daily_menu(callback, owner_id)
         return
 
     if act == "daily_ed":
+        field = callback_data.extra
         await state.set_state(AdminStates.edit_daily_field)
-        await state.update_data(owner_tg_id=owner_id, field=callback_data.extra)
-        await edit_or_answer(callback, f"🎁 <b>{esc(callback_data.extra)}</b> uchun yangi musbat son kiriting:")
+        await state.update_data(owner_tg_id=owner_id, field=field)
+        label = _DAILY_FIELD_LABELS.get(field, field)
+        await edit_or_answer(
+            callback,
+            f"🎁 <b>{esc(label)}</b>\n\nYangi qiymatni kiriting (butun son):",
+            reply_markup=_settings_cancel_kb(owner_id, "daily_menu"),
+        )
         return
 
     if act == "drop_rules":
         await state.clear()
-        async with get_session() as session:
-            rules = await SettingsService.get_drop_rules(session)
-        b = InlineKeyboardBuilder()
-        ann = "✅ Ha" if rules.get("announce_in_group", True) else "❌ Yo‘q"
-        b.row(InlineKeyboardButton(text=f"📢 Guruhda e’lon: {ann}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_tog_ann").pack()))
-        b.row(
-            InlineKeyboardButton(text=f"👥 {rules['members_per_card']} a’zo/1 karta", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="members_per_card").pack()),
-            InlineKeyboardButton(text=f"🔽 Min/kun: {rules['min_per_day']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="min_per_day").pack()),
-        )
-        b.row(
-            InlineKeyboardButton(text=f"🔼 Max/kun: {rules['max_per_day']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="max_per_day").pack()),
-            InlineKeyboardButton(text=f"⏳ Cooldown (soat): {rules['any_group_cooldown_hours']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="any_group_cooldown_hours").pack()),
-        )
-        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
-        await edit_or_answer(callback, "📡 <b>DROP QOIDALARI</b>\n\nO‘zgartirish uchun bosing:", reply_markup=b.as_markup())
+        await _render_drop_rules(callback, owner_id)
         return
 
     if act == "dr_tog_ann":
@@ -1527,22 +1633,33 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
             await SettingsService.set_value(session, "drop_rules", rules)
             await session.commit()
         await callback.answer("✅ Yangilandi!")
-        callback_data.action = "drop_rules"
-        await cb_admin_settings(callback, callback_data, state)
+        await state.clear()
+        await _render_drop_rules(callback, owner_id)
         return
 
     if act == "dr_ed":
+        field = callback_data.extra
         await state.set_state(AdminStates.edit_drop_rule_field)
-        await state.update_data(owner_tg_id=owner_id, field=callback_data.extra)
-        await edit_or_answer(callback, f"📡 <b>{esc(callback_data.extra)}</b> uchun yangi qiymat kiriting:")
+        await state.update_data(owner_tg_id=owner_id, field=field)
+        label = _DROP_RULE_LABELS.get(field, field)
+        await edit_or_answer(
+            callback,
+            f"📡 <b>{esc(label)}</b>\n\nYangi qiymatni kiriting:",
+            reply_markup=_settings_cancel_kb(owner_id, "drop_rules"),
+        )
         return
 
     if act == "welcome_edit":
         await state.set_state(AdminStates.edit_welcome_text)
         await state.update_data(owner_tg_id=owner_id)
         async with get_session() as session:
-            cur = await SettingsService.get_value(session, "welcome_text", "")
-        await edit_or_answer(callback, f"👋 <b>WELCOME MATNI</b>\n\nHozirgi matn:\n{cur}\n\nYangi matnni yuboring (<i>Bekor: /cancel</i>):")
+            cur = str(await SettingsService.get_value(session, "welcome_text", "") or "")
+        preview = esc(cur[:1500]) if cur else "<i>Bo‘sh</i>"
+        await edit_or_answer(
+            callback,
+            f"👋 <b>KIRISH MATNI (/start)</b>\n\nHozirgi matn:\n<code>{preview}</code>\n\nYangi matnni yuboring:",
+            reply_markup=_settings_cancel_kb(owner_id, "view"),
+        )
         return
 
     if act == "vip_menu":
@@ -1550,56 +1667,82 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
         await _render_vip_menu(callback, owner_id)
         return
 
-    if act == "vip_tog":
-        async with get_session() as session:
-            vcfg = await CommunityService.get_vip_config(session)
-            vcfg["enabled"] = not bool(vcfg.get("enabled", True))
-            await SettingsService.set_value(session, "vip_config", vcfg)
-            await session.commit()
-        await callback.answer("💎 VIP tizimi holati o‘zgartirildi!")
-        await _render_vip_menu(callback, owner_id)
-        return
-
     if act == "vip_ed":
+        tier_metric = callback_data.extra or ""
         await state.set_state(AdminStates.edit_vip_price)
-        await state.update_data(owner_tg_id=owner_id, vip_key=callback_data.extra)
-        tier_lbl, metric = (callback_data.extra.rsplit("_", 1) + [""])[:2]
-        unit_hint = "kun (kamida 1)" if metric == "days" else "son (0 — bu usulni o‘chirish)"
+        await state.update_data(owner_tg_id=owner_id, vip_key=tier_metric)
+        pretty = tier_metric.replace(".coins", " — Coin narxi").replace(".stars", " — Stars narxi")
         await edit_or_answer(
             callback,
-            f"💎 <b>{esc(tier_lbl)} ({esc(metric)})</b> uchun yangi qiymatni kiriting ({unit_hint}):\n<i>Bekor: /cancel</i>",
+            f"💎 <b>{esc(pretty)}</b>\n\nYangi narxni kiriting (faqat musbat son):",
+            reply_markup=_settings_cancel_kb(owner_id, "vip_menu"),
         )
         return
 
+    if act == "pack_limit":
+        async with get_session() as session:
+            gcfg = await GameplayService.get_game_config(session)
+        cur_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+        await state.set_state(AdminStates.edit_pack_limit)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(
+            callback,
+            "🎁 <b>KUNLIK PAKET LIMITI (/pack)</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"Hozirgi limit: <b>{cur_lim} marta/kun</b>\n\n"
+            "Bir foydalanuvchi 1 kunda nechta paket ocha olsin?\n"
+            "• <code>1</code> — standart (kuniga 1 marta)\n"
+            "• <code>0</code> — paketlarni vaqtincha yopish\n"
+            "• <code>1–100</code> — kunlik limit soni\n\n"
+            "Yangi sonni kiriting:",
+            reply_markup=_settings_cancel_kb(owner_id, "view"),
+        )
+        return
+
+    await state.clear()
     async with get_session() as session:
         if act == "set_rank":
             if callback_data.extra in {m.value for m in RankingMode}:
                 await SettingsService.set_ranking_mode(session, callback_data.extra)
+                await AdminService.log_action(
+                    session, owner_id, "set_ranking_mode", "settings", "ranking_mode", {"mode": callback_data.extra}
+                )
                 await session.commit()
                 RankingService.invalidate_cache()
+                await callback.answer("🏆 Reyting tartibi yangilandi!")
         elif act == "maint_tog":
             maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
+            maint = dict(maint) if isinstance(maint, dict) else {"enabled": False}
             maint["enabled"] = not bool(maint.get("enabled", False))
             await SettingsService.set_value(session, "maintenance", maint)
             await session.commit()
             await callback.answer("🛠 Texnik rejim o‘zgartirildi!")
 
-        rank_mode = await SettingsService.get_ranking_mode(session)
-        ref_cfg = await SettingsService.get_referral_config(session)
-        grp_coins = await SettingsService.get_group_add_reward_coins(session)
-        dcfg = await SettingsService.get_daily_config(session)
-        maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
+    await _render_settings_home(callback, owner_id)
 
-    maint_on = bool(isinstance(maint, dict) and maint.get("enabled"))
-    lines = [
-        "⚙️ <b>BOT SOZLAMALARI</b>\n",
-        f"🎁 <b>Daily Bonus:</b> {dcfg['base_coins']} 🪙 (+{dcfg['streak_step']}/kun, max +{dcfg['max_streak_bonus']})",
-        f"🤝 <b>Referal:</b> {ref_cfg['inviter_coins']:,} 🪙 / {ref_cfg['invitee_coins']:,} 🪙",
-        f"🏰 <b>Guruhga qo‘shish:</b> {grp_coins:,} 🪙 + 1 Epic",
-        f"🏆 <b>Ranking Mode:</b> <code>{esc(rank_mode)}</code>",
-        f"🛠 <b>Texnik rejim:</b> {'🔴 Yoqilgan' if maint_on else '🟢 O‘chirilgan'}",
-    ]
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=admin_settings_kb(owner_id, rank_mode, maint_on))
+
+@router.message(AdminStates.edit_pack_limit, NotCommandFilter())
+async def fsm_edit_pack_limit(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or not (0 <= int(raw) <= 100):
+        await message.answer("⚠️ 0 dan 100 gacha butun son kiriting.")
+        return
+    val = int(raw)
+    await state.clear()
+    async with get_session() as session:
+        gcfg = await GameplayService.get_game_config(session)
+        gcfg["pack_daily_limit"] = val
+        gcfg["pack_enabled"] = val > 0
+        await SettingsService.set_value(session, "game_config", gcfg)
+        await AdminService.log_action(
+            session, message.from_user.id, "set_pack_daily_limit", "settings", "pack_daily_limit", {"limit": val}
+        )
+        await session.commit()
+    await message.answer(f"✅ Kunlik paket limiti <b>{val}/kun</b> qilib saqlandi!")
+    await _render_settings_home(message, message.from_user.id)
 
 
 @router.message(AdminStates.edit_daily_field, NotCommandFilter())
@@ -1607,18 +1750,20 @@ async def fsm_edit_daily_field(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
-    raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("⚠️ Musbat son kiriting.")
-        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
     field = data["field"]
+    min_val = 1 if field == "base_coins" else 0
+    if not raw.isdigit() or int(raw) < min_val:
+        await message.answer(f"⚠️ Kamida {min_val} butun son kiriting.")
+        return
     await state.clear()
     async with get_session() as session:
         dcfg = await SettingsService.get_daily_config(session)
         dcfg[field] = int(raw)
         await SettingsService.set_value(session, "daily_bonus", dcfg)
         await session.commit()
-    await message.answer(f"✅ Daily Bonus ({esc(field)}) yangilandi!", reply_markup=admin_home_kb(message.from_user.id))
+    await message.answer("✅ Daily Bonus sozlamasi yangilandi!")
+    await _render_daily_menu(message, message.from_user.id)
 
 
 @router.message(AdminStates.edit_drop_rule_field, NotCommandFilter())
@@ -1626,18 +1771,32 @@ async def fsm_edit_drop_rule_field(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
-    raw = (message.text or "").strip()
-    if not raw.isdigit() or int(raw) <= 0:
-        await message.answer("⚠️ Musbat son kiriting.")
-        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
     field = data["field"]
+    if not raw.isdigit():
+        await message.answer("⚠️ Faqat butun son kiriting.")
+        return
+    val = int(raw)
+    if field in ("min_per_day", "any_group_cooldown_hours") and val < 0:
+        await message.answer("⚠️ 0 yoki musbat son kiriting.")
+        return
+    if field in ("members_per_card", "max_per_day", "same_group_cooldown_days") and val < 1:
+        await message.answer("⚠️ Kamida 1 son kiriting.")
+        return
+    if field == "window_start_hour" and not (0 <= val <= 23):
+        await message.answer("⚠️ Boshlanish soati 0 dan 23 gacha bo‘lishi kerak.")
+        return
+    if field == "window_end_hour" and not (1 <= val <= 24):
+        await message.answer("⚠️ Tugash soati 1 dan 24 gacha bo‘lishi kerak.")
+        return
     await state.clear()
     async with get_session() as session:
         rules = await SettingsService.get_drop_rules(session)
-        rules[field] = int(raw)
+        rules[field] = val
         await SettingsService.set_value(session, "drop_rules", rules)
         await session.commit()
-    await message.answer(f"✅ Drop qoidasi ({esc(field)}) = <b>{raw}</b> saqlandi!", reply_markup=admin_home_kb(message.from_user.id))
+    await message.answer(f"✅ Drop qoidasi saqlandi (<b>{val}</b>)!")
+    await _render_drop_rules(message, message.from_user.id)
 
 
 @router.message(AdminStates.edit_welcome_text, NotCommandFilter())
@@ -1653,45 +1812,8 @@ async def fsm_edit_welcome_text(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         await SettingsService.set_value(session, "welcome_text", txt)
         await session.commit()
-    await message.answer("✅ Welcome matni saqlandi!", reply_markup=admin_home_kb(message.from_user.id))
-
-
-async def _render_vip_menu(target, owner_id: int) -> None:
-    async with get_session() as session:
-        vcfg = await CommunityService.get_vip_config(session)
-    enabled = bool(vcfg.get("enabled", True))
-    tiers = vcfg.get("tiers") or {}
-    lines = [
-        f"💎 <b>VIP OBUNA NARXLARI</b> ({'🟢 Yoqilgan' if enabled else '🔴 O‘chirilgan'})\n"
-    ]
-    b = InlineKeyboardBuilder()
-    b.row(
-        InlineKeyboardButton(
-            text=("🔴 VIP ni o‘chirish" if enabled else "🟢 VIP ni yoqish"),
-            callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_tog").pack(),
-        )
-    )
-    for key, t in tiers.items():
-        lines.append(
-            f"{t.get('emoji', '💎')} <b>{esc(t.get('name', key))}</b>: "
-            f"{int(t.get('coins', 0)):,} 🪙 | {int(t.get('stars', 0)):,} ⭐ ({t.get('duration_days', 30)} kun)"
-        )
-        b.row(
-            InlineKeyboardButton(
-                text=f"🪙 {key} Coin",
-                callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}_coins").pack(),
-            ),
-            InlineKeyboardButton(
-                text=f"⭐ {key} Stars",
-                callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}_stars").pack(),
-            ),
-            InlineKeyboardButton(
-                text=f"⏳ {key} Kun",
-                callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}_days").pack(),
-            ),
-        )
-    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
-    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+    await message.answer("✅ Welcome matni saqlandi!")
+    await _render_settings_home(message, message.from_user.id)
 
 
 @router.message(AdminStates.edit_vip_price, NotCommandFilter())
@@ -1700,50 +1822,36 @@ async def fsm_edit_vip_price(message: Message, state: FSMContext) -> None:
     if data.get("owner_tg_id") != message.from_user.id:
         return
     raw = (message.text or "").strip().replace(",", "").replace(" ", "")
-    if not raw.isdigit():
-        await message.answer("⚠️ Faqat butun son (0 yoki musbat) kiriting.")
+    if not raw.isdigit() or int(raw) <= 0:
+        await message.answer("⚠️ Musbat son kiriting.")
         return
-    vip_key_str = str(data.get("vip_key") or "")
-    if "_" not in vip_key_str:
-        await state.clear()
-        await message.answer("⚠️ Jarayon eskirgan.")
-        return
-    tier_key, metric_raw = vip_key_str.rsplit("_", 1)
-    metric_field = "duration_days" if metric_raw == "days" else metric_raw
-    val = int(raw)
-    if metric_field == "duration_days" and val < 1:
-        await message.answer("⚠️ Muddat kamida 1 kun bo‘lishi kerak.")
-        return
+    tier_key, metric = data["vip_key"].rsplit(".", 1)
     await state.clear()
     async with get_session() as session:
-        vcfg = copy.deepcopy(await CommunityService.get_vip_config(session))
-        tiers = copy.deepcopy(vcfg.get("tiers") or {})
-        if tier_key in tiers:
-            tiers[tier_key][metric_field] = val
+        vcfg = await CommunityService.get_vip_config(session)
+        tiers = {k: dict(v) for k, v in (vcfg.get("tiers") or {}).items()}
+        if tier_key in tiers and metric in ("coins", "stars"):
+            tiers[tier_key][metric] = int(raw)
             vcfg["tiers"] = tiers
             await SettingsService.set_value(session, "vip_config", vcfg)
-            await CommunityService.log_audit(
-                session,
-                message.from_user.id,
-                "edit_vip_price",
-                "settings",
-                tier_key,
-                new_value={metric_field: val},
-            )
             await session.commit()
-    await message.answer(f"✅ <b>{esc(tier_key)}</b> ({esc(metric_field)}) = <b>{val:,}</b> saqlandi!")
+    await message.answer(f"✅ {esc(tier_key)} narxi = <b>{int(raw):,}</b> saqlandi!")
     await _render_vip_menu(message, message.from_user.id)
 
 
 async def _rewards_menu_text_and_kb(owner_id: int):
+    from utils.constants import get_rank_name_by_order
+
     async with get_session() as session:
         ref_cfg = await SettingsService.get_referral_config(session)
         grp_coins = await SettingsService.get_group_add_reward_coins(session)
+    r3_name = get_rank_name_by_order(3, "Epic")
+    r3_meta = get_rarity_meta(r3_name)
     text = (
         "🤝 <b>REFERAL VA GURUH MUKOFOTLARI</b>\n\n"
         f"👤 Taklif qiluvchi mukofoti: <b>{ref_cfg['inviter_coins']:,} 🪙</b>\n"
         f"🆕 Yangi foydalanuvchi mukofoti: <b>{ref_cfg['invitee_coins']:,} 🪙</b>\n"
-        f"🏰 Botni guruhga qo‘shish mukofoti: <b>{grp_coins:,} 🪙</b> + 🟣 1 ta Epic karta"
+        f"🏰 Botni guruhga qo‘shish mukofoti: <b>{grp_coins:,} 🪙</b> + {r3_meta.emoji} 1 ta {esc(r3_name)} karta"
     )
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -1765,6 +1873,9 @@ async def _render_rewards_menu(callback: CallbackQuery) -> None:
 
 
 async def _save_reward_coin_setting(message: Message, state: FSMContext, kind: str) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") is not None and data.get("owner_tg_id") != message.from_user.id:
+        return
     raw = (message.text or "").strip().replace(",", "").replace(" ", "")
     if not raw.isdigit():
         await message.answer("⚠️ Faqat musbat butun son (yoki 0) kiriting.")
@@ -1912,6 +2023,134 @@ def _local_dt(dt):
     return ensure_utc(dt).astimezone(ZoneInfo(get_settings().timezone))
 
 
+# ----------------------------------------------------------------------
+# BONUS EVENT: ma'lum vaqt davomida biror rank tushish ehtimolini oshirish
+# ----------------------------------------------------------------------
+async def _render_bonus_menu(callback: CallbackQuery) -> None:
+    owner_id = callback.from_user.id
+    async with get_session() as session:
+        ev = await CardService.get_active_event(session)
+    b = InlineKeyboardBuilder()
+    if ev is not None:
+        text = (
+            "⚡ <b>BONUS EVENT</b>\n\n"
+            f"🟢 Hozir faol: <b>{esc(ev.name)}</b>\n"
+            f"🎯 {esc(ev.description)}\n"
+            f"⏳ Tugash: <b>{_local_dt(ev.ends_at):%d.%m.%Y %H:%M}</b>"
+        )
+        b.row(InlineKeyboardButton(text="⛔ Hozir to‘xtatish", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_stop", target_id=ev.id).pack()))
+    else:
+        text = (
+            "⚡ <b>BONUS EVENT</b>\n\n"
+            "Hozir faol bonus event yo‘q.\n"
+            "Bonus event — belgilangan vaqt davomida tanlangan rank kartalari guruhlarga tez-tez tushishini ta’minlaydi."
+        )
+    b.row(InlineKeyboardButton(text="➕ Yangi bonus event", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_new").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="evt", action="menu").pack()))
+    await edit_or_answer(callback, text, reply_markup=b.as_markup())
+
+
+@router.callback_query(AdminCb.filter(F.section == "events"))
+async def cb_admin_bonus_event(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
+    owner_id = callback.from_user.id
+    action = callback_data.action
+
+    if action == "bonus_menu":
+        await state.clear()
+        await _render_bonus_menu(callback)
+        return
+
+    if action == "bonus_stop":
+        async with get_session() as session:
+            ev = await session.get(Event, callback_data.target_id)
+            if ev is not None:
+                ev.is_active = False
+                await CommunityService.log_audit(session, owner_id, "bonus_event_stop", "event", str(ev.id))
+                await session.commit()
+        await callback.answer("⛔ Bonus event to‘xtatildi", show_alert=True)
+        await _render_bonus_menu(callback)
+        return
+
+    if action == "bonus_new":
+        await state.set_state(AdminStates.bonus_name)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, "⚡ <b>YANGI BONUS EVENT</b>\n\n1/4 — Event nomini yozing (masalan: <i>Legend haftaligi</i>):\n<i>Bekor: /cancel</i>")
+        return
+
+    if action == "bonus_rar":
+        # extra = rank nomi yoki "none"
+        await state.update_data(bonus_rarity=None if callback_data.extra == "none" else callback_data.extra)
+        b = InlineKeyboardBuilder()
+        for m in (2, 3, 5, 10):
+            b.add(InlineKeyboardButton(text=f"x{m}", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_go", extra=str(m)).pack()))
+        b.adjust(4)
+        await edit_or_answer(callback, "⚡ 4/4 — Tushish ehtimoli necha barobar oshsin?", reply_markup=b.as_markup())
+        return
+
+    if action == "bonus_go":
+        data = await state.get_data()
+        name = data.get("bonus_name_val")
+        hours = int(data.get("bonus_hours_val") or 24)
+        rarity = data.get("bonus_rarity")
+        try:
+            mult = float(callback_data.extra or 2)
+        except ValueError:
+            mult = 2.0
+        if not name:
+            await callback.answer("Ma’lumot yo‘qoldi, qaytadan boshlang.", show_alert=True)
+            return
+        await state.clear()
+        async with get_session() as session:
+            await AdminService.create_event(
+                session, owner_id, name, hours,
+                boosted_rarity=rarity, rarity_weight_multiplier=mult if rarity else 1.0,
+            )
+            await session.commit()
+        await callback.answer("✅ Bonus event boshlandi!", show_alert=True)
+        await _render_bonus_menu(callback)
+        return
+
+    await callback.answer()
+
+
+@router.message(AdminStates.bonus_name, NotCommandFilter())
+async def fsm_bonus_name(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    name = (message.text or "").strip()
+    if not (2 <= len(name) <= 100):
+        await message.answer("⚠️ Nom 2 dan 100 gacha belgi bo‘lsin.")
+        return
+    await state.update_data(bonus_name_val=name)
+    await state.set_state(AdminStates.bonus_hours)
+    await message.answer("⚡ 2/4 — Necha soat davom etsin? (1 dan 720 gacha son)")
+
+
+@router.message(AdminStates.bonus_hours, NotCommandFilter())
+async def fsm_bonus_hours(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= 720):
+        await message.answer("⚠️ 1 dan 720 gacha butun son kiriting.")
+        return
+    await state.update_data(bonus_hours_val=int(raw))
+    owner_id = message.from_user.id
+    async with get_session() as session:
+        ranks = await GameplayService.get_rank_definitions(session)
+    b = InlineKeyboardBuilder()
+    for r in ranks:
+        rarity = str(r["name"])
+        emoji = str(r.get("emoji") or get_rarity_meta(rarity).emoji)
+        b.add(InlineKeyboardButton(text=f"{emoji} {rarity}", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_rar", extra=rarity).pack()))
+    b.adjust(2)
+    b.row(InlineKeyboardButton(text="Rank tanlamaslik (faqat e’lon)", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_rar", extra="none").pack()))
+    await message.answer("⚡ 3/4 — Qaysi rank kartalari ko‘proq tushsin?", reply_markup=b.as_markup())
+
+
+
 async def _render_evt_menu(callback: CallbackQuery) -> None:
     async with get_session() as session:
         await EventService.close_expired(session)
@@ -1935,10 +2174,10 @@ def _evt_summary(data: dict) -> str:
     if data.get("price_stars"):
         prices.append(f"⭐ <b>{int(data['price_stars']):,}</b> Stars")
     hours = int(data.get("hours", EVENT_DURATION_HOURS))
-    meta = get_rarity_meta(data.get("rarity", "Common"))
+    meta = get_rarity_meta(data.get("rarity", "Basic"))
     return (
         "🎁 <b>EVENTNI TASDIQLASH</b>\n\n"
-        f"🎴 Karta: <b>{esc(data.get('card_name', ''))}</b> ({meta.emoji} {esc(data.get('rarity', ''))})\n"
+        f"🎴 Karta: <b>{esc(data.get('card_name', ''))}</b> ({meta.emoji} {esc(meta.name)})\n"
         f"📺 Media: {esc(data.get('anime_name', ''))}\n"
         f"📦 Nusxa soni: <b>{data.get('copies')}</b> ta\n"
         f"💳 Narx: {'  yoki  '.join(prices)}\n"
@@ -2101,7 +2340,7 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
         await edit_or_answer(
             callback,
             f"🎁 <b>Event #{ev.id}</b> — {_EVT_STATUS.get(ev.status, ev.status)}\n\n"
-            f"🎴 {esc(card.character_name)} ({esc(card.rarity)}) · {esc(card.anime_name)}\n"
+            f"🎴 {esc(card.character_name)} ({esc(get_rarity_meta(card.rarity).name)}) · {esc(card.anime_name)}\n"
             f"📦 Sotilgan: <b>{ev.sold_count}/{ev.total_copies}</b>\n"
             f"💳 Narx: {'  /  '.join(prices)}\n"
             f"⏳ Tugash: {_local_dt(ev.ends_at):%d.%m %H:%M}",

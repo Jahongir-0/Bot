@@ -250,7 +250,10 @@ class EventService:
         if not event.price_coins:
             return EventResult(False, "Bu event kartasi coin bilan sotilmaydi. ⭐ Stars bilan oling.", "no_price")
 
-        if user.coins < int(event.price_coins):
+        fresh_coins = int(
+            (await session.execute(select(User.coins).where(User.id == user.id))).scalar_one_or_none() or 0
+        )
+        if fresh_coins < int(event.price_coins):
             return EventResult(False, "❌ Coinlaringiz yetarli emas!", "funds", event=event, card=card)
 
         try:

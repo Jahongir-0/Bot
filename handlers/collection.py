@@ -22,12 +22,12 @@ from models.card import Card
 from models.user import User
 from models.user_card import UserCard
 from services.collection_service import CollectionService
+from services.gameplay_service import GameplayService
 from services.market_service import MarketService
 from utils.callback_data import CollectionCb, NavCb
-from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta
+from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, event_tag, fmt_coins, format_card_about, format_card_block, format_collection_summary
-from utils.i18n import get_lang, tr
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat, send_card_message
+from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
 
 router = Router(name="collection")
 
@@ -50,13 +50,14 @@ def _ints(value: str, count: int) -> List[int]:
 
 
 async def _show_summary(target, owner_id: int, db_user: User) -> None:
-    lang = get_lang(db_user)
     async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
+        fresh = await session.get(User, db_user.id) or db_user
         anime_counts, rarity_counts, favorites = await CollectionService.get_summary(
             session, db_user.id
         )
-    text = format_collection_summary(db_user, anime_counts, rarity_counts, favorites, lang=lang)
-    await edit_or_answer(target, text, reply_markup=collection_summary_kb(owner_id, lang=lang))
+    text = format_collection_summary(fresh, anime_counts, rarity_counts, favorites)
+    await edit_or_answer(target, text, reply_markup=collection_summary_kb(owner_id))
 
 
 @router.message(Command("cards", "collection"))
@@ -72,7 +73,6 @@ async def cb_collection_summary(callback: CallbackQuery, db_user: User) -> None:
 
 @router.callback_query(CollectionCb.filter(F.action == "v2_list"))
 async def cb_v2_collection_list(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     filter_tab = callback_data.filter_val or "all"
     sort_by = callback_data.sort_by or "newest"
     page = max(1, callback_data.page)
@@ -86,27 +86,30 @@ async def cb_v2_collection_list(callback: CallbackQuery, callback_data: Collecti
             rows, total = await CollectionService.get_filtered_user_cards(
                 session, db_user.id, filter_tab=filter_tab, sort_by=sort_by, page=1, page_size=PAGE_SIZE
             )
-    lines = [tr(lang, "col_list_hdr", tab=filter_tab.upper(), total=total)]
+    tab_names = {"all": "Hammasi", "anime": "Anime", "manga": "Manga", "movie": "Kino", "cartoon": "Multfilm", "event": "Event", "limited": "Limitli", "favorites": "Sevimlilar"}
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    lines = [
+        f"🗂 <b>KARTALARIM · {tab_names.get(filter_tab, filter_tab.title())}</b>",
+        f"━━━━━━━━━━━━━━━\n📦 Jami: <b>{total}</b> ta  ·  📄 Sahifa: <b>{page}/{pages}</b>\n",
+    ]
     if not rows:
-        lines.append(tr(lang, "col_empty_tab"))
+        lines.append("📭 Bu bo‘limda kartalar topilmadi.")
     else:
-        for uc, c in rows:
-            meta = get_rarity_meta(c.rarity)
-            fav = "❤️ " if uc.is_favorite else ""
-            ser = f"#{uc.serial_number}" if getattr(uc, "serial_number", None) else ""
-            lines.append(f"{fav}{event_tag(c)}{meta.emoji} <b>{esc(c.character_name)}</b> · {esc(c.anime_name)} {ser}")
+        lines.append("👇 Kartani tanlang (❤️ sevimli · 🖼 vitrinada):")
     await edit_or_answer(
         callback,
         "\n".join(lines),
         reply_markup=v2_collection_list_kb(
-            callback.from_user.id, rows, filter_tab, sort_by, page, total, page_size=PAGE_SIZE, lang=lang
+            callback.from_user.id, rows, filter_tab, sort_by, page, total, page_size=PAGE_SIZE
         ),
     )
 
 
+# ---------------------------------------------------------------------------
+# 1-daraja: ANIME BO'LIMLARI (bir xil nomli anime = bitta bo'lim)
+# ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action.in_({"anime_list", "by_anime"})))
 async def cb_anime_list(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     page = max(1, callback_data.page)
     async with get_session() as session:
         sections, total = await CollectionService.get_anime_sections(
@@ -121,24 +124,26 @@ async def cb_anime_list(callback: CallbackQuery, callback_data: CollectionCb, db
     if total == 0:
         await edit_or_answer(
             callback,
-            tr(lang, "col_empty"),
-            reply_markup=back_home_kb(callback.from_user.id, "cards", lang),
+            "📭 Sizda hali kartalar yo‘q. Guruhdagi dropni kuting yoki marketdan sotib oling!",
+            reply_markup=back_home_kb(callback.from_user.id, "cards"),
         )
         return
 
-    lines = [tr(lang, "col_media_hdr", total=total)]
+    lines = [f"📺 <b>ANIME BO‘LIMLARI</b> (Jami: {total} ta anime)\n"]
     for sec in sections:
-        lines.append(f"• <b>{esc(sec.anime_name)}</b> — {sec.characters} / {sec.copies}")
+        lines.append(f"• <b>{esc(sec.anime_name)}</b> — {sec.characters} personaj · {sec.copies} ta karta")
     await edit_or_answer(
         callback,
         "\n".join(lines),
-        reply_markup=anime_sections_kb(callback.from_user.id, sections, page, total, ANIME_PAGE_SIZE, lang=lang),
+        reply_markup=anime_sections_kb(callback.from_user.id, sections, page, total, ANIME_PAGE_SIZE),
     )
 
 
+# ---------------------------------------------------------------------------
+# 2-daraja: anime ichidagi PERSONAJLAR (bir personajning hamma kartalari birlashgan)
+# ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action == "anime_open"))
 async def cb_anime_open(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     anime_page = _ints(callback_data.filter_val, 1)[0]
     page = max(1, callback_data.page)
     async with get_session() as session:
@@ -152,34 +157,36 @@ async def cb_anime_open(callback: CallbackQuery, callback_data: CollectionCb, db
             )
 
     if info is None:
-        await callback.answer(tr(lang, "col_empty_tab"), show_alert=True)
+        await callback.answer("Bu bo‘limda kartalaringiz qolmagan.", show_alert=True)
         await cb_anime_list(callback, CollectionCb(owner_id=callback.from_user.id, action="anime_list", page=anime_page), db_user)
         return
 
     anime_name, chars, total = info
-    lines = [f"📺 <b>{esc(anime_name)}</b> ({total})\n"]
+    lines = [f"📺 <b>{esc(anime_name)}</b> — personajlar (Jami: {total})\n"]
     for ch in chars:
         fav = ("❤️ " if ch.is_favorite else "") + ("🎯 " if ch.has_event_card else "")
-        note = f" ({ch.variants}x)" if ch.variants > 1 else ""
+        note = f" ({ch.variants} xil karta)" if ch.variants > 1 else ""
         lines.append(f"{fav}🎴 <b>{esc(ch.character_name)}</b> × {ch.copies}{note}")
     await edit_or_answer(
         callback,
         "\n".join(lines),
         reply_markup=anime_characters_kb(
-            callback.from_user.id, callback_data.item_id, anime_page, chars, page, total, CHAR_PAGE_SIZE, lang=lang
+            callback.from_user.id, callback_data.item_id, anime_page, chars, page, total, CHAR_PAGE_SIZE
         ),
     )
 
 
+# ---------------------------------------------------------------------------
+# 3-daraja: personajning kartalari (turli rarity/rasm variantlari)
+# ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action == "char_open"))
 async def cb_char_open(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     char_page, anime_page = _ints(callback_data.filter_val, 2)
     async with get_session() as session:
         info = await CollectionService.get_character_variants(session, db_user.id, callback_data.item_id)
 
     if info is None:
-        await callback.answer(tr(lang, "card_not_found"), show_alert=True)
+        await callback.answer("Bu personaj kartalari sizda qolmagan.", show_alert=True)
         await cb_anime_list(callback, CollectionCb(owner_id=callback.from_user.id, action="anime_list", page=anime_page), db_user)
         return
 
@@ -189,37 +196,40 @@ async def cb_char_open(callback: CallbackQuery, callback_data: CollectionCb, db_
         f"🎴 <b>{esc(character_name)}</b>",
         f"📺 {esc(anime_name)}",
         "",
-        f"📦 Total: <b>{total_copies}</b> · {len(variants)} variants\n",
+        f"📦 Jami: <b>{total_copies}</b> ta nusxa · {len(variants)} xil karta\n",
     ]
     for v in variants:
         meta = get_rarity_meta(v.card.rarity)
-        tag = "  🎯 <i>EVENT</i>" if v.card.is_event_card else ""
+        tag = "  🎯 <i>EVENT · cheklangan nusxa</i>" if v.card.is_event_card else ""
         lines.append(
-            f"{event_tag(v.card)}{meta.emoji} {esc(v.card.rarity)} · <code>{esc(v.card.card_code)}</code> × {v.quantity} "
+            f"{event_tag(v.card)}{meta.emoji} {esc(meta.name)} · <code>{esc(v.card.card_code)}</code> × {v.quantity} "
             f"— 💰 {fmt_coins(v.card.base_value)}{tag}"
         )
     await edit_or_answer(
         callback,
         "\n".join(lines),
         reply_markup=character_variants_kb(
-            callback.from_user.id, variants, anime_rep_id, char_page, anime_page, callback_data.item_id, lang=lang
+            callback.from_user.id, variants, anime_rep_id, char_page, anime_page, callback_data.item_id
         ),
     )
 
 
+# ---------------------------------------------------------------------------
+# Rarity bo'yicha tekis ro'yxat
+# ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action == "by_rarity"))
-async def cb_by_rarity(callback: CallbackQuery, db_user: User) -> None:
-    lang = get_lang(db_user)
+async def cb_by_rarity(callback: CallbackQuery) -> None:
+    async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
     await edit_or_answer(
         callback,
-        tr(lang, "col_rarity_prompt"),
-        reply_markup=collection_rarity_filter_kb(callback.from_user.id, lang=lang),
+        "⭐ <b>Rank bo‘yicha filtrlash:</b>",
+        reply_markup=collection_rarity_filter_kb(callback.from_user.id),
     )
 
 
 @router.callback_query(CollectionCb.filter(F.action == "char_list"))
 async def cb_char_list(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     rarity_filter = None
     if callback_data.filter_val.startswith("rar_"):
         rarity_filter = callback_data.filter_val[4:]
@@ -234,9 +244,9 @@ async def cb_char_list(callback: CallbackQuery, callback_data: CollectionCb, db_
         )
 
     if not stacks:
-        text = tr(lang, "col_empty_tab")
+        text = "📭 Ushbu bo‘limda kartalar topilmadi."
     else:
-        lines = [f"🎴 <b>{esc(rarity_filter or 'COLLECTION')}</b> ({total})\n"]
+        lines = [f"🎴 <b>KOLLEKSIYA RO‘YXATI</b> (Jami: {total} xil karta)\n"]
         for st in stacks:
             fav = "❤️ " if st.is_favorite else ""
             lines.append(f"{fav}• {event_tag(st.card)}<b>{esc(st.card.character_name)}</b> × {st.quantity} ({esc(st.card.anime_name)})")
@@ -252,18 +262,19 @@ async def cb_char_list(callback: CallbackQuery, callback_data: CollectionCb, db_
             page=callback_data.page,
             total=total,
             page_size=6,
-            lang=lang,
         ),
     )
 
 
+# ---------------------------------------------------------------------------
+# Karta tafsiloti
+# ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action == "card_detail"))
 async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     async with get_session() as session:
         uc = await session.get(UserCard, callback_data.item_id)
         if uc is None or uc.user_id != db_user.id:
-            await callback.answer(tr(lang, "card_not_found"), show_alert=True)
+            await callback.answer("Karta topilmadi.", show_alert=True)
             return
         card = await session.get(Card, uc.card_id)
         unlocked_copy = await CollectionService.get_unlocked_copy(session, db_user.id, card.id)
@@ -273,12 +284,11 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
     char_rep_id = reps[1] if reps else card.id
     target_uc_id = unlocked_copy.id if unlocked_copy else uc.id
     is_locked = unlocked_copy is None
-    st_text = tr(lang, "col_detail_locked") if is_locked else tr(lang, "col_detail_ready")
     text = (
-        f"{format_card_block(card, serial_number=getattr(uc, 'serial_number', None), state_label=getattr(uc, 'card_state', 'OWNED'), lang=lang)}\n\n"
-        f"{tr(lang, 'col_detail_copies', qty=qty)}\n"
-        f"{tr(lang, 'col_detail_copy_id', uc_id=target_uc_id)}\n"
-        f"{tr(lang, 'col_detail_status', st=st_text)}"
+        f"{format_card_block(card, serial_number=getattr(uc, 'serial_number', None), state_label=getattr(uc, 'card_state', 'OWNED'))}\n\n"
+        f"📦 <b>Sizdagi nusxalar soni:</b> {qty} ta\n"
+        f"🆔 <b>Nusxa ID:</b> <code>{target_uc_id}</code>\n"
+        f"📌 <b>Holati:</b> {'🔒 Marketda/Transferda band' if is_locked else '🟢 Sotish/Transferga tayyor'}"
     )
     kb = card_detail_kb(
         owner_id=callback.from_user.id,
@@ -288,12 +298,11 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         char_rep_id=char_rep_id,
         card_id=card.id,
         is_showcased=bool(getattr(uc, "is_showcased", False)),
-        lang=lang,
     )
-    if callback.message and (getattr(card, "image_file_id", None) or (card.image and len(card.image) > 3)):
+    if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
         try:
             await callback.message.delete()
-            await send_card_message(callback.bot, callback.message.chat.id, card, text, kb)
+            await callback.message.answer_photo(photo=card.image, caption=text, reply_markup=kb)
             await callback.answer()
             return
         except Exception:
@@ -303,47 +312,47 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
 
 @router.callback_query(CollectionCb.filter(F.action == "toggle_fav"))
 async def cb_toggle_fav(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     async with get_session() as session:
         new_state = await CollectionService.toggle_favorite_for_card(
             session, db_user.id, callback_data.item_id
         )
         await session.commit()
-    await callback.answer(tr(lang, "fav_added" if new_state else "fav_removed"))
+    await callback.answer("❤️ Sevimlilarga qo‘shildi!" if new_state else "💔 Sevimlilardan olindi.")
     await cb_card_detail(callback, callback_data, db_user)
 
 
 @router.callback_query(CollectionCb.filter(F.action == "toggle_show"))
 async def cb_toggle_showcase(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     async with get_session() as session:
         uc = await session.get(UserCard, callback_data.item_id)
         if uc is None or uc.user_id != db_user.id:
-            await callback.answer(tr(lang, "card_not_found"), show_alert=True)
+            await callback.answer("Karta topilmadi.", show_alert=True)
             return
         uc.is_showcased = not bool(getattr(uc, "is_showcased", False))
         new_state = uc.is_showcased
         await session.commit()
-    await callback.answer(tr(lang, "show_added" if new_state else "show_removed"))
+    await callback.answer("🖼 Showcasega qo‘shildi!" if new_state else "🖼 Showcasedan olindi.")
     await cb_card_detail(callback, callback_data, db_user)
 
 
 @router.callback_query(CollectionCb.filter(F.action == "about"))
 async def cb_card_about(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
-    lang = get_lang(db_user)
     async with get_session() as session:
         uc = await session.get(UserCard, callback_data.item_id)
         if uc is None or uc.user_id != db_user.id:
-            await callback.answer(tr(lang, "card_not_found"), show_alert=True)
+            await callback.answer("Karta topilmadi.", show_alert=True)
             return
         card = await session.get(Card, uc.card_id)
     if card is None:
-        await callback.answer(tr(lang, "card_not_found"), show_alert=True)
+        await callback.answer("Karta topilmadi.", show_alert=True)
         return
-    kb = back_home_kb(callback.from_user.id, "cards", lang)
-    await edit_or_answer(callback, format_card_about(card, lang=lang), reply_markup=kb)
+    kb = back_home_kb(callback.from_user.id, "cards")
+    await edit_or_answer(callback, format_card_about(card), reply_markup=kb)
 
 
+# ---------------------------------------------------------------------------
+# Marketga qo'yish (narx so'rash)
+# ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action == "list_prompt"))
 async def cb_list_prompt(
     callback: CallbackQuery,
@@ -351,7 +360,6 @@ async def cb_list_prompt(
     state: FSMContext,
     db_user: User,
 ) -> None:
-    lang = get_lang(db_user)
     async with get_session() as session:
         uc = await session.get(UserCard, callback_data.item_id)
         if uc is None or uc.user_id != db_user.id or uc.is_locked:
@@ -363,25 +371,25 @@ async def cb_list_prompt(
     await state.update_data(user_card_id=uc.id, owner_tg_id=callback.from_user.id)
     await edit_or_answer(
         callback,
-        f"🛒 <b>{esc(card.character_name)}</b>\n\n"
-        f"💰 Value: {card.base_value:,} coins\n"
-        f"Min/Max: {MIN_CARD_PRICE:,} — {MAX_CARD_PRICE:,} coins.\n"
-        f"<i>/cancel</i>",
-        reply_markup=back_home_kb(callback.from_user.id, back_target="cards", lang=lang),
+        f"🛒 <b>{esc(card.character_name)}</b> kartasini sotuvga qo‘yish\n\n"
+        f"💰 Tavsiya etilgan qiymat: {card.base_value:,} coins\n"
+        f"Narxni kiriting ({MIN_CARD_PRICE:,} — {MAX_CARD_PRICE:,} coins).\n"
+        f"<i>Bekor qilish: /cancel</i>",
+        reply_markup=back_home_kb(callback.from_user.id, back_target="cards"),
     )
 
 
 @router.message(SellCardStates.waiting_price, NotCommandFilter())
 async def fsm_sell_price(message: Message, state: FSMContext, db_user: User) -> None:
-    lang = get_lang(db_user)
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
 
     raw = (message.text or "").strip().replace(",", "").replace(" ", "")
     if not raw.isdigit():
+        # Guruhda oddiy suhbatga javob bermaymiz (spam bo'lmasin); shaxsiy chatda esa eslatamiz
         if is_private_chat(message):
-            await message.answer("⚠️ Faqat musbat raqam kiriting / Positive integer only (/cancel)")
+            await message.answer("⚠️ Iltimos, faqat musbat raqam (coins) kiriting. Bekor qilish: /cancel")
         return
 
     price = int(raw)
@@ -395,10 +403,10 @@ async def fsm_sell_price(message: Message, state: FSMContext, db_user: User) -> 
 
     await state.clear()
     if not res.success:
-        await message.answer(f"❌ {res.message}", reply_markup=back_home_kb(message.from_user.id, "cards", lang))
+        await message.answer(f"❌ {res.message}", reply_markup=back_home_kb(message.from_user.id, "cards"))
         return
 
     await message.answer(
-        f"✅ <b>{esc(res.card.character_name)}</b> → <b>{price:,} 🪙</b>!",
-        reply_markup=back_home_kb(message.from_user.id, "market", lang),
+        f"✅ <b>{esc(res.card.character_name)}</b> marketga <b>{price:,} 🪙</b> narxda qo‘yildi!",
+        reply_markup=back_home_kb(message.from_user.id, "market"),
     )

@@ -48,7 +48,6 @@ class User(Base, TimestampMixin):
     game_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     trade_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     auction_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    language: Mapped[str] = mapped_column(String(8), nullable=False, default="uz")
     last_activity: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,

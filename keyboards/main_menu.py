@@ -15,140 +15,103 @@ from utils.callback_data import (
     VipCb,
     WishCb,
 )
-from utils.i18n import LANG_LABELS, SUPPORTED_LANGS, normalize_lang, tr
 
 
-def main_menu_kb(
-    owner_id: int,
-    is_admin: bool = False,
-    lang: str = "uz",
-    unread_notifs: int = 0,
-) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
-    builder = InlineKeyboardBuilder()
-    # 1. Kartalar & Qidiruv
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_cards"), callback_data=NavCb(owner_id=owner_id, target="cards").pack()),
-        InlineKeyboardButton(text=tr(l, "m_search"), callback_data=NavCb(owner_id=owner_id, target="search").pack()),
+def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=NavCb(owner_id=owner_id, target=target).pack())
+
+
+def main_menu_kb(owner_id: int, is_admin: bool = False, pack_daily_limit: int = 1) -> InlineKeyboardMarkup:
+    """BOSH MENU: toza, ixcham 2-ustunli tartib."""
+    pack_lbl = f"🎁 PAKET ({pack_daily_limit}/kun)" if pack_daily_limit > 0 else "🎁 PAKETLAR"
+    b = InlineKeyboardBuilder()
+    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, pack_lbl, "packs"))
+    b.row(
+        _nav(owner_id, "🛒 BOZOR", "market"),
+        InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
     )
-    # 2. Bonus & O'yinlar
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_daily"), callback_data=NavCb(owner_id=owner_id, target="daily").pack()),
-        InlineKeyboardButton(text=tr(l, "m_quiz"), callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
+    b.row(
+        InlineKeyboardButton(text="🤝 ALMASHISH", callback_data=TradeCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "🔍 QIDIRUV", "search"),
     )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_games"), callback_data=GameCb(owner_id=owner_id, act="v").pack()),
-        InlineKeyboardButton(text=tr(l, "m_event"), callback_data=NavCb(owner_id=owner_id, target="event").pack()),
-    )
-    # 3. Savdo & Almashish
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_market"), callback_data=NavCb(owner_id=owner_id, target="market").pack()),
-        InlineKeyboardButton(text=tr(l, "m_auction"), callback_data=AucCb(owner_id=owner_id, act="v").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_trade"), callback_data=TradeCb(owner_id=owner_id, act="v").pack()),
-        InlineKeyboardButton(text=tr(l, "m_wishlist"), callback_data=WishCb(owner_id=owner_id, act="v").pack()),
-    )
-    # 4. Profil & Reyting
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_profile"), callback_data=NavCb(owner_id=owner_id, target="profile").pack()),
-        InlineKeyboardButton(text=tr(l, "m_ranking"), callback_data=NavCb(owner_id=owner_id, target="ranking").pack()),
-    )
-    # 5. VIP & Stars
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_vip"), callback_data=VipCb(owner_id=owner_id, act="v").pack()),
-        InlineKeyboardButton(text=tr(l, "m_stars"), callback_data=NavCb(owner_id=owner_id, target="stars").pack()),
-    )
-    # 6. Vazifalar & Yutuqlar
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_quests"), callback_data=NavCb(owner_id=owner_id, target="quests").pack()),
-        InlineKeyboardButton(text=tr(l, "m_ach"), callback_data=AchCb(owner_id=owner_id, act="v").pack()),
-    )
-    # 7. Referal & Xabarlar
-    notif_lbl = tr(l, "m_notif_n", n=unread_notifs) if unread_notifs > 0 else tr(l, "m_notif")
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_ref"), callback_data=NavCb(owner_id=owner_id, target="referral").pack()),
-        InlineKeyboardButton(text=notif_lbl, callback_data=NotifCb(owner_id=owner_id, act="v").pack()),
-    )
-    # 8. Support & Til & Yordam
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_support"), callback_data=SupCb(owner_id=owner_id, act="v").pack()),
-        InlineKeyboardButton(text=tr(l, "btn_lang"), callback_data=NavCb(owner_id=owner_id, target="lang").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "m_help"), callback_data=NavCb(owner_id=owner_id, target="help").pack()),
+    b.row(_nav(owner_id, "🎮 O‘YINLAR", "grp_play"), _nav(owner_id, "🏆 REYTING", "ranking"))
+    b.row(
+        _nav(owner_id, "❓ QO‘LLANMA", "help"),
+        InlineKeyboardButton(text="💬 ALOQA", callback_data=SupCb(owner_id=owner_id, act="v").pack()),
     )
     if is_admin:
-        builder.row(
-            InlineKeyboardButton(
-                text=tr(l, "btn_admin_panel"),
-                callback_data=AdminCb(owner_id=owner_id, section="home").pack(),
-            )
+        b.row(InlineKeyboardButton(text="🛡️ ADMIN PANEL", callback_data=AdminCb(owner_id=owner_id, section="home").pack()))
+    return b.as_markup()
+
+
+GROUP_MENUS = {
+    "grp_play": (
+        "🎮 <b>O‘YINLAR VA BONUSLAR MARKAZI</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        "O‘ynang, coin va XP yutib oling:\n\n"
+        "🎲 <b>Tosh o‘yini</b> — raqamni toping, coin yuting\n"
+        "🪙 <b>Tanga tashlash</b> — 2x garov o‘yini\n"
+        "🃏 <b>Omadli karta</b> — kunlik bepul omad sovg‘asi\n"
+        "🧠 <b>Viktorina</b> — savollarga birinchi javob bering\n"
+        "🎯 <b>Event</b> — cheklangan maxsus kartalar\n"
+        "📋 <b>Vazifalar</b> — bajaring, mukofot oling\n"
+        "🎁 <b>Paketlar (/pack)</b> — coin evaziga karta paketi oching"
+    ),
+}
+
+
+def group_menu_kb(owner_id: int, group: str, pack_daily_limit: int = 1) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    if group == "grp_play":
+        pack_lbl = f"🎁 PAKETLAR ({pack_daily_limit}/kun)" if pack_daily_limit > 0 else "🎁 PAKETLAR"
+        b.row(
+            InlineKeyboardButton(text="🎲 MINI O‘YINLAR", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
+            InlineKeyboardButton(text="🧠 VIKTORINA", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
         )
-    return builder.as_markup()
+        b.row(_nav(owner_id, "🎯 EVENTLAR", "event"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
+        b.row(_nav(owner_id, pack_lbl, "packs"))
+    b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
+    return b.as_markup()
 
 
-def profile_kb(owner_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+def profile_kb(owner_id: int) -> InlineKeyboardMarkup:
+    """PROFIL markazi: faqat shaxsiy narsalar."""
+    b = InlineKeyboardBuilder()
+    b.row(
+        _nav(owner_id, "🎴 KARTALARIM", "cards"),
+        InlineKeyboardButton(text="🎨 BEZAK", callback_data=AchCb(owner_id=owner_id, act="frames").pack()),
+    )
+    b.row(_nav(owner_id, "🎁 KUNLIK BONUS", "daily"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
+    b.row(
+        InlineKeyboardButton(text="💎 VIP", callback_data=VipCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "⭐ STARS DO‘KONI", "stars"),
+    )
+    b.row(
+        InlineKeyboardButton(text="🏅 YUTUQLAR", callback_data=AchCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="💖 ISTAKLAR", callback_data=WishCb(owner_id=owner_id, act="v").pack()),
+    )
+    b.row(
+        _nav(owner_id, "👥 DO‘STLAR", "referral"),
+        InlineKeyboardButton(text="🔔 XABARLAR", callback_data=NotifCb(owner_id=owner_id, act="v").pack()),
+    )
+    b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
+    return b.as_markup()
+
+
+def back_home_kb(owner_id: int, back_target: str = "home") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text=tr(l, "p_collection"), callback_data=NavCb(owner_id=owner_id, target="cards").pack()),
-        InlineKeyboardButton(text=tr(l, "p_custom"), callback_data=AchCb(owner_id=owner_id, act="frames").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "p_market"), callback_data=NavCb(owner_id=owner_id, target="market").pack()),
-        InlineKeyboardButton(text=tr(l, "p_auction"), callback_data=AucCb(owner_id=owner_id, act="v").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "p_ranking"), callback_data=NavCb(owner_id=owner_id, target="ranking").pack()),
-        InlineKeyboardButton(text=tr(l, "p_search"), callback_data=NavCb(owner_id=owner_id, target="search").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "p_daily"), callback_data=NavCb(owner_id=owner_id, target="daily").pack()),
-        InlineKeyboardButton(text=tr(l, "p_vip"), callback_data=VipCb(owner_id=owner_id, act="v").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "p_ref"), callback_data=NavCb(owner_id=owner_id, target="referral").pack()),
-        InlineKeyboardButton(text=tr(l, "p_lang"), callback_data=NavCb(owner_id=owner_id, target="lang").pack()),
-    )
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "btn_home"), callback_data=NavCb(owner_id=owner_id, target="home").pack())
+        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=NavCb(owner_id=owner_id, target=back_target).pack()),
+        InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
     return builder.as_markup()
 
 
-def language_kb(owner_id: int, current_lang: str = "uz") -> InlineKeyboardMarkup:
-    cur = normalize_lang(current_lang)
-    builder = InlineKeyboardBuilder()
-    for code in SUPPORTED_LANGS:
-        mark = "✅ " if code == cur else ""
-        builder.row(
-            InlineKeyboardButton(
-                text=f"{mark}{LANG_LABELS[code]}",
-                callback_data=NavCb(owner_id=owner_id, target=f"lang_{code}").pack(),
-            )
-        )
-    builder.row(
-        InlineKeyboardButton(text=tr(cur, "btn_home"), callback_data=NavCb(owner_id=owner_id, target="home").pack())
-    )
-    return builder.as_markup()
-
-
-def back_home_kb(owner_id: int, back_target: str = "home", lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=tr(l, "btn_back"), callback_data=NavCb(owner_id=owner_id, target=back_target).pack()),
-        InlineKeyboardButton(text=tr(l, "btn_home"), callback_data=NavCb(owner_id=owner_id, target="home").pack()),
-    )
-    return builder.as_markup()
-
-
-def drop_claim_kb(drop_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
+def drop_claim_kb(drop_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=tr(lang, "drop_claim_btn"),
+            text="🎴 KARTANI OLISH",
             callback_data=DropCb(action="claim", drop_id=drop_id).pack(),
         )
     )

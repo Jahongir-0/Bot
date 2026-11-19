@@ -10,8 +10,7 @@ from models.user import User
 from services.market_service import ListingView
 from services.search_service import GlobalCardSearchItem
 from utils.callback_data import MarketCb, NavCb, OfferCb, RankingCb, SearchCb, StarsCb, TransferCb, WishCb
-from utils.constants import get_rarity_meta, list_rarities
-from utils.i18n import normalize_lang, tr
+from utils.constants import get_rank_name_by_order, get_rarity_meta, list_rarities
 
 
 def market_list_kb(
@@ -21,9 +20,7 @@ def market_list_kb(
     total: int,
     my_only: bool = False,
     page_size: int = 5,
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
     builder = InlineKeyboardBuilder()
     for item in listings:
         meta = get_rarity_meta(item.card.rarity)
@@ -64,7 +61,7 @@ def market_list_kb(
         )
     builder.row(*nav)
 
-    toggle_text = tr(l, "mkt_all_btn") if my_only else tr(l, "mkt_my_btn")
+    toggle_text = "🌐 BARCHA E'LONLAR" if my_only else "📦 MENING SOTUVLARIM"
     toggle_action = "list" if my_only else "my_listings"
     builder.row(
         InlineKeyboardButton(
@@ -74,11 +71,11 @@ def market_list_kb(
     )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
@@ -90,14 +87,12 @@ def listing_detail_kb(
     listing_id: int,
     is_seller: bool,
     page: int = 1,
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
     builder = InlineKeyboardBuilder()
     if is_seller:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "mkt_cancel_btn"),
+                text="❌ SOTUVDAN OLISH",
                 callback_data=MarketCb(
                     owner_id=owner_id,
                     action="cancel",
@@ -109,7 +104,7 @@ def listing_detail_kb(
     else:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "mkt_buy_btn"),
+                text="🛒 SOTIB OLISH",
                 callback_data=MarketCb(
                     owner_id=owner_id,
                     action="buy",
@@ -120,61 +115,59 @@ def listing_detail_kb(
         )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=MarketCb(owner_id=owner_id, action="list", page=page).pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
     return builder.as_markup()
 
 
-def search_menu_kb(owner_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "srch_btn_char"),
+            text="🔍 Personaj ismi",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="character").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "srch_btn_anime"),
+            text="📺 Anime / Asar",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="anime").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "srch_btn_rarity"),
+            text="⭐ Rank bo‘yicha",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="rarity").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "srch_btn_id"),
+            text="🎴 Karta kodi (ID)",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="card_id").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "srch_btn_rand"),
+            text="🎲 Tasodifiy karta",
             callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
         )
     )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
     return builder.as_markup()
 
 
-def search_rarity_kb(owner_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+def search_rarity_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for r in list_rarities():
         meta = get_rarity_meta(r)
@@ -192,11 +185,11 @@ def search_rarity_kb(owner_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
         )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=SearchCb(owner_id=owner_id, action="menu").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
@@ -217,9 +210,7 @@ def search_results_kb(
     page: int,
     total: int,
     page_size: int = 5,
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
     q_short = _cb_q(query)
     builder = InlineKeyboardBuilder()
     for item in items:
@@ -289,18 +280,18 @@ def search_results_kb(
     else:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "srch_again_rand"),
+                text="🎲 YANA TASODIFIY",
                 callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
             )
         )
 
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=SearchCb(owner_id=owner_id, action="menu").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
@@ -314,15 +305,13 @@ def search_inspect_kb(
     mode: str,
     query: str,
     page: int,
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
     q_short = _cb_q(query)
     builder = InlineKeyboardBuilder()
     if item.active_listing is not None and not is_self_owner:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "mkt_buy_btn"),
+                text="🛒 SOTIB OLISH",
                 callback_data=MarketCb(
                     owner_id=owner_id,
                     action="buy",
@@ -334,7 +323,7 @@ def search_inspect_kb(
     elif item.active_listing is None and not is_self_owner:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "srch_make_offer"),
+                text="💰 TAKLIF YUBORISH",
                 callback_data=OfferCb(
                     owner_id=owner_id,
                     action="prompt",
@@ -344,13 +333,13 @@ def search_inspect_kb(
         )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_wishlist"),
+            text="💖 ISTAKLARGA QO‘SHISH",
             callback_data=WishCb(owner_id=owner_id, act="add", cid=item.card.id).pack(),
         )
     )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=SearchCb(
                 owner_id=owner_id,
                 action="results",
@@ -360,7 +349,7 @@ def search_inspect_kb(
             ).pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
@@ -375,9 +364,7 @@ def search_catalog_results_kb(
     page: int,
     total: int,
     page_size: int = 5,
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
     q_short = _cb_q(query)
     builder = InlineKeyboardBuilder()
     for card in cards:
@@ -438,18 +425,18 @@ def search_catalog_results_kb(
     else:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "srch_again_rand"),
+                text="🎲 YANA TASODIFIY",
                 callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
             )
         )
 
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=SearchCb(owner_id=owner_id, action="menu").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
@@ -462,21 +449,19 @@ def search_catalog_inspect_kb(
     query: str,
     page: int,
     card_id: int = 0,
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
     q_short = _cb_q(query)
     builder = InlineKeyboardBuilder()
     if card_id > 0:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "srch_add_wish"),
+                text="💖 ISTAKLARGA QO‘SHISH",
                 callback_data=WishCb(owner_id=owner_id, act="add", cid=card_id).pack(),
             )
         )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=SearchCb(
                 owner_id=owner_id,
                 action="results",
@@ -486,34 +471,30 @@ def search_catalog_inspect_kb(
             ).pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
     return builder.as_markup()
 
 
-def offer_decision_kb(owner_id: int, offer_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
-    acc = {"uz": "✅ Qabul qilish", "en": "✅ Accept", "ru": "✅ Принять"}[l]
-    rej = {"uz": "❌ Rad etish", "en": "❌ Reject", "ru": "❌ Отклонить"}[l]
+
+def offer_decision_kb(owner_id: int, offer_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=acc,
+            text="✅ QABUL QILISH",
             callback_data=OfferCb(owner_id=owner_id, action="accept", offer_id=offer_id).pack(),
         ),
         InlineKeyboardButton(
-            text=rej,
+            text="❌ RAD ETISH",
             callback_data=OfferCb(owner_id=owner_id, action="reject", offer_id=offer_id).pack(),
         ),
     )
     return builder.as_markup()
 
 
-def incoming_offers_kb(owner_id: int, offers: List[tuple[Offer, Card, User]], lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
-    rej = {"uz": "❌ Rad", "en": "❌ Reject", "ru": "❌ Откл."}[l]
+def incoming_offers_kb(owner_id: int, offers: List[tuple[Offer, Card, User]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for off, card, buyer in offers[:8]:
         builder.row(
@@ -522,37 +503,39 @@ def incoming_offers_kb(owner_id: int, offers: List[tuple[Offer, Card, User]], la
                 callback_data=OfferCb(owner_id=owner_id, action="accept", offer_id=off.id).pack(),
             ),
             InlineKeyboardButton(
-                text=rej,
+                text="❌ Rad etish",
                 callback_data=OfferCb(owner_id=owner_id, action="reject", offer_id=off.id).pack(),
             ),
         )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=NavCb(owner_id=owner_id, target="cards").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
     return builder.as_markup()
 
 
-def transfer_confirm_kb(actor_telegram_id: int, transfer_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+def transfer_confirm_kb(actor_telegram_id: int, transfer_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_confirm"),
+            text="✅ TASDIQLASH",
             callback_data=TransferCb(owner_id=actor_telegram_id, action="confirm", transfer_id=transfer_id).pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_cancel"),
+            text="❌ BEKOR",
             callback_data=TransferCb(owner_id=actor_telegram_id, action="cancel", transfer_id=transfer_id).pack(),
         ),
     )
     return builder.as_markup()
+
+
+EXTENDED_RANK_SCOPES = ("coins", "xp", "quiz", "games", "trades", "auction", "refs", "rare", "mythic", "divine")
 
 
 def ranking_kb(
@@ -560,83 +543,41 @@ def ranking_kb(
     current_scope: str,
     in_group: bool,
     period: str = "all",
-    lang: str = "uz",
 ) -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+    """REYTING: 1-qator asosiy reytinglar, keyingi qatorlar maxsus reytinglar, davr faqat kerak joyda."""
     builder = InlineKeyboardBuilder()
-    g_lbl = tr(l, "rnk_global")
-    grp_lbl = tr(l, "rnk_group")
-    grps_lbl = tr(l, "rnk_groups")
-    buttons = [
-        InlineKeyboardButton(
-            text=(f"• {g_lbl} •" if current_scope == "global" else g_lbl),
-            callback_data=RankingCb(owner_id=owner_id, scope="global", period=period).pack(),
-        )
-    ]
+
+    def _btn(scope: str, label: str) -> InlineKeyboardButton:
+        text = f"• {label} •" if current_scope == scope else label
+        return InlineKeyboardButton(text=text, callback_data=RankingCb(owner_id=owner_id, scope=scope, period=period).pack())
+
+    main = [_btn("global", "🌍 Global")]
     if in_group:
-        buttons.append(
-            InlineKeyboardButton(
-                text=(f"• {grp_lbl} •" if current_scope == "group" else grp_lbl),
-                callback_data=RankingCb(owner_id=owner_id, scope="group", period=period).pack(),
-            )
-        )
-    buttons.append(
-        InlineKeyboardButton(
-            text=(f"• {grps_lbl} •" if current_scope == "groups" else grps_lbl),
-            callback_data=RankingCb(owner_id=owner_id, scope="groups", period=period).pack(),
-        )
-    )
-    builder.row(*buttons)
-    extra_scopes = [
-        ("coins", "🪙 Coins"),
-        ("xp", "⚡ XP"),
-        ("quiz", "🧠 Quiz"),
-        ("games", "🎲 Games"),
-        ("trades", "🤝 Trade"),
-        ("refs", "📣 Ref"),
-        ("rare", "💎 Rare+"),
-        ("mythic", "🔴 Mythic"),
-        ("divine", "✨ Divine"),
-    ]
-    for i in range(0, len(extra_scopes), 3):
+        main.append(_btn("group", "👥 Guruh"))
+    main.append(_btn("groups", "🏰 Guruhlar"))
+    builder.row(*main)
+    builder.row(_btn("coins", "🪙 Boylik"), _btn("xp", "⚡ Daraja"), _btn("rare", "⭐ Yuqori rank"))
+    builder.row(_btn("quiz", "🧠 Viktorina"), _btn("games", "🎲 O‘yin"), _btn("trades", "🤝 Savdo"))
+    r5_name = get_rank_name_by_order(5, "Mythic")
+    r6_name = get_rank_name_by_order(6, "Divine")
+    m5 = get_rarity_meta(r5_name)
+    m6 = get_rarity_meta(r6_name)
+    builder.row(_btn("refs", "👥 Do‘stlar"), _btn("mythic", f"{m5.emoji} {r5_name}"), _btn("divine", f"{m6.emoji} {r6_name}"))
+    if current_scope in EXTENDED_RANK_SCOPES:
         builder.row(
             *[
                 InlineKeyboardButton(
-                    text=("• " if current_scope == k else "") + lbl,
-                    callback_data=RankingCb(owner_id=owner_id, scope=k, period=period).pack(),
+                    text=("✅ " if period == p else "") + lbl,
+                    callback_data=RankingCb(owner_id=owner_id, scope=current_scope, period=p).pack(),
                 )
-                for k, lbl in extra_scopes[i : i + 3]
+                for p, lbl in (("all", "Hammasi"), ("monthly", "Oy"), ("weekly", "Hafta"))
             ]
         )
-    periods = {
-        "uz": (("all", "Barcha vaqt"), ("monthly", "Oylik"), ("weekly", "Haftalik")),
-        "en": (("all", "All time"), ("monthly", "Monthly"), ("weekly", "Weekly")),
-        "ru": (("all", "За всё время"), ("monthly", "Месяц"), ("weekly", "Неделя")),
-    }[l]
-    builder.row(
-        *[
-            InlineKeyboardButton(
-                text=("✅ " if period == p else "") + lbl,
-                callback_data=RankingCb(owner_id=owner_id, scope=current_scope, period=p).pack(),
-            )
-            for p, lbl in periods
-        ]
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=tr(l, "btn_back"),
-            callback_data=NavCb(owner_id=owner_id, target="profile").pack(),
-        ),
-        InlineKeyboardButton(
-            text=tr(l, "btn_home"),
-            callback_data=NavCb(owner_id=owner_id, target="home").pack(),
-        ),
-    )
+    builder.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return builder.as_markup()
 
 
-def stars_shop_kb(owner_id: int, packages: List[Dict], lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+def stars_shop_kb(owner_id: int, packages: List[Dict]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for pkg in packages:
         builder.row(
@@ -647,11 +588,11 @@ def stars_shop_kb(owner_id: int, packages: List[Dict], lang: str = "uz") -> Inli
         )
     builder.row(
         InlineKeyboardButton(
-            text=tr(l, "btn_back"),
+            text="⬅️ ORQAGA",
             callback_data=NavCb(owner_id=owner_id, target="profile").pack(),
         ),
         InlineKeyboardButton(
-            text=tr(l, "btn_home"),
+            text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )

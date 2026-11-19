@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.card import Card
 from models.user import User
 from models.user_card import UserCard
+from services.settings_service import SettingsService
 from services.user_service import UserService
-from utils.constants import QUEST_DEFINITIONS, Rarity
+from utils.constants import DEFAULT_RANK_DEFINITIONS, get_quest_definitions, sync_runtime_ranks
 
 
 @dataclass
@@ -26,6 +27,12 @@ class QuestProgress:
 class QuestService:
     @staticmethod
     async def _metrics(session: AsyncSession, user: User) -> Dict[str, int]:
+        raw_ranks = await SettingsService.get_value(session, "rank_definitions", DEFAULT_RANK_DEFINITIONS)
+        ranks = list(raw_ranks) if isinstance(raw_ranks, list) and raw_ranks else list(DEFAULT_RANK_DEFINITIONS)
+        sync_runtime_ranks(ranks)
+        high_names = [str(r.get("name", "")).strip().lower() for r in ranks if int(r.get("order", 0)) >= 3]
+        if not high_names:
+            high_names = ["epic", "legendary", "legend", "mythic", "divine"]
         high_cnt = int(
             (
                 await session.execute(
@@ -33,9 +40,7 @@ class QuestService:
                     .join(Card, Card.id == UserCard.card_id)
                     .where(
                         UserCard.user_id == user.id,
-                        Card.rarity.in_(
-                            [Rarity.EPIC.value, Rarity.LEGENDARY.value, Rarity.MYTHIC.value]
-                        ),
+                        func.lower(Card.rarity).in_(high_names),
                     )
                 )
             ).scalar_one()
@@ -46,6 +51,9 @@ class QuestService:
             "high_rarity": high_cnt,
             "daily_streak": int(user.daily_streak or 0),
             "referrals": int(user.referral_count or 0),
+            "quiz_wins": int(getattr(user, "quiz_wins", 0) or 0),
+            "game_wins": int(getattr(user, "game_wins", 0) or 0),
+            "trade_count": int(getattr(user, "trade_count", 0) or 0),
         }
 
     @staticmethod
@@ -53,7 +61,7 @@ class QuestService:
         metrics = await QuestService._metrics(session, user)
         claimed_set = set((user.stats or {}).get("claimed_quests", []))
         items: List[QuestProgress] = []
-        for q in QUEST_DEFINITIONS:
+        for q in get_quest_definitions():
             qid = str(q["id"])
             target = int(q["target"])
             cur = min(target, int(metrics.get(str(q["metric"]), 0)))

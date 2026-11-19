@@ -520,3 +520,47 @@ class AuctionWishlistService:
         )
         await session.flush()
         return True, "🤝 Almashuv muvaffaqiyatli yakunlandi!"
+
+    @staticmethod
+    async def cancel_trade(
+        session: AsyncSession, trade_id: int, initiator_id: int
+    ) -> Tuple[bool, str]:
+        trade = await session.get(CardTrade, trade_id)
+        if trade is None or trade.initiator_user_id != initiator_id:
+            return False, "Almashuv taklifi topilmadi."
+        if trade.status != "pending_pick":
+            return False, "Bu almashuv allaqachon yakunlangan yoki bekor qilingan."
+        trade.status = "cancelled"
+        uc = await session.get(UserCard, trade.initiator_uc_id)
+        if uc and uc.is_locked:
+            uc.is_locked = False
+            uc.card_state = "OWNED"
+        await session.flush()
+        return True, "✅ Almashuv taklifi bekor qilindi va kartangiz qulfdan chiqarildi."
+
+    @staticmethod
+    async def expire_stale_trades(session: AsyncSession) -> int:
+        now = utcnow()
+        stale = list(
+            (
+                await session.execute(
+                    select(CardTrade).where(
+                        CardTrade.status == "pending_pick",
+                        CardTrade.expires_at <= now,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        count = 0
+        for tr in stale:
+            tr.status = "expired"
+            uc = await session.get(UserCard, tr.initiator_uc_id)
+            if uc and uc.is_locked:
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+            count += 1
+        if count:
+            await session.flush()
+        return count

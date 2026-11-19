@@ -8,35 +8,32 @@ from models.card import Card
 from models.limited_event import LimitedEvent
 from utils.callback_data import AdminCb, EvtCb, NavCb
 from utils.constants import get_rarity_meta
-from utils.i18n import normalize_lang, tr
 
 
-def event_buy_kb(event: LimitedEvent, lang: str = "uz") -> InlineKeyboardMarkup:
+def event_buy_kb(event: LimitedEvent) -> InlineKeyboardMarkup:
     """Guruhga yuboriladigan e'londagi ommaviy tugmalar (hamma bosa oladi)."""
-    l = normalize_lang(lang)
     builder = InlineKeyboardBuilder()
     if event.price_coins:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "evt_buy_coins", price=f"{int(event.price_coins):,}"),
+                text=f"🪙 {int(event.price_coins):,} coin bilan olish",
                 callback_data=EvtCb(action="buy_coins", event_id=event.id).pack(),
             )
         )
     if event.price_stars:
         builder.row(
             InlineKeyboardButton(
-                text=tr(l, "evt_buy_stars", price=f"{int(event.price_stars):,}"),
+                text=f"⭐ {int(event.price_stars):,} Stars bilan olish",
                 callback_data=EvtCb(action="buy_stars", event_id=event.id).pack(),
             )
         )
     return builder.as_markup()
 
 
-def event_list_footer_kb(owner_id: int, lang: str = "uz") -> InlineKeyboardMarkup:
-    l = normalize_lang(lang)
+def event_list_footer_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text=tr(l, "btn_home"), callback_data=NavCb(owner_id=owner_id, target="home").pack())
+        InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=owner_id, target="home").pack())
     )
     return builder.as_markup()
 

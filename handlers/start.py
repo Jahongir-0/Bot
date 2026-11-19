@@ -7,77 +7,102 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database.session import get_session
-from keyboards.main_menu import back_home_kb, language_kb, main_menu_kb
+from keyboards.main_menu import GROUP_MENUS, back_home_kb, group_menu_kb, main_menu_kb
 from models.user import User
-from services.community_service import CommunityService
 from services.drop_service import DropService
+from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import NavCb
-from utils.formatting import esc, fmt_coins, format_card_block
-from utils.i18n import LANG_LABELS, SUPPORTED_LANGS, get_lang, tr
+from utils.constants import get_rank_name_by_order, get_rarity_meta, sync_runtime_ranks
+from utils.formatting import esc, fmt_coins, format_card_block, header
 from utils.tg_helpers import edit_or_answer, is_admin_user, send_card_message
 
 router = Router(name="start")
 
+WELCOME_TEXT = (
+    "🎴 <b>Anime Card Collection</b> — anime kartalarini yig‘ish o‘yini!\n\n"
+    "📌 <b>Qisqacha:</b> guruhlarda kartalar tashlanadi, siz personaj ismini topib kartani olasiz. "
+    "Kartalaringizni yig‘ing, almashing, soting va reytingda yuqoriga chiqing."
+)
 
-def _home_text(user: User, lang: str, welcome_txt: str, ref_notice: str = "", header_prefix: str = "") -> str:
-    vip_badge = (
-        tr(lang, "vip_active_short", tier=esc(user.vip_tier))
-        if CommunityService.is_vip_active(user)
-        else tr(lang, "vip_free_short")
+HELP_TEXT = (
+    "❓ <b>QANDAY O‘YNALADI?</b>\n"
+    "━━━━━━━━━━━━━━━\n"
+    "<b>1️⃣ Karta yig‘ish</b>\n"
+    "Botni guruhga qo‘shing. Guruhda karta rasmi tashlanadi (ismi yashirin). "
+    "O‘sha xabarga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!\n\n"
+    "<b>2️⃣ Coin, XP va Paketlar</b>\n"
+    "🎁 Kunlik bonus (/daily) · 🎲 mini-o‘yinlar (/game) · 🧠 viktorina (/quiz) · "
+    "📋 vazifalar · 🎁 karta paketlari (/pack) orqali coin va kartalar yuting.\n\n"
+    "<b>3️⃣ Savdo va Almashuv</b>\n"
+    "🛒 Bozor (/market) · 🔨 auksion (/auction) · 🤝 do‘stlar bilan almashuv (/trade) · 💖 istaklar (/wishlist).\n\n"
+    "<b>4️⃣ Asosiy buyruqlar</b>\n"
+    "/menu — bosh menyu · /me — profilim\n"
+    "/cards — kartalarim · /search — qidiruv\n"
+    "/daily — kunlik bonus · /pack — karta paketlari\n"
+    "/game — mini-o‘yinlar · /quiz — viktorina\n"
+    "/top — reytinglar · /vip — VIP imtiyozlar\n\n"
+    "💬 Savol yoki taklif bo‘lsa, menyudagi <b>ALOQA</b> (/support) tugmasi orqali adminga yozing."
+)
+
+
+def _home_text(db_user: User, welcome: str = WELCOME_TEXT) -> str:
+    return (
+        "🏠 <b>BOSH MENU</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"👤 <b>{esc(db_user.display_name)}</b>\n"
+        f"🪙 <b>{fmt_coins(db_user.coins)}</b> coin  ·  ⚡ <b>{db_user.level}</b>-daraja  ·  🎴 <b>{db_user.total_cards}</b> karta\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"{welcome}\n\n"
+        "👇 Kerakli bo‘limni tanlang. Kolleksiya, kunlik bonus va VIP — <b>PROFILIM</b> ichida."
     )
-    summary = tr(
-        lang,
-        "home_summary",
-        coins=fmt_coins(user.coins),
-        cards=int(user.total_cards or 0),
-        level=int(user.level or 1),
-        vip_badge=vip_badge,
-    )
-    top = header_prefix or tr(lang, "salom", name=esc(user.display_name))
-    return f"{top}\n{summary}\n\n{ref_notice}{welcome_txt}"
 
 
 async def _show_referral(target, tg_id: int, db_user: User) -> None:
-    lang = get_lang(db_user)
     bot = target.bot
     me = await bot.get_me()
     bot_username = me.username or ""
     ref_link = f"https://t.me/{bot_username}?start=ref_{tg_id}" if bot_username else f"/start ref_{tg_id}"
 
     async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
         fresh_user = await session.get(User, db_user.id)
         ref_cfg = await SettingsService.get_referral_config(session)
         grp_coins = await SettingsService.get_group_add_reward_coins(session)
 
     ref_count = int(fresh_user.referral_count if fresh_user else db_user.referral_count or 0)
-    text = tr(
-        lang,
-        "ref_title",
-        count=ref_count,
-        inviter=fmt_coins(ref_cfg["inviter_coins"]),
-        invitee=fmt_coins(ref_cfg["invitee_coins"]),
-        grp=fmt_coins(grp_coins),
-        link=esc(ref_link),
+    r3_name = get_rank_name_by_order(3, "Epic")
+    r3_meta = get_rarity_meta(r3_name)
+    text = (
+        f"{header('👥 <b>DO‘STLAR VA MUKOFOTLAR</b>')}\n"
+        f"👥 Taklif qilgan do‘stlaringiz: <b>{ref_count}</b> ta\n\n"
+        "🎁 <b>Do‘st taklif qilsangiz</b>\n"
+        f"• Siz: <b>+{fmt_coins(ref_cfg['inviter_coins'])}</b> 🪙\n"
+        f"• Do‘stingiz: <b>+{fmt_coins(ref_cfg['invitee_coins'])}</b> 🪙\n"
+        "<i>(Faqat botga birinchi marta kirgan do‘stlar uchun)</i>\n\n"
+        "🏰 <b>Botni guruhga qo‘shsangiz</b>\n"
+        f"• <b>+{fmt_coins(grp_coins)}</b> 🪙 + {r3_meta.emoji} eksklyuziv <b>{esc(r3_name)} karta</b>\n"
+        "<i>(Bu karta boshqa guruhlarga tashlanmaydi, faqat sizga beriladi)</i>\n\n"
+        f"🔗 <b>Sizning havolangiz</b> (bosib nusxalang):\n<code>{esc(ref_link)}</code>"
     )
     builder = InlineKeyboardBuilder()
     if bot_username:
         share_text = urllib.parse.quote(
-            "🎴 Anime Card Collection Bot!"
+            "🎴 Anime Card Collection V2 botiga qo‘shiling! Noyob kartalar yig‘ing va bonus coin oling:"
         )
         share_url = f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={share_text}"
-        builder.row(InlineKeyboardButton(text=tr(lang, "ref_share_btn"), url=share_url))
+        builder.row(InlineKeyboardButton(text="📤 DO‘STLARGA YUBORISH", url=share_url))
         builder.row(
             InlineKeyboardButton(
-                text=tr(lang, "ref_add_grp_btn"),
+                text="➕ BOTNI GURUHGA QO‘SHISH",
                 url=f"https://t.me/{bot_username}?startgroup=true",
             )
         )
     builder.row(
-        InlineKeyboardButton(text=tr(lang, "btn_back"), callback_data=NavCb(owner_id=tg_id, target="profile").pack()),
-        InlineKeyboardButton(text=tr(lang, "btn_home"), callback_data=NavCb(owner_id=tg_id, target="home").pack()),
+        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=NavCb(owner_id=tg_id, target="profile").pack()),
+        InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=tg_id, target="home").pack()),
     )
     await edit_or_answer(target, text, reply_markup=builder.as_markup())
 
@@ -92,33 +117,37 @@ async def cmd_start(
     is_bot_admin: bool = False,
 ) -> None:
     await state.clear()
-    lang = get_lang(db_user)
     ref_notice = ""
     args = (command.args or "").strip() if command else ""
-    welcome_txt = tr(lang, "welcome_default")
-    unread = 0
+    welcome_txt = WELCOME_TEXT
+    pack_lim = 1
     fresh_user = db_user
-
     async with get_session() as session:
-        fresh_user = await session.get(User, db_user.id) or db_user
-        unread = await CommunityService.unread_count(session, fresh_user.id)
-        if lang == "uz":
-            custom_w = await SettingsService.get_value(session, "welcome_text", "")
-            if custom_w:
-                welcome_txt = str(custom_w)
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
+        gcfg = await GameplayService.get_game_config(session)
+        pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+        custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
+        if custom_w:
+            welcome_txt = str(custom_w)
+        fresh = await session.get(User, db_user.id)
+        if fresh is not None:
+            fresh_user = fresh
         if args.startswith("ref_") and args[4:].isdigit():
             referrer_tg_id = int(args[4:])
             res = await UserService.apply_referral(session, fresh_user, referrer_tg_id)
             if res is not None:
                 await session.commit()
+                fresh_user = await session.get(User, db_user.id) or fresh_user
                 referrer, inviter_coins, invitee_coins = res
                 ref_notice = (
-                    f"🎉 <b>{esc(referrer.display_name)}</b> +{fmt_coins(invitee_coins)} 🪙!\n\n"
+                    f"🎉 <b>{esc(referrer.display_name)}</b> taklifi bilan keldingiz! "
+                    f"Sizga <b>+{fmt_coins(invitee_coins)} 🪙</b> bonus berildi!\n\n"
                 )
                 try:
                     await message.bot.send_message(
                         referrer.telegram_id,
-                        f"🤝 <b>{esc(db_user.display_name)}</b> +{fmt_coins(inviter_coins)} 🪙!",
+                        f"🤝 <b>{esc(db_user.display_name)}</b> sizning referal havolangiz orqali botga qo‘shildi!\n"
+                        f"🪙 Mukofot: <b>+{fmt_coins(inviter_coins)} coins</b>!",
                     )
                 except Exception:
                     pass
@@ -126,55 +155,10 @@ async def cmd_start(
                 await session.rollback()
 
     is_admin = is_bot_admin or is_admin_user(message.from_user)
-    text = _home_text(fresh_user, lang, welcome_txt, ref_notice=ref_notice)
+    text = f"{ref_notice}{_home_text(fresh_user, welcome_txt)}"
     await message.answer(
         text,
-        reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin, lang=lang, unread_notifs=unread),
-    )
-
-
-@router.message(Command("lang", "language", "til"))
-async def cmd_lang(message: Message, db_user: User) -> None:
-    lang = get_lang(db_user)
-    text = tr(lang, "lang_title", current=LANG_LABELS.get(lang, LANG_LABELS["uz"]))
-    await message.answer(text, reply_markup=language_kb(message.from_user.id, lang))
-
-
-@router.callback_query(NavCb.filter(F.target == "lang"))
-async def cb_lang_menu(callback: CallbackQuery, db_user: User) -> None:
-    lang = get_lang(db_user)
-    text = tr(lang, "lang_title", current=LANG_LABELS.get(lang, LANG_LABELS["uz"]))
-    await edit_or_answer(callback, text, reply_markup=language_kb(callback.from_user.id, lang))
-
-
-@router.callback_query(NavCb.filter(F.target.in_({"lang_uz", "lang_en", "lang_ru"})))
-async def cb_lang_set(
-    callback: CallbackQuery,
-    callback_data: NavCb,
-    db_user: User,
-    is_bot_admin: bool = False,
-) -> None:
-    chosen = callback_data.target.split("_", 1)[1]
-    if chosen not in SUPPORTED_LANGS:
-        chosen = "uz"
-    async with get_session() as session:
-        await UserService.set_user_language(session, db_user.id, chosen)
-        fresh = await session.get(User, db_user.id) or db_user
-        unread = await CommunityService.unread_count(session, fresh.id)
-        await session.commit()
-    db_user.language = chosen
-    await callback.answer(tr(chosen, "lang_saved"), show_alert=False)
-    is_admin = is_bot_admin or is_admin_user(callback.from_user)
-    text = _home_text(
-        fresh,
-        chosen,
-        tr(chosen, "welcome_default"),
-        header_prefix=tr(chosen, "home_header", name=esc(fresh.display_name)),
-    )
-    await edit_or_answer(
-        callback,
-        text,
-        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, lang=chosen, unread_notifs=unread),
+        reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
     )
 
 
@@ -189,17 +173,15 @@ async def cb_referral(callback: CallbackQuery, db_user: User) -> None:
 
 
 @router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext, db_user: User) -> None:
-    lang = get_lang(db_user)
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
     await state.clear()
-    await message.answer(tr(lang, "cancelled") if current else tr(lang, "nothing_to_cancel"))
+    await message.answer("❌ Amal bekor qilindi." if current else "Bekor qilinadigan amal yo‘q.")
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message, db_user: User) -> None:
-    lang = get_lang(db_user)
-    await message.answer(tr(lang, "help_text"), reply_markup=back_home_kb(message.from_user.id, "home", lang))
+async def cmd_help(message: Message) -> None:
+    await message.answer(HELP_TEXT, reply_markup=back_home_kb(message.from_user.id))
 
 
 @router.callback_query(NavCb.filter(F.target == "home"))
@@ -210,28 +192,58 @@ async def cb_home(
     is_bot_admin: bool = False,
 ) -> None:
     await state.clear()
-    lang = get_lang(db_user)
+    welcome_txt = WELCOME_TEXT
+    pack_lim = 1
+    fresh_user = db_user
     async with get_session() as session:
-        fresh = await session.get(User, db_user.id) or db_user
-        unread = await CommunityService.unread_count(session, fresh.id)
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
+        gcfg = await GameplayService.get_game_config(session)
+        pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+        custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
+        if custom_w:
+            welcome_txt = str(custom_w)
+        fresh = await session.get(User, db_user.id)
+        if fresh is not None:
+            fresh_user = fresh
     is_admin = is_bot_admin or is_admin_user(callback.from_user)
-    text = _home_text(
-        fresh,
-        lang,
-        tr(lang, "welcome_default"),
-        header_prefix=tr(lang, "home_header", name=esc(fresh.display_name)),
-    )
     await edit_or_answer(
         callback,
-        text,
-        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, lang=lang, unread_notifs=unread),
+        _home_text(fresh_user, welcome_txt),
+        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
+    )
+
+
+@router.callback_query(NavCb.filter(F.target == "grp_play"))
+async def cb_group_menu(callback: CallbackQuery, callback_data: NavCb) -> None:
+    group = callback_data.target
+    async with get_session() as session:
+        gcfg = await GameplayService.get_game_config(session)
+    pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+    await edit_or_answer(
+        callback,
+        GROUP_MENUS[group],
+        reply_markup=group_menu_kb(callback.from_user.id, group, pack_daily_limit=pack_lim),
+    )
+    await callback.answer()
+
+
+@router.callback_query(NavCb.filter(F.target.in_({"grp_trade", "grp_vip"})))
+async def cb_old_group_menu(callback: CallbackQuery, db_user: User, is_bot_admin: bool = False) -> None:
+    """Eski xabarlardagi tugmalar uchun: bosh menyuga qaytaradi."""
+    async with get_session() as session:
+        gcfg = await GameplayService.get_game_config(session)
+    pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+    is_admin = is_bot_admin or is_admin_user(callback.from_user)
+    await edit_or_answer(
+        callback,
+        _home_text(db_user),
+        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
     )
 
 
 @router.callback_query(NavCb.filter(F.target == "help"))
-async def cb_help(callback: CallbackQuery, db_user: User) -> None:
-    lang = get_lang(db_user)
-    await edit_or_answer(callback, tr(lang, "help_text"), reply_markup=back_home_kb(callback.from_user.id, "home", lang))
+async def cb_help(callback: CallbackQuery) -> None:
+    await edit_or_answer(callback, HELP_TEXT, reply_markup=back_home_kb(callback.from_user.id))
 
 
 @router.my_chat_member()
@@ -253,7 +265,6 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
                 telegram_id=event.from_user.id,
                 username=event.from_user.username,
                 first_name=event.from_user.first_name or "Collector",
-                language_code=getattr(event.from_user, "language_code", None),
             )
 
         group = await UserService.upsert_group_and_member(
@@ -278,12 +289,16 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
     if new_status in ("member", "administrator") and old_status not in ("member", "administrator"):
         welcome_lines = [
             f"🎴 <b>Anime Card Collection</b> boti <b>{esc(group_title)}</b> guruhiga qo‘shildi!",
-            "Guruhga tushgan yashirin kartaga <b>REPLY</b> qilib personaj ismini yozing!",
+            "Har kuni tasodifiy vaqtlarda anime kartalari tashlanadi. Karta xabariga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!",
             "🏆 Guruh reytingi: /top | 🎯 Eventlar: /event",
         ]
         if reward_result is not None and event.from_user:
             coins, epic_card = reward_result
-            extra = f" + 🟣 <b>{esc(epic_card.character_name)}</b> (Epic)" if epic_card else ""
+            if epic_card:
+                ec_meta = get_rarity_meta(epic_card.rarity)
+                extra = f" + {ec_meta.emoji} <b>{esc(epic_card.character_name)}</b> ({esc(ec_meta.name)})"
+            else:
+                extra = ""
             welcome_lines.append(
                 f"\n🎁 <b>{esc(event.from_user.first_name)}</b> botni qo‘shgani uchun "
                 f"<b>+{fmt_coins(coins)} 🪙</b>{extra} mukofot oldi!"
@@ -301,9 +316,10 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
             )
             try:
                 if epic_card is not None:
+                    ec_meta = get_rarity_meta(epic_card.rarity)
                     pm_text += (
-                        f"\n🟣 Eksklyuziv Epic karta (guruhlarga tashlanmaydi):\n\n"
-                        f"{format_card_block(epic_card, lang=get_lang(adder_user))}"
+                        f"\n{ec_meta.emoji} Eksklyuziv {esc(ec_meta.name)} karta (guruhlarga tashlanmaydi):\n\n"
+                        f"{format_card_block(epic_card)}"
                     )
                     await send_card_message(event.bot, adder_tg_id, epic_card, pm_text)
                 else:

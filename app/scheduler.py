@@ -5,7 +5,7 @@ from typing import List, Tuple
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat, TelegramRetryAfter
 from sqlalchemy import delete, select, update
 
 from app.event_announcer import finalize_ended_events
@@ -304,40 +304,52 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                         )
                     ).scalars().all()
                     targets.extend(int(x) for x in g_ids)
+            targets = list(dict.fromkeys(targets))
 
-            sem = asyncio.Semaphore(SEND_CONCURRENCY)
+            migrated_msgs: List[Tuple[int, int]] = []
+            sem = asyncio.Semaphore(4)
 
             async def _send_one(cid: int) -> None:
                 nonlocal sent_cnt
                 async with sem:
-                    try:
-                        if sm.from_chat_id and sm.forward_message_id:
-                            await bot.copy_message(chat_id=cid, from_chat_id=sm.from_chat_id, message_id=sm.forward_message_id)
-                        else:
-                            await bot.send_message(cid, sm.body)
-                        sent_cnt += 1
-                    except TelegramRetryAfter as exc:
-                        await asyncio.sleep(float(exc.retry_after) + 0.5)
+                    target_cid = cid
+                    for attempt in range(3):
                         try:
                             if sm.from_chat_id and sm.forward_message_id:
-                                await bot.copy_message(chat_id=cid, from_chat_id=sm.from_chat_id, message_id=sm.forward_message_id)
+                                await bot.copy_message(chat_id=target_cid, from_chat_id=sm.from_chat_id, message_id=sm.forward_message_id)
                             else:
-                                await bot.send_message(cid, sm.body)
+                                await bot.send_message(target_cid, sm.body)
                             sent_cnt += 1
+                            break
+                        except TelegramRetryAfter as exc:
+                            await asyncio.sleep(float(exc.retry_after) + 0.5)
+                        except TelegramMigrateToChat as exc:
+                            new_cid = int(exc.migrate_to_chat_id)
+                            migrated_msgs.append((target_cid, new_cid))
+                            target_cid = new_cid
                         except Exception:
-                            pass
-                    except Exception:
-                        pass
+                            if attempt == 0 and sm.from_chat_id and sm.forward_message_id and sm.body:
+                                try:
+                                    await bot.send_message(target_cid, sm.body)
+                                    sent_cnt += 1
+                                except Exception:
+                                    pass
+                            break
+                    await asyncio.sleep(0.05)
 
             if targets:
                 await asyncio.gather(*[_send_one(c) for c in targets])
 
             async with get_session() as s_done:
+                for old_cid, new_cid in migrated_msgs:
+                    await s_done.execute(
+                        update(Group).where(Group.telegram_chat_id == old_cid).values(telegram_chat_id=new_cid)
+                    )
                 row = await s_done.get(ScheduledMessage, sm.id)
                 if row is not None:
                     row.status = "sent"
                     row.sent_count = sent_cnt
-                    await s_done.commit()
+                await s_done.commit()
 
         # Rejalashtirilgan viktorinalarni e'lon qilish
         for q in due_quizzes:
@@ -358,6 +370,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                     u_ids = (await s_q.execute(select(User.telegram_id).where(User.is_banned.is_(False)))).scalars().all()
                     q_targets.extend(int(x) for x in g_ids)
                     q_targets.extend(int(x) for x in u_ids)
+            q_targets = list(dict.fromkeys(q_targets))
 
             q_text = (
                 f"🧠 <b>YANGI VIKTORINA BOSHLANDI: {esc(q.title)}</b>\n\n"
@@ -365,16 +378,22 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                 + (f"❓ <b>1-savol:</b> {esc(first_q.question_text)}\n\n" if first_q else "")
                 + f"👇 Ishtirok etish uchun /quiz yozing (yoki ushbu xabarga javob yozing)!\n<code>Quiz #{q.id}</code>"
             )
-            sem_q = asyncio.Semaphore(SEND_CONCURRENCY)
+            sem_q = asyncio.Semaphore(4)
 
             async def _send_quiz_msg(cid: int) -> None:
                 async with sem_q:
-                    try:
-                        await bot.send_message(cid, q_text)
-                    except TelegramRetryAfter as exc:
-                        await asyncio.sleep(float(exc.retry_after) + 0.5)
-                    except Exception:
-                        pass
+                    target_cid = cid
+                    for _attempt in range(2):
+                        try:
+                            await bot.send_message(target_cid, q_text)
+                            break
+                        except TelegramRetryAfter as exc:
+                            await asyncio.sleep(float(exc.retry_after) + 0.5)
+                        except TelegramMigrateToChat as exc:
+                            target_cid = int(exc.migrate_to_chat_id)
+                        except Exception:
+                            break
+                    await asyncio.sleep(0.05)
 
             if q_targets:
                 await asyncio.gather(*[_send_quiz_msg(c) for c in q_targets])
@@ -400,12 +419,13 @@ async def run_scheduler_loop(bot: Bot, stop_event: asyncio.Event) -> None:
             if tick % 2 == 0:
                 await finalize_ended_events(bot)
             await _process_v2_periodic_jobs(bot, tick)
-            # Muddati o'tgan takliflar/transferlar ~5 daqiqada bir (10 tick * 30s)
+            # Muddati o'tgan takliflar/transferlar/tradelar ~5 daqiqada bir (10 tick * 30s)
             if tick % 10 == 0:
                 async with get_session() as session:
                     expired = await OfferService.expire_stale_offers(session)
                     expired_transfers = await TransferService.expire_stale_transfers(session)
-                    if expired or expired_transfers:
+                    expired_trades = await AuctionWishlistService.expire_stale_trades(session)
+                    if expired or expired_transfers or expired_trades:
                         await session.commit()
             tick += 1
         except Exception as exc:

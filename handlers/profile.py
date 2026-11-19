@@ -16,13 +16,12 @@ from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from utils.callback_data import NavCb
 from utils.formatting import format_profile_message
-from utils.i18n import get_lang
 from utils.tg_helpers import edit_or_answer
 
 router = Router(name="profile")
 
 
-async def _render_own_profile(db_user: User, db_group: Optional[Group], lang: str = "uz") -> str:
+async def _render_own_profile(db_user: User, db_group: Optional[Group]) -> str:
     async with get_session() as session:
         fresh_user = await session.get(User, db_user.id) or db_user
         group_id = db_group.id if db_group else None
@@ -81,15 +80,13 @@ async def _render_own_profile(db_user: User, db_group: Optional[Group], lang: st
         showcase_cards=showcase,
         achievements_count=ach_cnt,
         season_points=s_points,
-        lang=lang,
     )
 
 
 @router.message(Command("me", "profil", "profilim"))
 async def cmd_profile(message: Message, db_user: User, db_group: Optional[Group] = None) -> None:
-    lang = get_lang(db_user)
-    text = await _render_own_profile(db_user, db_group, lang=lang)
-    await message.answer(text, reply_markup=profile_kb(message.from_user.id, lang=lang))
+    text = await _render_own_profile(db_user, db_group)
+    await message.answer(text, reply_markup=profile_kb(message.from_user.id))
 
 
 @router.callback_query(NavCb.filter(F.target == "profile"))
@@ -98,6 +95,5 @@ async def cb_profile(
     db_user: User,
     db_group: Optional[Group] = None,
 ) -> None:
-    lang = get_lang(db_user)
-    text = await _render_own_profile(db_user, db_group, lang=lang)
-    await edit_or_answer(callback, text, reply_markup=profile_kb(callback.from_user.id, lang=lang))
+    text = await _render_own_profile(db_user, db_group)
+    await edit_or_answer(callback, text, reply_markup=profile_kb(callback.from_user.id))

@@ -61,7 +61,6 @@ def _col_defs(dialect: str):
             ("game_wins", "INTEGER NOT NULL DEFAULT 0"),
             ("trade_count", "INTEGER NOT NULL DEFAULT 0"),
             ("auction_wins", "INTEGER NOT NULL DEFAULT 0"),
-            ("language", "VARCHAR(8) NOT NULL DEFAULT 'uz'"),
         ],
         "user_cards": [
             ("serial_number", "INTEGER"),
@@ -102,7 +101,17 @@ def _col_defs(dialect: str):
     }
 
 
-_DEFAULT_DROPS = {"Common": 3, "Rare": 2, "Epic": 2, "Legendary": 1, "Mythic": 1, "Divine": 1}
+_DEFAULT_DROPS = {
+    "Basic": 3,
+    "Elita": 2,
+    "Epic": 2,
+    "Legend": 1,
+    "Mythic": 1,
+    "Divine": 1,
+    "Common": 3,
+    "Rare": 2,
+    "Legendary": 1,
+}
 
 
 def upgrade_schema_sync(conn: Connection) -> None:

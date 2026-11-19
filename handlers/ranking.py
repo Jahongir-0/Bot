@@ -8,13 +8,43 @@ from database.session import get_session
 from keyboards.market import ranking_kb
 from models.group import Group
 from models.user import User
+from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from utils.callback_data import NavCb, RankingCb
+from utils.constants import get_rank_name_by_order, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, fmt_coins
-from utils.i18n import get_lang
 from utils.tg_helpers import edit_or_answer
 
 router = Router(name="ranking")
+
+MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+LINE = "━━━━━━━━━━━━━━━"
+
+
+def _extended_titles() -> dict[str, tuple[str, str]]:
+    r5 = get_rank_name_by_order(5, "Mythic")
+    r6 = get_rank_name_by_order(6, "Divine")
+    m5 = get_rarity_meta(r5)
+    m6 = get_rarity_meta(r6)
+    return {
+        "coins": ("🪙 ENG BOY O‘YINCHILAR", "coin"),
+        "xp": ("⚡ ENG YUQORI DARAJA", "XP"),
+        "quiz": ("🧠 VIKTORINA CHEMPIONLARI", "g‘alaba"),
+        "games": ("🎲 O‘YIN USTALARI", "yutuq"),
+        "trades": ("🤝 ENG FAOL SAVDOGARLAR", "savdo"),
+        "auction": ("🔨 AUKSION G‘OLIBLARI", "g‘alaba"),
+        "refs": ("👥 ENG KO‘P DO‘ST TAKLIF QILGANLAR", "do‘st"),
+        "rare": ("⭐ YUQORI RANK KARTALARI KOLLEKSIONERLARI", "karta"),
+        "mythic": (f"{m5.emoji} {r5.upper()} KOLLEKSIONERLAR", "karta"),
+        "divine": (f"{m6.emoji} {r6.upper()} KOLLEKSIONERLAR", "karta"),
+    }
+
+
+PERIOD_LABELS = {"all": "barcha vaqt", "monthly": "shu oy", "weekly": "shu hafta"}
+
+
+def _prefix(rank: int) -> str:
+    return MEDALS.get(rank, f"<b>{rank}.</b>")
 
 
 async def _show_ranking(
@@ -22,118 +52,99 @@ async def _show_ranking(
     owner_id: int,
     scope: str,
     db_group: Optional[Group],
+    db_user: Optional[User] = None,
     period: str = "all",
-    lang: str = "uz",
 ) -> None:
     in_group = db_group is not None
     if scope == "group" and not in_group:
         scope = "global"
 
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    async with get_session() as session:
+        ranks = await GameplayService.get_rank_definitions(session)
+        sync_runtime_ranks(ranks)
 
+    kb = ranking_kb(owner_id=owner_id, current_scope=scope, in_group=in_group, period=period)
+    titles = _extended_titles()
+
+    # ---------- guruhlar reytingi ----------
     if scope == "groups":
         async with get_session() as session:
             grp_entries = await RankingService.get_groups_top(session, limit=10)
-            standing = (
-                await RankingService.get_group_standing(session, db_group.id)
-                if db_group is not None
-                else None
-            )
-
-        header = "🏰 <b>TOP 10 GROUPS</b>"
+            standing = await RankingService.get_group_standing(session, db_group.id) if db_group is not None else None
+        lines = ["🏰 <b>GURUHLAR REYTINGI</b>", LINE]
         if not grp_entries:
-            text = f"{header}\n\n📭 —"
+            lines.append("📭 Hozircha faol guruhlar yo‘q.")
         else:
-            lines = [f"{header}\n"]
+            lines.append("<i>Faol a’zolar va olingan kartalar bo‘yicha</i>\n")
             for g in grp_entries:
-                prefix = medals.get(g.rank, f"<b>#{g.rank}</b>")
-                members_info = f" · 💬{g.member_count}" if g.member_count else ""
-                lines.append(
-                    f"{prefix} <b>{esc(g.group.title)}</b> — "
-                    f"👤 {g.active_users} | 🎴 {g.claimed_cards}{members_info} · ⭐ {g.score}"
-                )
+                lines.append(f"{_prefix(g.rank)} <b>{esc(g.group.title)}</b>")
+                lines.append(f"      👤 {g.active_users} faol · 🎴 {g.claimed_cards} karta · ⭐ {g.score}")
             if standing is not None and standing.rank > 10:
-                lines.append(
-                    f"\n📍 Group rank: <b>#{standing.rank}</b> "
-                    f"(👤 {standing.active_users} · 🎴 {standing.claimed_cards} · ⭐ {standing.score})"
-                )
-            text = "\n".join(lines)
-
-        await edit_or_answer(
-            target,
-            text,
-            reply_markup=ranking_kb(owner_id=owner_id, current_scope=scope, in_group=in_group, period=period, lang=lang),
-        )
+                lines.append(f"\n📍 Sizning guruhingiz: <b>#{standing.rank}</b> · ⭐ {standing.score}")
+        await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
         return
 
-    if scope in ("coins", "xp", "quiz", "games", "trades", "auction", "refs", "rare", "mythic", "divine"):
-        titles = {
-            "coins": ("🪙 TOP COINS", "coins"),
-            "xp": ("⚡ TOP XP", "XP"),
-            "quiz": ("🧠 QUIZ CHAMPIONS", "wins"),
-            "games": ("🎲 MINI GAMES", "wins"),
-            "trades": ("🤝 TOP TRADERS", "trades"),
-            "auction": ("🔨 AUCTION WINNERS", "wins"),
-            "refs": ("📣 TOP REFERRERS", "refs"),
-            "rare": ("💎 RARE+ COLLECTORS", "cards"),
-            "mythic": ("🔴 MYTHIC COLLECTORS", "Mythic"),
-            "divine": ("✨ DIVINE COLLECTORS", "Divine"),
-        }
+    # ---------- maxsus reytinglar ----------
+    if scope in titles:
         hdr, unit = titles[scope]
         async with get_session() as session:
             rows = await RankingService.get_extended_top(session, scope, period=period, limit=10)
-        lines = [f"<b>{hdr}</b> ({period})\n"]
+        lines = [f"<b>{hdr}</b>", f"{LINE}\n🗓 {PERIOD_LABELS.get(period, period)}\n"]
         if not rows:
-            lines.append("📭 —")
+            lines.append("📭 Hozircha ma’lumot yo‘q.")
         else:
             for idx, (u, val) in enumerate(rows, start=1):
-                prefix = medals.get(idx, f"<b>#{idx}</b>")
-                lines.append(f"{prefix} {esc(u.display_name)} — <b>{fmt_coins(val)}</b> {unit}")
-        await edit_or_answer(
-            target,
-            "\n".join(lines),
-            reply_markup=ranking_kb(owner_id=owner_id, current_scope=scope, in_group=in_group, period=period, lang=lang),
-        )
+                me = " 👈" if db_user is not None and u.id == db_user.id else ""
+                lines.append(f"{_prefix(idx)} {esc(u.display_name)} — <b>{fmt_coins(val)}</b> {unit}{me}")
+        await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
         return
 
+    # ---------- global / guruh ----------
     async with get_session() as session:
         if scope == "group" and db_group is not None:
             entries = await RankingService.get_group_top(session, db_group.id, limit=10)
-            header = f"🏆 <b>GROUP TOP 10 — {esc(db_group.title)}</b>"
+            header = f"👥 <b>GURUH REYTINGI</b>\n🏷 {esc(db_group.title)}"
         else:
             entries = await RankingService.get_global_top(session, limit=10)
-            header = "🌍 <b>GLOBAL TOP 10</b>"
-
-    if not entries:
-        text = f"{header}\n\n📭 —"
-    else:
-        lines = [f"{header}\n"]
-        for e in entries:
-            prefix = medals.get(e.rank, f"<b>#{e.rank}</b>")
-            lines.append(
-                f"{prefix} {esc(e.user.display_name)} — "
-                f"✨ {e.unique_cards} unique | 🎴 {e.total_cards} total "
-                f"(🟡{e.legendary_cards} 🔴{e.mythic_cards})"
+            header = "🌍 <b>GLOBAL REYTING</b>"
+        my_global = my_group = None
+        if db_user is not None:
+            my_global, my_group = await RankingService.get_user_ranks(
+                session=session, user_id=db_user.id, group_id=db_group.id if db_group else None
             )
-        text = "\n".join(lines)
 
-    await edit_or_answer(
-        target,
-        text,
-        reply_markup=ranking_kb(owner_id=owner_id, current_scope=scope, in_group=in_group, period=period, lang=lang),
-    )
+    r4_meta = get_rarity_meta(get_rank_name_by_order(4, "Legend"))
+    r5_meta = get_rarity_meta(get_rank_name_by_order(5, "Mythic"))
+
+    lines = [header, LINE]
+    if not entries:
+        lines.append("📭 Hozircha reyting ma’lumotlari yo‘q.")
+    else:
+        lines.append("<i>Noyob kartalar soni bo‘yicha</i>\n")
+        for e in entries:
+            me = " 👈" if db_user is not None and e.user.id == db_user.id else ""
+            lines.append(f"{_prefix(e.rank)} <b>{esc(e.user.display_name)}</b>{me}")
+            lines.append(
+                f"      ✨ {e.unique_cards} noyob · 🎴 {e.total_cards} jami · "
+                f"{r4_meta.emoji} {e.legendary_cards} · {r5_meta.emoji} {e.mythic_cards}"
+            )
+    mine = my_group if scope == "group" else my_global
+    if mine is not None:
+        lines.append(f"\n📍 Sizning o‘riningiz: <b>#{mine}</b>")
+    await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
 
 
 @router.message(Command("top"))
 async def cmd_top(message: Message, db_user: User, db_group: Optional[Group] = None) -> None:
     scope = "group" if db_group is not None else "global"
-    await _show_ranking(message, message.from_user.id, scope, db_group, lang=get_lang(db_user))
+    await _show_ranking(message, message.from_user.id, scope, db_group, db_user)
 
 
 @router.callback_query(NavCb.filter(F.target == "ranking"))
 async def cb_ranking_nav(callback: CallbackQuery, db_user: User, db_group: Optional[Group] = None) -> None:
     scope = "group" if db_group is not None else "global"
-    await _show_ranking(callback, callback.from_user.id, scope, db_group, lang=get_lang(db_user))
+    await _show_ranking(callback, callback.from_user.id, scope, db_group, db_user)
+    await callback.answer()
 
 
 @router.callback_query(RankingCb.filter())
@@ -143,4 +154,5 @@ async def cb_ranking_switch(
     db_user: User,
     db_group: Optional[Group] = None,
 ) -> None:
-    await _show_ranking(callback, callback.from_user.id, callback_data.scope, db_group, callback_data.period, lang=get_lang(db_user))
+    await _show_ranking(callback, callback.from_user.id, callback_data.scope, db_group, db_user, callback_data.period)
+    await callback.answer()

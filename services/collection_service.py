@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.card import Card
 from models.user_card import UserCard
-from utils.constants import list_rarities
+from utils.constants import get_rarity_aliases, get_rarity_meta, list_rarities
 from utils.grouping import anime_key, character_key, get_anime_key_of, get_character_key_of, get_group_reps
 
 
@@ -222,8 +222,14 @@ class CollectionService:
         ).all()
 
         rarity_map: Dict[str, int] = {r: 0 for r in list_rarities()}
+        lower_lookup = {r.lower(): r for r in rarity_map}
         for rarity_name, cnt in rarity_rows:
-            rarity_map[rarity_name] = int(cnt)
+            raw_clean = str(rarity_name or "").strip()
+            canonical = lower_lookup.get(raw_clean.lower())
+            if canonical is None:
+                resolved = get_rarity_meta(raw_clean).name
+                canonical = lower_lookup.get(resolved.lower(), resolved)
+            rarity_map[canonical] = rarity_map.get(canonical, 0) + int(cnt)
 
         # Favorites first, then highest duplicate stacks ("Gojo Satoru × 7")
         fav_rows = (
@@ -269,7 +275,11 @@ class CollectionService:
             else:
                 stmt = stmt.where(Card.anime_name.ilike(f"{anime_filter}%"))
         if rarity_filter and rarity_filter != "all":
-            stmt = stmt.where(Card.rarity == rarity_filter)
+            aliases = get_rarity_aliases(rarity_filter)
+            if aliases:
+                stmt = stmt.where(func.lower(Card.rarity).in_(aliases))
+            else:
+                stmt = stmt.where(func.lower(Card.rarity) == rarity_filter.strip().lower())
 
         stmt = stmt.group_by(Card.id).order_by(func.count(UserCard.id).desc(), Card.base_value.desc())
 

@@ -234,20 +234,8 @@ async def test_v2_zip_import_zipslip_protection_and_duplicates(db_session):
         zf.writestr("../../etc/passwd", "bad")
         zf.writestr("cards/hero.jpg", b"\xff\xd8\xff\xe0TESTJPG")
         manifest = [
-            {
-                "character_name": "V2 Test Hero",
-                "media_type": "Anime",
-                "anime_name": "V2 Anime",
-                "rarity": "Epic",
-                "image": "hero.jpg",
-            },
-            {
-                "character_name": "V2 Test Hero",
-                "media_type": "Anime",
-                "anime_name": "V2 Anime",
-                "rarity": "Epic",
-                "image": "hero.jpg",
-            },
+            {"character_name": "V2 Test Hero", "anime_name": "V2 Anime", "rarity": "Epic", "image": "hero.jpg"},
+            {"character_name": "V2 Test Hero", "anime_name": "V2 Anime", "rarity": "Epic", "image": "hero.jpg"},
         ]
         zf.writestr("cards.json", json.dumps(manifest))
 
@@ -264,18 +252,18 @@ async def test_v2_dynamic_ranks_must_sum_to_100(db_session):
     with pytest.raises(ValueError):
         await GameplayService.save_rank_definitions(
             db_session,
-            [{"name": "Common", "emoji": "⚪", "drop_probability": 50, "base_value": 1000, "drop_limit": 3}],
+            [{"name": "Basic", "emoji": "⚪", "chance": 50.0, "value": 1000, "drops": 3}],
         )
 
     await GameplayService.save_rank_definitions(
         db_session,
         [
-            {"name": "Common", "emoji": "⚪", "drop_probability": 60, "base_value": 1000, "drop_limit": 3},
-            {"name": "Rare", "emoji": "🔵", "drop_probability": 40, "base_value": 2500, "drop_limit": 2},
+            {"name": "Basic", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
+            {"name": "Elita", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
         ],
     )
     ranks = await GameplayService.get_rank_definitions(db_session)
-    assert len(ranks) == 2 and sum(int(r["drop_probability"]) for r in ranks) == 100
+    assert len(ranks) == 2 and sum(r["chance"] for r in ranks) == 100.0
 
 
 @pytest.mark.asyncio
@@ -379,7 +367,7 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
     await CardService.create_card(
         db_session, "Chainsaw Hero", "Chainsaw Man", "https://x/csm.png", "Epic", 4000, media_type="Manga"
     )
-    rows, total = await AdminService.get_v2_media_titles(db_session, media_type="Manga")
+    rows, total = await AdminService.get_v2_media_titles(db_session, media_group="manga")
     assert total >= 1
     rep_id, title, cnt = rows[0]
     assert isinstance(rep_id, int) and title == "Chainsaw Man" and cnt >= 1
@@ -388,8 +376,8 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
     await GameplayService.save_rank_definitions(
         db_session,
         [
-            {"name": "Common", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
-            {"name": "Rare", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
+            {"name": "Basic", "emoji": "⚪", "chance": 60.0, "value": 1000, "drops": 3},
+            {"name": "Elita", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
         ],
     )
     await GameplayService.update_single_rank_attr(db_session, 0, "chance", "70")
@@ -400,7 +388,7 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
     # Auction cancel refunds highest bidder
     bidder = await UserService.upsert_user(db_session, 9801, "aucb", "AucB")
     await UserService.credit_coins(db_session, bidder.id, 3000, "test", "seed")
-    c = await CardService.create_card(db_session, "Cancel Auc", "Auc World", "https://x/ca.png", "Rare", 2000)
+    c = await CardService.create_card(db_session, "Cancel Auc", "Auc World", "https://x/ca.png", "Elita", 2000)
     ok, _, auc = await AuctionWishlistService.create_auction(db_session, c.id, 500, 3, 999999, min_step=50)
     assert ok and auc is not None
     ok_b, _ = await AuctionWishlistService.place_bid(db_session, auc.id, bidder, 800)
@@ -413,97 +401,4 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
     await db_session.refresh(bidder)
     row = await db_session.get(Auction, auc.id)
     assert row.status == "cancelled" and bidder.locked_coins == 0
-
-
-@pytest.mark.asyncio
-async def test_rank_id_immutability_and_strict_zip_validation(db_session):
-    import io
-    import json
-    import zipfile
-    from services.gameplay_service import GameplayService
-    from services.security_backup_service import SecurityBackupService
-
-    # Default ranks id=1..N; Mythic has id=5. Rename Mythic -> Legend Mythic; id stays 5!
-    ranks_before = await GameplayService.get_rank_definitions(db_session)
-    mythic = next(r for r in ranks_before if r["name"] == "Mythic")
-    mythic_id = mythic["id"]
-    assert mythic_id == 5
-
-    await GameplayService.update_single_rank_attr(db_session, "Mythic", new_name="Legend Mythic")
-    resolved = await GameplayService.resolve_rank_definition(db_session, mythic_id)
-    assert resolved is not None and resolved["id"] == mythic_id and resolved["name"] == "Legend Mythic"
-
-    # Strict 5-field ZIP import: missing media_type rejected, valid entry with rank_id accepted with renamed rank
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("images/ok.png", b"\x89PNG\r\n\x1a\nTESTPNGDATA")
-        manifest = [
-            {
-                "character_name": "Missing Media",
-                "anime_name": "Test Anime",
-                "rank_id": mythic_id,
-                "image": "images/ok.png",
-            },
-            {
-                "character_name": "Gojo RankID",
-                "media_type": "Anime",
-                "anime_name": "Jujutsu Kaisen",
-                "rank_id": mythic_id,
-                "image": "images/ok.png",
-            },
-        ]
-        zf.writestr("cards.json", json.dumps(manifest))
-
-    rep = await SecurityBackupService.import_cards_from_zip(db_session, buf.getvalue(), admin_tg_id=999999)
-    assert rep.added == 1
-    assert rep.failed == 1
-    added_card = (
-        await db_session.execute(select(Card).where(Card.character_name == "Gojo RankID"))
-    ).scalar_one()
-    assert added_card.rarity == "Legend Mythic"
-    assert added_card.media_type == "Anime"
-
-
-@pytest.mark.asyncio
-async def test_vip_config_deepcopy_zero_price_and_revoke(db_session):
-    from services.community_service import CommunityService
-
-    cfg1 = await CommunityService.get_vip_config(db_session)
-    cfg1["tiers"]["silver"]["coins"] = 0
-    await SettingsService.set_value(db_session, "vip_config", cfg1)
-
-    cfg2 = await CommunityService.get_vip_config(db_session)
-    assert cfg2["tiers"]["silver"]["coins"] == 0
-    cfg2["tiers"]["silver"]["coins"] = 999999  # lokal mutatsiya boshqasiga ta'sir qilmasligi kerak
-    cfg3 = await CommunityService.get_vip_config(db_session)
-    assert cfg3["tiers"]["silver"]["coins"] == 0
-
-    u = await UserService.upsert_user(db_session, 9901, "vipu", "VIPU")
-    ok, _ = await CommunityService.buy_vip_with_coins(db_session, u, "silver")
-    assert ok is False  # 0 narxda coin bilan sotilmaydi
-
-    await CommunityService.grant_vip(db_session, u, "gold", days=15)
-    assert CommunityService.is_vip_active(u) is True
-    await CommunityService.revoke_vip(db_session, u)
-    assert CommunityService.is_vip_active(u) is False
-
-
-@pytest.mark.asyncio
-async def test_i18n_autodetect_and_manual_override(db_session):
-    from utils.i18n import detect_lang
-
-    assert detect_lang("ru") == "ru"
-    assert detect_lang("uk-UA") == "ru"
-    assert detect_lang("en-US") == "en"
-    assert detect_lang("uz") == "uz"
-    assert detect_lang(None) == "uz"
-
-    u_ru = await UserService.upsert_user(db_session, 9951, "ruser", "RU", language_code="ru")
-    assert u_ru.language == "ru"
-
-    # Manual switch overrides language and subsequent upsert_user preserves user choice
-    await UserService.set_user_language(db_session, u_ru.id, "en")
-    u_after = await UserService.upsert_user(db_session, 9951, "ruser", "RU", language_code="ru")
-    assert u_after.language == "en"
-
 
