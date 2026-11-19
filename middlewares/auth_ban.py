@@ -14,15 +14,13 @@ from services.community_service import CommunityService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import SupCb
-from utils.constants import DEFAULT_RANK_DEFINITIONS, sync_runtime_ranks
-from utils.tg_helpers import is_super_admin, schedule_delete
+from utils.i18n import detect_lang, get_lang, tr
+from utils.tg_helpers import is_super_admin
 
 logger = logging.getLogger(__name__)
 
 _GROUP_TOUCH_TTL = 600.0
 _group_touched: Dict[Tuple[int, int], float] = {}
-_ANON_ADMIN_ID = 1087968824  # Telegram'ning GroupAnonymousBot ID si
-_anon_hint_sent: Dict[int, float] = {}
 
 
 class GlobalAuthAndBanMiddleware(BaseMiddleware):
@@ -42,29 +40,12 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         tg_user = getattr(event, "from_user", None)
-        if tg_user is not None and tg_user.id == _ANON_ADMIN_ID and isinstance(event, Message):
-            # Guruh nomidan (anonim admin) yozilgan xabar: foydalanuvchini aniqlab bo'lmaydi.
-            rep = event.reply_to_message
-            if rep is not None and rep.from_user is not None and rep.from_user.is_bot:
-                now = time.monotonic()
-                if now - _anon_hint_sent.get(event.chat.id, 0.0) > 120.0:
-                    _anon_hint_sent[event.chat.id] = now
-                    try:
-                        hint = await event.reply(
-                            "⚠️ Siz guruh nomidan (<b>anonim</b>) yozyapsiz, shuning uchun bot sizni taniy olmaydi "
-                            "va karta bera olmaydi.\n"
-                            "Anonim rejimni o‘chiring: guruh sozlamalari → Administratorlar → o‘zingiz → "
-                            "<b>«Anonim bo‘lish»</b> ni o‘chiring."
-                        )
-                        schedule_delete(event.bot, event.chat.id, [hint.message_id], delay=20)
-                    except Exception:
-                        pass
-            return None
         if tg_user is None or tg_user.is_bot:
             return None
 
         is_payment = isinstance(event, Message) and event.successful_payment is not None
         is_support_cb = isinstance(event, CallbackQuery) and (event.data or "").startswith("sup:")
+        fallback_lang = detect_lang(getattr(tg_user, "language_code", None))
 
         if isinstance(event, (Message, CallbackQuery)) and not is_payment:
             limiter = get_lock_manager()
@@ -73,7 +54,7 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
             if not allowed:
                 if isinstance(event, CallbackQuery):
                     try:
-                        await event.answer("⏳ Biroz kuting...", show_alert=False)
+                        await event.answer(tr(fallback_lang, "wait_short"), show_alert=False)
                     except Exception:
                         pass
                 return None
@@ -92,7 +73,9 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
                 telegram_id=tg_user.id,
                 username=tg_user.username,
                 first_name=tg_user.first_name or "Collector",
+                language_code=getattr(tg_user, "language_code", None),
             )
+            lang = get_lang(user)
 
             # Muddati o'tgan temp ban avtomatik yechiladi
             now_dt = utcnow()
@@ -129,9 +112,6 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
             is_adm, admin_perms = await CommunityService.get_admin_permissions(
                 session, tg_user.id, tg_user.username
             )
-            ranks_raw = await SettingsService.get_value(session, "rank_definitions", DEFAULT_RANK_DEFINITIONS)
-            if isinstance(ranks_raw, list) and ranks_raw:
-                sync_runtime_ranks(ranks_raw)
             maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
 
             # Forced subscription faqat shaxsiy chatda (support/start/payment bundan mustasno)
@@ -155,7 +135,7 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
 
             # Maintenance check
             if isinstance(maint, dict) and maint.get("enabled") and not is_adm and not is_payment:
-                msg_txt = str(maint.get("message") or "🔧 Botda texnik ishlar olib borilmoqda.")
+                msg_txt = str(maint.get("message") or tr(lang, "maint_default"))
                 if isinstance(event, CallbackQuery):
                     await event.answer(msg_txt[:190], show_alert=True)
                 elif isinstance(event, Message) and event.chat.type == "private":
@@ -168,21 +148,25 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
 
             # User ban check (allow support/appeal callbacks)
             if user.is_banned and not is_payment and not is_support_cb:
-                reason = user.ban_reason or "Qoidalarni buzish"
-                exp = f"\n⏳ Muddat: {ensure_utc(user.ban_until):%d.%m.%Y %H:%M} UTC" if user.ban_until else "\n⛔ Muddat: Umrbod"
-                ban_msg = f"🚫 <b>Siz botdan bloklangansiz!</b>\n📌 Sabab: {reason}{exp}"
+                reason = user.ban_reason or tr(lang, "ban_reason_default")
+                exp = (
+                    tr(lang, "ban_until", dt=f"{ensure_utc(user.ban_until):%d.%m.%Y %H:%M}")
+                    if user.ban_until
+                    else tr(lang, "ban_perm")
+                )
+                ban_msg = tr(lang, "ban_msg", reason=reason, exp=exp)
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="💬 Admin bilan bog‘lanish",
+                                text=tr(lang, "contact_admin"),
                                 callback_data=SupCb(owner_id=tg_user.id, act="new").pack(),
                             )
                         ]
                     ]
                 )
                 if isinstance(event, CallbackQuery):
-                    await event.answer("🚫 Siz bloklangansiz.", show_alert=True)
+                    await event.answer(tr(lang, "ban_alert"), show_alert=True)
                 elif isinstance(event, Message) and event.chat.type == "private":
                     await event.answer(ban_msg, reply_markup=kb)
                 elif isinstance(event, PreCheckoutQuery):
@@ -199,13 +183,13 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
                 rows.append(
                     [
                         InlineKeyboardButton(
-                            text="✅ Tekshirish",
+                            text=tr(lang, "check_sub"),
                             callback_data=SupCb(owner_id=tg_user.id, act="check_sub").pack(),
                         )
                     ]
                 )
                 markup = InlineKeyboardMarkup(inline_keyboard=rows)
-                txt_sub = "📢 <b>Botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling:</b>"
+                txt_sub = tr(lang, "sub_prompt")
                 if isinstance(event, CallbackQuery):
                     await event.message.answer(txt_sub, reply_markup=markup)
                     await event.answer()
