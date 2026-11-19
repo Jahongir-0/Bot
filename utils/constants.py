@@ -179,6 +179,10 @@ def sync_runtime_ranks(ranks: List[Dict[str, object]]) -> None:
     cleaned.sort(key=lambda r: int(r.get("order", 99)))
     if cleaned:
         _RUNTIME_RANKS = cleaned
+        try:
+            PACK_CONFIG.update(get_pack_configs())
+        except NameError:
+            pass
 
 
 def get_runtime_ranks() -> List[Dict[str, object]]:
@@ -212,6 +216,19 @@ def get_rarity_meta(rarity: str) -> RarityMeta:
         if reg_name.lower() == key:
             return meta
     return _meta_from_dict(ranks[0], 1) if ranks else RARITY_REGISTRY[Rarity.COMMON.value]
+
+
+def get_rarity_aliases(rarity: str) -> List[str]:
+    """Berilgan rank nomi uchun barcha mos kichik-harf (shu jumladan eski) nomlar ro'yxatini qaytaradi."""
+    clean = (rarity or "").strip().lower()
+    if not clean:
+        return []
+    meta = get_rarity_meta(rarity)
+    aliases = {clean, meta.name.strip().lower()}
+    for old_k, ord_val in LEGACY_RANK_ORDER_ALIASES.items():
+        if ord_val == meta.order:
+            aliases.add(old_k)
+    return list(aliases)
 
 
 def list_rarities() -> List[str]:

@@ -120,15 +120,15 @@ def format_drop_message(card: Card, active_event: Optional[Event] = None) -> str
     mtype = getattr(card, "media_type", "Anime") or "Anime"
     lines = [
         "🎴 <b>YANGI KARTA TASHLANDI!</b>",
-        "",
+        LINE,
         f"📺 <b>{esc(mtype)}:</b> {esc(card.anime_name)}",
-        f"⭐ <b>Rank:</b> {meta.emoji} {esc(meta.name)}",
+        f"⭐ <b>Rank:</b> {meta.emoji} <b>{esc(meta.name)}</b>",
         f"🔢 <b>Nusxa:</b> {card.dropped_count}/{card.drop_limit}",
         "❓ <b>Personaj kim?</b>",
     ]
     if active_event is not None:
         lines.append(f"🔥 <i>Event: {esc(active_event.name)}</i>")
-    lines.extend(["", "✍️ Personaj ismini ushbu xabarga <b>REPLY</b> qilib yozing!"])
+    lines.extend([LINE, "✍️ Personaj ismini ushbu xabarga <b>REPLY</b> qilib yozing!"])
     return "\n".join(lines)
 
 
@@ -236,8 +236,7 @@ def format_collection_summary(
     favorites: List[tuple[str, int]],
 ) -> str:
     lines = [
-        "🎴 <b>KARTALARIM</b>",
-        "━━━━━━━━━━━━━━━",
+        header("🎴 <b>KARTALARIM</b>"),
         f"🎴 Jami: <b>{user.total_cards}</b>  ·  ✨ Noyob: <b>{user.unique_cards}</b>",
     ]
     if user.total_cards == 0:
@@ -253,7 +252,7 @@ def format_collection_summary(
         lines += ["", "⭐ <b>Rank bo‘yicha</b>"]
         for rarity_name, qty in nonzero.items():
             meta = get_rarity_meta(rarity_name)
-            lines.append(f"{meta.emoji} {esc(meta.name)}: <b>{qty}</b>")
+            lines.append(f"{meta.emoji} <b>{esc(meta.name)}</b>: {qty} ta")
     if anime_counts:
         lines += ["", "📺 <b>Eng ko‘p (asar bo‘yicha)</b>"]
         for anime_name, qty in anime_counts[:5]:
@@ -262,7 +261,7 @@ def format_collection_summary(
         lines += ["", "❤️ <b>Sevimli personajlar</b>"]
         for char_name, qty in favorites[:3]:
             lines.append(f"• {esc(char_name)} × {qty}")
-    lines += ["", "👇 Kartalarni ko‘rish usulini tanlang:"]
+    lines += [LINE, "👇 Kartalarni ko‘rish usulini tanlang:"]
     return "\n".join(lines)
 
 
