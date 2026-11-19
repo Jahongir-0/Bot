@@ -60,7 +60,7 @@ def format_card_block(
     lines = [
         f"🎴 <b>{esc(card.character_name)}</b>",
         f"📺 {esc(mtype)}: <b>{esc(card.anime_name)}</b>",
-        f"⭐ Rank: {meta.emoji} <b>{esc(card.rarity)}</b>",
+        f"⭐ Rank: {meta.emoji} <b>{esc(meta.name)}</b>",
         f"💎 Qiymati: <b>{fmt_coins(card.base_value)}</b> 🪙",
         f"🆔 Serial: <code>{serial_str}</code> · <code>{esc(card.card_code)}</code>",
         f"📦 Holati: {cstate}",
@@ -119,10 +119,10 @@ def format_drop_message(card: Card, active_event: Optional[Event] = None) -> str
     meta = get_rarity_meta(card.rarity)
     mtype = getattr(card, "media_type", "Anime") or "Anime"
     lines = [
-        "🎴 <b>NEW CARD DROP!</b>",
+        "🎴 <b>YANGI KARTA TASHLANDI!</b>",
         "",
         f"📺 <b>{esc(mtype)}:</b> {esc(card.anime_name)}",
-        f"⭐ <b>Rank:</b> {meta.emoji} {esc(card.rarity)}",
+        f"⭐ <b>Rank:</b> {meta.emoji} {esc(meta.name)}",
         f"🔢 <b>Nusxa:</b> {card.dropped_count}/{card.drop_limit}",
         "❓ <b>Personaj kim?</b>",
     ]
@@ -137,7 +137,7 @@ def format_drop_claimed_message(card: Card, winner: User, reward_coins: int = 0)
     coin_txt = f" (+{fmt_coins(reward_coins)} 🪙)" if reward_coins > 0 else ""
     return (
         f"🎴 <b>{esc(card.character_name)}</b>\n"
-        f"📺 {esc(card.anime_name)} · {meta.emoji} {esc(card.rarity)}\n\n"
+        f"📺 {esc(card.anime_name)} · {meta.emoji} {esc(meta.name)}\n\n"
         f"🏆 {esc(winner.display_name)} to‘g‘ri topib kartani oldi!{coin_txt}"
     )
 
@@ -208,7 +208,7 @@ def format_profile_message(
     ]
     if rarest_card is not None:
         rmeta = get_rarity_meta(rarest_card.rarity)
-        lines.append(f"💠 Eng noyob: {rmeta.emoji} <b>{esc(rarest_card.character_name)}</b> · {esc(rarest_card.rarity)}")
+        lines.append(f"💠 Eng noyob: {rmeta.emoji} <b>{esc(rarest_card.character_name)}</b> · {esc(rmeta.name)}")
     if showcase_cards:
         lines.append("🖼 Vitrina: " + " · ".join(f"<b>{esc(c.character_name)}</b>" for c in showcase_cards[:3]))
 
@@ -253,7 +253,7 @@ def format_collection_summary(
         lines += ["", "⭐ <b>Rank bo‘yicha</b>"]
         for rarity_name, qty in nonzero.items():
             meta = get_rarity_meta(rarity_name)
-            lines.append(f"{meta.emoji} {esc(rarity_name)}: <b>{qty}</b>")
+            lines.append(f"{meta.emoji} {esc(meta.name)}: <b>{qty}</b>")
     if anime_counts:
         lines += ["", "📺 <b>Eng ko‘p (asar bo‘yicha)</b>"]
         for anime_name, qty in anime_counts[:5]:
@@ -268,7 +268,7 @@ def format_collection_summary(
 
 def format_group_settings(group: Group) -> str:
     status = "🟢 Yoqilgan" if group.drop_enabled else "🔴 O'chirilgan"
-    ban_str = "🚫 Banned" if getattr(group, "is_banned", False) else "✅ Faol"
+    ban_str = "🚫 Bloklangan" if getattr(group, "is_banned", False) else "✅ Faol"
     return (
         f"⚙️ <b>GURUH SOZLAMALARI</b>\n\n"
         f"🏷 Guruh: <b>{esc(group.title)}</b>\n"
@@ -315,7 +315,7 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
         "━━━━━━━━━━━━━━━",
         f"🎴 <b>{esc(card.character_name)}</b>",
         f"📺 {esc(card.anime_name)}",
-        f"⭐ Rank: {meta.emoji} <b>{esc(card.rarity)}</b>",
+        f"⭐ Rank: {meta.emoji} <b>{esc(meta.name)}</b>",
         "",
         f"📦 Cheklangan nusxa: <b>{event.total_copies} ta</b>",
     ]
