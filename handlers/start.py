@@ -14,7 +14,7 @@ from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import NavCb
-from utils.formatting import esc, fmt_coins, format_card_block
+from utils.formatting import esc, fmt_coins, format_card_block, header
 from utils.tg_helpers import edit_or_answer, is_admin_user, send_card_message
 
 router = Router(name="start")
@@ -70,16 +70,16 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
 
     ref_count = int(fresh_user.referral_count if fresh_user else db_user.referral_count or 0)
     text = (
-        "🤝 <b>REFERAL VA GURUH MUKOFOTI</b>\n\n"
+        f"{header('👥 <b>DO‘STLAR VA MUKOFOTLAR</b>')}\n"
         f"👥 Taklif qilgan do‘stlaringiz: <b>{ref_count}</b> ta\n\n"
-        "🎁 <b>Do‘st taklif qilish mukofoti:</b>\n"
-        f"• Sizga: <b>+{fmt_coins(ref_cfg['inviter_coins'])} 🪙</b>\n"
-        f"• Yangi do‘stingizga: <b>+{fmt_coins(ref_cfg['invitee_coins'])} 🪙</b>\n"
-        "<i>(Faqat botga birinchi marta kirgan do‘stlaringiz uchun ishlaydi!)</i>\n\n"
-        "🏰 <b>Botni guruhga qo‘shish mukofoti:</b>\n"
-        f"• <b>+{fmt_coins(grp_coins)} 🪙</b> + 🟣 <b>1 ta eksklyuziv Epic karta</b>!\n"
-        "<i>(Bu karta boshqa guruhlarga tashlanmagan bo‘ladi va sizga maxsus beriladi!)</i>\n\n"
-        f"🔗 <b>Sizning referal havolangiz:</b>\n<code>{esc(ref_link)}</code>"
+        "🎁 <b>Do‘st taklif qilsangiz</b>\n"
+        f"• Siz: <b>+{fmt_coins(ref_cfg['inviter_coins'])}</b> 🪙\n"
+        f"• Do‘stingiz: <b>+{fmt_coins(ref_cfg['invitee_coins'])}</b> 🪙\n"
+        "<i>(Faqat botga birinchi marta kirgan do‘stlar uchun)</i>\n\n"
+        "🏰 <b>Botni guruhga qo‘shsangiz</b>\n"
+        f"• <b>+{fmt_coins(grp_coins)}</b> 🪙 + 🟣 eksklyuziv <b>Epic karta</b>\n"
+        "<i>(Bu karta boshqa guruhlarga tashlanmaydi, faqat sizga beriladi)</i>\n\n"
+        f"🔗 <b>Sizning havolangiz</b> (bosib nusxalang):\n<code>{esc(ref_link)}</code>"
     )
     builder = InlineKeyboardBuilder()
     if bot_username:
@@ -87,7 +87,7 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
             "🎴 Anime Card Collection V2 botiga qo‘shiling! Noyob kartalar yig‘ing va bonus coin oling:"
         )
         share_url = f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={share_text}"
-        builder.row(InlineKeyboardButton(text="📤 DO‘STLARGA ULASHISH", url=share_url))
+        builder.row(InlineKeyboardButton(text="📤 DO‘STLARGA YUBORISH", url=share_url))
         builder.row(
             InlineKeyboardButton(
                 text="➕ BOTNI GURUHGA QO‘SHISH",

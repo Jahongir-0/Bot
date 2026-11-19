@@ -18,7 +18,7 @@ from models.user import User
 from services.search_service import SearchService
 from utils.callback_data import NavCb, SearchCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
-from utils.formatting import esc, event_tag, fmt_coins, format_card_block
+from utils.formatting import header, esc, event_tag, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
 router = Router(name="search")
@@ -55,7 +55,7 @@ async def _render_results(
             )
 
     if total > 0:
-        lines = [f"🔍 <b>GLOBAL QIDIRUV NATIJALARI</b> (Jami: {total})\n"]
+        lines = [header("🔍 <b>QIDIRUV NATIJALARI</b>"), f"📌 Topildi: <b>{total}</b> ta\n"]
         for item in items:
             meta = get_rarity_meta(item.card.rarity)
             status_line = (
@@ -66,7 +66,7 @@ async def _render_results(
             lines.append(
                 f"🎴 {event_tag(item.card)}<b>{esc(item.card.character_name)}</b>\n"
                 f"📺 {esc(item.card.anime_name)} · {meta.emoji} {esc(item.card.rarity)}\n"
-                f"👤 Owner: {esc(item.owner.display_name)} | {status_line}\n"
+                f"👤 Egasi: {esc(item.owner.display_name)} · {status_line}\n"
             )
         await edit_or_answer(
             target,
@@ -109,7 +109,7 @@ async def _render_results(
         )
         return
 
-    text = f"🔍 <b>GLOBAL QIDIRUV</b>\n\nSo‘rov: <code>{esc(query or mode)}</code>\n📭 Hech qanday karta topilmadi."
+    text = f"{header('🔍 <b>QIDIRUV</b>')}\nSo‘rov: <code>{esc(query or mode)}</code>\n📭 Hech qanday karta topilmadi.\n\n💡 Ismni qisqartirib yoki boshqacha yozib ko‘ring."
     await edit_or_answer(
         target,
         text,
@@ -135,8 +135,9 @@ async def cmd_search(message: Message, state: FSMContext) -> None:
         await _render_results(message, message.from_user.id, "any", q, 1)
         return
     await message.answer(
-        "🔍 <b>GLOBAL KARTA QIDIRUVI</b>\n\n"
-        "Barcha foydalanuvchilar kartalari va umumiy katalogdan qidiring:",
+        f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\n"
+        "Hamma foydalanuvchilar kartalari va umumiy katalog bo‘yicha qidiring.\n\n"
+        "💡 Tez qidirish: <code>/search Gojo</code>",
         reply_markup=search_menu_kb(message.from_user.id),
     )
 
@@ -147,7 +148,7 @@ async def cb_search_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await edit_or_answer(
         callback,
-        "🔍 <b>GLOBAL KARTA QIDIRUVI</b>\n\nQidiruv turini tanlang:",
+        f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\nQanday qidiramiz?",
         reply_markup=search_menu_kb(callback.from_user.id),
     )
 
@@ -161,7 +162,7 @@ async def cb_search_mode(
     if callback_data.mode == "rarity":
         await edit_or_answer(
             callback,
-            "⭐ <b>Rarity bo‘yicha qidirish:</b>",
+            f"{header('⭐ <b>RANK BO‘YICHA QIDIRUV</b>')}\nRankni tanlang:",
             reply_markup=search_rarity_kb(callback.from_user.id),
         )
         return

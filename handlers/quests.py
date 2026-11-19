@@ -7,10 +7,16 @@ from database.session import get_session
 from models.user import User
 from services.quest_service import QuestService
 from utils.callback_data import NavCb, QuestCb
-from utils.formatting import esc, fmt_coins
+from utils.formatting import esc, fmt_coins, header
 from utils.tg_helpers import edit_or_answer
 
 router = Router(name="quests")
+
+
+def _bar(cur: int, target: int, width: int = 8) -> str:
+    target = max(1, target)
+    filled = min(width, int(cur / target * width))
+    return "▰" * filled + "▱" * (width - filled)
 
 
 async def _show_quests(target, owner_id: int, db_user: User) -> None:
@@ -18,19 +24,23 @@ async def _show_quests(target, owner_id: int, db_user: User) -> None:
         fresh = await session.get(User, db_user.id)
         items = await QuestService.get_user_quests(session, fresh or db_user)
 
-    claimable_coins = sum(q.reward for q in items if q.completed and not q.claimed)
-    lines = ["📋 <b>VAZIFALAR VA MUKOFOTLAR</b>\n"]
-    for q in items:
-        if q.claimed:
-            st = "✅ Olingan"
-        elif q.completed:
-            st = f"🎁 Tayyor! (+{fmt_coins(q.reward)} 🪙)"
-        else:
-            st = f"⏳ {q.current}/{q.target} · Mukofot: {fmt_coins(q.reward)} 🪙"
-        lines.append(f"<b>{esc(q.title)}</b>\n<i>{esc(q.desc)}</i>\n{st}\n")
+    ready = [q for q in items if q.completed and not q.claimed]
+    todo = [q for q in items if not q.completed]
+    done = [q for q in items if q.claimed]
+    claimable_coins = sum(q.reward for q in ready)
 
-    if claimable_coins > 0:
-        lines.append(f"🪙 Olishga tayyor jami mukofot: <b>{fmt_coins(claimable_coins)} coins</b>!")
+    lines = [header("📋 <b>VAZIFALAR</b>"), f"✅ Bajarilgan: <b>{len(done)}</b> / {len(items)}"]
+    if ready:
+        lines += ["", "🎁 <b>Mukofotni olishga tayyor</b>"]
+        lines += [f"• {esc(q.title)} — <b>+{fmt_coins(q.reward)} 🪙</b>" for q in ready]
+    if todo:
+        lines += ["", "⏳ <b>Jarayonda</b>"]
+        for q in todo:
+            lines.append(f"{esc(q.title)}\n<code>{_bar(q.current, q.target)}</code> {q.current}/{q.target} · 🪙 {fmt_coins(q.reward)}")
+            lines.append(f"<i>{esc(q.desc)}</i>")
+    if done:
+        lines += ["", "✅ <b>Tugatilgan</b>"]
+        lines += [f"• {esc(q.title)}" for q in done]
 
     builder = InlineKeyboardBuilder()
     if claimable_coins > 0:
@@ -41,7 +51,7 @@ async def _show_quests(target, owner_id: int, db_user: User) -> None:
             )
         )
     builder.row(
-        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=NavCb(owner_id=owner_id, target="profile").pack()),
+        InlineKeyboardButton(text="⬅️ PROFIL", callback_data=NavCb(owner_id=owner_id, target="profile").pack()),
         InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
     await edit_or_answer(target, "\n".join(lines), reply_markup=builder.as_markup())

@@ -14,7 +14,7 @@ from services.event_service import EventService, is_event_payload
 from services.payment_service import PaymentService
 from services.settings_service import SettingsService
 from utils.callback_data import NavCb, StarsCb
-from utils.formatting import esc, fmt_coins
+from utils.formatting import esc, fmt_coins, header
 from utils.tg_helpers import edit_or_answer
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ router = Router(name="stars")
 @router.message(Command("stars"))
 @router.callback_query(NavCb.filter(F.target == "stars"))
 @router.callback_query(StarsCb.filter(F.action == "shop"))
-async def cb_stars_shop(target: Message | CallbackQuery) -> None:
+async def cb_stars_shop(target: Message | CallbackQuery, db_user: User) -> None:
     if not get_settings().enable_telegram_stars:
         if isinstance(target, CallbackQuery):
             await target.answer("Telegram Stars do‘koni vaqtincha o‘chirilgan.", show_alert=True)
@@ -35,14 +35,17 @@ async def cb_stars_shop(target: Message | CallbackQuery) -> None:
     async with get_session() as session:
         packages = await SettingsService.get_stars_packages(session)
 
+    head = header("⭐ <b>STARS DO‘KONI</b>")
     if packages:
         text = (
-            "⭐ <b>TELEGRAM STARS COIN DO‘KONI</b>\n\n"
-            "Telegram Stars orqali rasmiy va xavfsiz tarzda coin sotib oling.\n"
-            "👇 Kerakli paketni tanlang:"
+            f"{head}\n"
+            f"🪙 Hisobingiz: <b>{fmt_coins(db_user.coins)}</b> coin\n\n"
+            "Telegram Stars bilan rasmiy va xavfsiz tarzda coin sotib oling.\n"
+            "Sotib olingan coin shu zahoti hisobingizga tushadi.\n\n"
+            "👇 Paketni tanlang:"
         )
     else:
-        text = "⭐ <b>TELEGRAM STARS COIN DO‘KONI</b>\n\n📭 Hozircha coin paketlari mavjud emas."
+        text = f"{head}\n📭 Hozircha coin paketlari mavjud emas."
     owner_id = target.from_user.id
     await edit_or_answer(target, text, reply_markup=stars_shop_kb(owner_id, packages))
 

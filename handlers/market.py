@@ -17,7 +17,8 @@ from services.market_service import MarketService
 from services.user_service import InsufficientCoinsError
 from utils.callback_data import MarketCb, NavCb
 from utils.constants import PAGE_SIZE
-from utils.formatting import esc, fmt_coins, format_card_block
+from utils.constants import get_rarity_meta
+from utils.formatting import LINE, header, esc, fmt_coins, format_card_block
 from utils.tg_helpers import edit_or_answer
 
 logger = logging.getLogger(__name__)
@@ -33,16 +34,18 @@ async def _show_market(target, owner_id: int, db_user: User, page: int = 1, my_o
             seller_id=db_user.id if my_only else None,
         )
 
-    title = "📦 <b>MENING SOTUVDAGI KARTALARIM</b>" if my_only else "🛒 <b>GLOBAL KARTA MARKETI</b>"
+    title = header("📦 <b>MENING E’LONLARIM</b>" if my_only else "🛒 <b>BOZOR</b>")
     if not listings:
-        text = f"{title}\n\n📭 Hozircha faol e'lonlar yo‘q."
+        hint = "Kartani sotuvga qo‘yish uchun: 🎴 Kartalarim → kartani tanlang → «Sotish»." if my_only else "Hozircha sotuvda karta yo‘q. Kartangizni birinchi bo‘lib qo‘ying!"
+        text = f"{title}\n📭 E’lonlar yo‘q.\n\n💡 {hint}"
     else:
-        lines = [f"{title} (Jami: {total})\n"]
+        lines = [title, f"📌 Jami e’lonlar: <b>{total}</b>\n"]
         for item in listings:
-            lines.append(
-                f"• <b>[#{item.listing.id}] {esc(item.card.character_name)}</b> ({esc(item.card.rarity)}) — "
-                f"<b>{fmt_coins(item.listing.price)} 🪙</b> | 👤 {esc(item.seller.display_name)}"
-            )
+            meta = get_rarity_meta(item.card.rarity)
+            lines.append(f"{meta.emoji} <b>{esc(item.card.character_name)}</b>")
+            seller = "" if my_only else f" · 👤 {esc(item.seller.display_name)}"
+            lines.append(f"      💰 {fmt_coins(item.listing.price)} 🪙{seller}")
+        lines.append("\n👇 Kartani tanlang:")
         text = "\n".join(lines)
 
     await edit_or_answer(
@@ -167,9 +170,11 @@ async def cb_listing_view(callback: CallbackQuery, callback_data: MarketCb, db_u
         return
 
     text = (
-        f"{format_card_block(detail.card)}\n\n"
-        f"👤 <b>Sotuvchi:</b> {esc(detail.seller.display_name)}\n"
-        f"💰 <b>Price:</b> <b>{fmt_coins(detail.listing.price)} coins</b>"
+        f"{header('🛒 <b>BOZOR</b>')}\n"
+        f"{format_card_block(detail.card)}\n"
+        f"{LINE}\n"
+        f"👤 Sotuvchi: <b>{esc(detail.seller.display_name)}</b>\n"
+        f"💰 Narxi: <b>{fmt_coins(detail.listing.price)}</b> 🪙"
     )
     kb = listing_detail_kb(
         owner_id=callback.from_user.id,

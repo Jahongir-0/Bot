@@ -40,10 +40,11 @@ from services.gameplay_service import GameplayService
 from services.user_service import UserService
 from utils.callback_data import AchCb, AucCb, GameCb, NavCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
 from utils.constants import PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
-from utils.formatting import esc, fmt_coins, format_card_block
+from utils.formatting import header, esc, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_admin_user, send_card_message
 
 logger = logging.getLogger(__name__)
+LINE_SEP = "━━━━━━━━━━━━━━━"
 router = Router(name="v2_features")
 
 
@@ -309,17 +310,16 @@ async def _show_auctions(target, owner_id: int) -> None:
     if not items:
         await edit_or_answer(
             target,
-            "🔨 <b>JONLI AUKSIONLAR</b>\n\n📭 Hozircha faol auksionlar yo‘q.",
+            f"{header('🔨 <b>AUKSION</b>')}\n📭 Hozircha faol auksion yo‘q.\n\n💡 Yangi auksion boshlanganda xabar beramiz.",
             reply_markup=auctions_list_kb(owner_id, []),
         )
         return
-    lines = [f"🔨 <b>FAOL AUKSIONLAR</b> ({total} ta)\n"]
+    lines = [header("🔨 <b>AUKSION</b>"), f"🟢 Faol auksionlar: <b>{total}</b> ta\n"]
     for auc, card in items:
         meta = get_rarity_meta(card.rarity)
-        lines.append(
-            f"• <b>#{auc.id}</b> {meta.emoji} {esc(card.character_name)} — "
-            f"<b>{fmt_coins(auc.current_price)} 🪙</b> ({auc.bid_count} stavka)"
-        )
+        lines.append(f"{meta.emoji} <b>{esc(card.character_name)}</b>")
+        lines.append(f"      💰 {fmt_coins(auc.current_price)} 🪙 · 📈 {auc.bid_count} stavka")
+    lines.append("\n👇 Auksionni tanlang:")
     await edit_or_answer(target, "\n".join(lines), reply_markup=auctions_list_kb(owner_id, items))
 
 
@@ -343,12 +343,13 @@ async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb) -> No
     auc, card, leader = det
     leader_name = esc(leader.display_name) if leader else "Hali yo‘q"
     txt = (
-        f"🔨 <b>AUKSION #{auc.id}</b>\n\n"
-        f"{format_card_block(card)}\n\n"
+        f"{header(f'🔨 <b>AUKSION #{auc.id}</b>')}\n"
+        f"{format_card_block(card)}\n"
+        f"{LINE_SEP}\n"
         f"💰 Joriy narx: <b>{fmt_coins(auc.current_price)} 🪙</b>\n"
-        f"📈 Eng kam qadam: +{fmt_coins(auc.min_step)} 🪙\n"
-        f"👑 Lider: <b>{leader_name}</b> ({auc.bid_count} stavka)\n"
-        f"⏳ Tugash: <b>{ensure_utc(auc.ends_at):%d.%m.%Y %H:%M} UTC</b>"
+        f"📈 Eng kam qadam: <b>+{fmt_coins(auc.min_step)}</b> 🪙\n"
+        f"👑 Yetakchi: <b>{leader_name}</b> · {auc.bid_count} stavka\n"
+        f"⏳ Tugaydi: <b>{ensure_utc(auc.ends_at):%d.%m.%Y %H:%M} UTC</b>"
     )
     if callback.message:
         await send_card_message(callback.bot, callback.message.chat.id, card, txt, auction_detail_kb(callback.from_user.id, auc))
@@ -403,9 +404,10 @@ async def _show_wishlist(target, owner_id: int, db_user: User) -> None:
     async with get_session() as session:
         cards = await AuctionWishlistService.get_user_wishlist(session, db_user.id)
     txt = (
-        f"💖 <b>WISHLIST</b> ({len(cards)} ta karta)\n\n"
-        "Orzu qilgan kartalaringiz bozor yoki auksionga chiqsa sizga darhol xabar beramiz!\n"
-        "<i>Qidiruvdan karta ochib Wishlistga qo‘shishingiz mumkin.</i>"
+        f"{header('💖 <b>ISTAKLAR RO‘YXATI</b>')}\n"
+        f"📌 Ro‘yxatda: <b>{len(cards)}</b> ta karta\n\n"
+        "Kerakli kartani qo‘shib qo‘ying: u guruhga tushsa, bozorga yoki auksionga chiqsa — sizga darhol xabar beramiz!\n\n"
+        "💡 <i>Karta qo‘shish: 🔍 Qidiruvdan kartani oching va «💖 Istaklarga» tugmasini bosing.</i>"
     )
     await edit_or_answer(target, txt, reply_markup=wishlist_kb(owner_id, cards))
 
@@ -440,7 +442,7 @@ async def cb_wishlist_del(callback: CallbackQuery, callback_data: WishCb, db_use
 async def cb_wishlist_top(callback: CallbackQuery) -> None:
     async with get_session() as session:
         top = await AuctionWishlistService.get_most_wanted(session, limit=10)
-    lines = ["🔥 <b>ENG KO‘P IZLANAYOTGAN KARTALAR (MOST WANTED)</b>\n"]
+    lines = [header("🔥 <b>ENG KO‘P ISTALGAN KARTALAR</b>")]
     for idx, (c, cnt) in enumerate(top, start=1):
         meta = get_rarity_meta(c.rarity)
         lines.append(f"{idx}. {meta.emoji} <b>{esc(c.character_name)}</b> ({esc(c.anime_name)}) — 💖 {cnt} ta")
@@ -462,13 +464,14 @@ async def _show_vip(target, owner_id: int, db_user: User) -> None:
         else "▫️ Hozircha oddiy status"
     )
     txt = (
-        "💎 <b>VIP OBUNA VA IMTIYOZLAR</b>\n\n"
-        f"Holat: {active_str}\n\n"
-        "✨ <b>VIP imtiyozlari:</b>\n"
-        "• 🎁 Daily bonus 1.5x – 3x ko‘proq!\n"
-        "• 🚫 Reklamalar ko‘rsatilmaydi\n"
-        "• 🔓 Gold/Diamond VIP uchun majburiy kanal bypass\n"
-        "• 💎 Profilda maxsus VIP nishoni"
+        f"{header('💎 <b>VIP OBUNA</b>')}\n"
+        f"📌 Holat: {active_str}\n\n"
+        "✨ <b>VIP imtiyozlari</b>\n"
+        "🎁 Kunlik bonus 1.5x – 3x ko‘proq\n"
+        "🚫 Reklamalarsiz\n"
+        "🔓 Majburiy obunalardan ozod (Gold/Diamond)\n"
+        "🖼 Maxsus VIP ramkalar va 💎 nishon\n\n"
+        "👇 Tarifni tanlang (coin yoki Stars bilan):"
     )
     await edit_or_answer(target, txt, reply_markup=vip_shop_kb(owner_id, cfg))
 
@@ -624,12 +627,13 @@ async def cb_season_view(callback: CallbackQuery) -> None:
 async def _show_notifs(target, owner_id: int, db_user: User) -> None:
     async with get_session() as session:
         notifs, total = await CommunityService.list_notifications(session, db_user.id, page=1, page_size=12)
-    lines = [f"🔔 <b>XABARLAR MARKAZI</b> ({total} ta)\n"]
+    unread = sum(1 for n in notifs if not n.is_read)
+    lines = [header("🔔 <b>XABARLAR</b>"), f"📬 Jami: <b>{total}</b> · 🔵 O‘qilmagan: <b>{unread}</b>\n"]
     for n in notifs:
         dot = "🔵" if not n.is_read else "⚪"
         lines.append(f"{dot} <b>{esc(n.title)}</b>\n{esc(n.body)}\n")
     if not notifs:
-        lines.append("📭 Yangi xabarlar yo‘q.")
+        lines.append("📭 Hozircha xabarlar yo‘q.")
     await edit_or_answer(target, "\n".join(lines), reply_markup=notifications_kb(owner_id))
 
 
@@ -660,7 +664,7 @@ async def cmd_support(message: Message, db_user: User) -> None:
     async with get_session() as session:
         tickets = await CommunityService.list_tickets(session, user_id=db_user.id)
     await message.answer(
-        "💬 <b>YORDAM VA MUROJAATLAR</b>\n\nSavol, taklif yoki shikoyatingizni yuboring:",
+        f"{header('💬 <b>ALOQA</b>')}\nSavol, taklif yoki shikoyatingizni adminga yuboring. Javob shu yerda va xabar ko‘rinishida keladi.\n\n👇 Yangi murojaat yozing yoki oldingisini oching:",
         reply_markup=support_menu_kb(message.from_user.id, tickets),
     )
 
@@ -671,7 +675,7 @@ async def cb_support_menu(callback: CallbackQuery, db_user: User) -> None:
         tickets = await CommunityService.list_tickets(session, user_id=db_user.id)
     await edit_or_answer(
         callback,
-        "💬 <b>YORDAM VA MUROJAATLAR</b>\n\nMurojaatlaringiz ro‘yxati:",
+        f"{header('💬 <b>ALOQA</b>')}\nSavol, taklif yoki shikoyatingizni adminga yuboring. Javob shu yerda va xabar ko‘rinishida keladi.\n\n👇 Yangi murojaat yozing yoki oldingisini oching:",
         reply_markup=support_menu_kb(callback.from_user.id, tickets),
     )
 
@@ -706,7 +710,7 @@ async def fsm_sup_body(message: Message, state: FSMContext, db_user: User) -> No
             session, db_user.id, subject, (message.text or "").strip(), message.from_user.id
         )
         await session.commit()
-    await message.answer(f"✅ Murojaat <b>#{t.id}</b> adminga yuborildi! Javob kelganda xabar beramiz.")
+    await message.answer(f"✅ Murojaatingiz qabul qilindi (<b>#{t.id}</b>).\nAdmin javob berishi bilan sizga xabar keladi.")
 
 
 @router.callback_query(SupCb.filter(F.act == "view"))
@@ -717,7 +721,8 @@ async def cb_support_view(callback: CallbackQuery, callback_data: SupCb, db_user
         await callback.answer("Murojaat topilmadi.", show_alert=True)
         return
     t, msgs, _ = res
-    lines = [f"💬 <b>Murojaat #{t.id}: {esc(t.subject)}</b>\nHolat: <b>{t.status}</b>\n"]
+    status_label = {"open": "🟡 Ko‘rib chiqilmoqda", "answered": "🟢 Javob berildi", "closed": "🔴 Yopilgan"}.get(t.status, t.status)
+    lines = [header(f"💬 <b>Murojaat #{t.id}</b>"), f"📝 {esc(t.subject)}\n📌 Holat: <b>{status_label}</b>\n"]
     for m in msgs[-10:]:
         who = "👤 Siz" if m.sender_type == "user" else "🛡 Admin"
         lines.append(f"<b>{who}:</b> {esc(m.body)}")
@@ -751,7 +756,7 @@ async def cmd_trade(message: Message, state: FSMContext, db_user: User) -> None:
     await state.clear()
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("🤝 <b>KARTA ALMASHISH (/trade)</b>\n\nFoydalanish: <code>/trade @username</code>")
+        await message.answer("🤝 <b>KARTA ALMASHISH</b>\n\nFoydalanish: <code>/trade @username</code>\nMasalan: <code>/trade @doston</code>")
         return
     async with get_session() as session:
         partner = await UserService.find_user(session, parts[1].strip())
@@ -788,9 +793,14 @@ async def cmd_trade(message: Message, state: FSMContext, db_user: User) -> None:
 async def cb_trade_help(callback: CallbackQuery) -> None:
     await edit_or_answer(
         callback,
-        "🤝 <b>KARTA ALMASHUVI (/trade)</b>\n\n"
-        "Ikki tomonlama xavfsiz karta-karta almashish uchun:\n"
-        "<code>/trade @username</code> buyrug‘ini yozing!",
+        f"{header('🤝 <b>KARTA ALMASHISH</b>')}\n"
+        "Do‘stingiz bilan kartani karta bilan <b>xavfsiz</b> almashing — ikki tomon ham rozi bo‘lmaguncha hech narsa o‘tmaydi.\n\n"
+        "<b>Qanday?</b>\n"
+        "1️⃣ <code>/trade @username</code> deb yozing\n"
+        "2️⃣ O‘z kartangizni tanlang\n"
+        "3️⃣ Do‘stingiz o‘z kartasini tanlaydi\n"
+        "4️⃣ Ikkalangiz tasdiqlaysiz — almashuv bo‘ladi ✅\n\n"
+        "🎁 Bepul sovg‘a uchun: <code>/give @username</code>",
         reply_markup=back_home_kb(callback.from_user.id, "home"),
     )
 

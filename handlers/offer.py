@@ -13,7 +13,7 @@ from services.offer_service import OfferService
 from services.search_service import SearchService
 from utils.callback_data import OfferCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE
-from utils.formatting import esc, fmt_coins
+from utils.formatting import header, esc, fmt_coins
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
 
 logger = logging.getLogger(__name__)
@@ -122,9 +122,9 @@ async def cb_incoming_offers(callback: CallbackQuery, db_user: User) -> None:
         await session.commit()
 
     if not offers:
-        text = "📩 <b>KELGAN TAKLIFLAR</b>\n\n📭 Hozircha faol takliflar yo‘q."
+        text = f"{header('📩 <b>KELGAN TAKLIFLAR</b>')}\n📭 Hozircha faol takliflar yo‘q."
     else:
-        lines = [f"📩 <b>KELGAN TAKLIFLAR</b> ({len(offers)} ta)\n"]
+        lines = [header("📩 <b>KELGAN TAKLIFLAR</b>"), f"📌 Jami: <b>{len(offers)}</b> ta\n"]
         for off, card, buyer in offers[:8]:
             lines.append(
                 f"• <b>{esc(card.character_name)}</b> — <b>{fmt_coins(off.amount)} 🪙</b> | 👤 {esc(buyer.display_name)}"

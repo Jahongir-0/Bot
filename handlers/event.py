@@ -28,7 +28,7 @@ async def _send_active_events(bot: Bot, chat_id: int, owner_tg_id: int) -> None:
     if not events:
         await bot.send_message(
             chat_id,
-            "🎯 <b>EVENT</b>\n\nHozircha faol event yo‘q. Yangi limitli event boshlanganda guruhlarga e’lon qilinadi!",
+            "🎯 <b>EVENT</b>\n━━━━━━━━━━━━━━━\n📭 Hozircha faol event yo‘q.\n\n🔔 Yangi limitli event boshlanganda guruhlarga va sizga e’lon qilinadi!",
             reply_markup=event_list_footer_kb(owner_tg_id),
         )
         return
@@ -38,7 +38,7 @@ async def _send_active_events(bot: Bot, chat_id: int, owner_tg_id: int) -> None:
         await send_card_message(bot, chat_id, card, format_event_message(card, event, tz, "active"), event_buy_kb(event))
     await bot.send_message(
         chat_id,
-        "☝️ Faol limitli eventlar. Kartani olish uchun tugmani bosing!",
+        "☝️ Faol limitli eventlar. Kartani olish uchun tugmani bosing. Har bir odamga 1 ta nusxa!",
         reply_markup=event_list_footer_kb(owner_tg_id),
     )
 
