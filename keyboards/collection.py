@@ -226,7 +226,7 @@ def character_variants_kb(
         meta = get_rarity_meta(v.card.rarity)
         builder.row(
             InlineKeyboardButton(
-                text=f"{event_tag(v.card)}{meta.emoji} {v.card.rarity} · {v.card.card_code} × {v.quantity}",
+                text=f"{event_tag(v.card)}{meta.emoji} {meta.name} · {v.card.card_code} × {v.quantity}",
                 callback_data=CollectionCb(
                     owner_id=owner_id,
                     action="card_detail",
@@ -315,7 +315,7 @@ def card_detail_kb(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     fav_text = "💔 Sevimlidan olish" if is_favorite else "❤️ Sevimliga qo‘shish"
-    show_text = "🖼 Showcasedan olish" if is_showcased else "🖼 Showcase"
+    show_text = "🖼 Vitrinadan olish" if is_showcased else "🖼 Vitrinaga qo‘yish"
     builder.row(
         InlineKeyboardButton(
             text=fav_text,
@@ -332,7 +332,7 @@ def card_detail_kb(
     )
     row2 = [
         InlineKeyboardButton(
-            text="📖 ABOUT",
+            text="📖 Batafsil",
             callback_data=CollectionCb(
                 owner_id=owner_id, action="about", filter_val="d", page=1, item_id=user_card_id
             ).pack(),
@@ -341,7 +341,7 @@ def card_detail_kb(
     if card_id > 0:
         row2.append(
             InlineKeyboardButton(
-                text="💖 WISHLIST",
+                text="💖 Istaklarga",
                 callback_data=WishCb(owner_id=owner_id, act="add", cid=card_id).pack(),
             )
         )

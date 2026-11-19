@@ -10,7 +10,7 @@ from models.user import User
 from services.market_service import ListingView
 from services.search_service import GlobalCardSearchItem
 from utils.callback_data import MarketCb, NavCb, OfferCb, RankingCb, SearchCb, StarsCb, TransferCb, WishCb
-from utils.constants import get_rarity_meta, list_rarities
+from utils.constants import get_rank_name_by_order, get_rarity_meta, list_rarities
 
 
 def market_list_kb(
@@ -130,27 +130,27 @@ def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="🔍 CHARACTER",
+            text="🔍 Personaj ismi",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="character").pack(),
         ),
         InlineKeyboardButton(
-            text="🔍 ANIME",
+            text="📺 Anime / Asar",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="anime").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="⭐ RARITY",
+            text="⭐ Rank bo‘yicha",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="rarity").pack(),
         ),
         InlineKeyboardButton(
-            text="🎴 CARD ID",
+            text="🎴 Karta kodi (ID)",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="card_id").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="🎲 RANDOM CARD",
+            text="🎲 Tasodifiy karta",
             callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
         )
     )
@@ -280,7 +280,7 @@ def search_results_kb(
     else:
         builder.row(
             InlineKeyboardButton(
-                text="🎲 YANA RANDOM",
+                text="🎲 YANA TASODIFIY",
                 callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
             )
         )
@@ -333,7 +333,7 @@ def search_inspect_kb(
         )
     builder.row(
         InlineKeyboardButton(
-            text="💖 WISHLIST",
+            text="💖 ISTAKLARGA QO‘SHISH",
             callback_data=WishCb(owner_id=owner_id, act="add", cid=item.card.id).pack(),
         )
     )
@@ -425,7 +425,7 @@ def search_catalog_results_kb(
     else:
         builder.row(
             InlineKeyboardButton(
-                text="🎲 YANA RANDOM",
+                text="🎲 YANA TASODIFIY",
                 callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
             )
         )
@@ -455,7 +455,7 @@ def search_catalog_inspect_kb(
     if card_id > 0:
         builder.row(
             InlineKeyboardButton(
-                text="💖 WISHLISTGA QO‘SHISH",
+                text="💖 ISTAKLARGA QO‘SHISH",
                 callback_data=WishCb(owner_id=owner_id, act="add", cid=card_id).pack(),
             )
         )
@@ -558,7 +558,11 @@ def ranking_kb(
     builder.row(*main)
     builder.row(_btn("coins", "🪙 Boylik"), _btn("xp", "⚡ Daraja"), _btn("rare", "💎 Noyob"))
     builder.row(_btn("quiz", "🧠 Viktorina"), _btn("games", "🎲 O‘yin"), _btn("trades", "🤝 Savdo"))
-    builder.row(_btn("refs", "👥 Do‘stlar"), _btn("mythic", "🔴 Mythic"), _btn("divine", "✨ Divine"))
+    r5_name = get_rank_name_by_order(5, "Mythic")
+    r6_name = get_rank_name_by_order(6, "Divine")
+    m5 = get_rarity_meta(r5_name)
+    m6 = get_rarity_meta(r6_name)
+    builder.row(_btn("refs", "👥 Do‘stlar"), _btn("mythic", f"{m5.emoji} {r5_name}"), _btn("divine", f"{m6.emoji} {r6_name}"))
     if current_scope in EXTENDED_RANK_SCOPES:
         builder.row(
             *[

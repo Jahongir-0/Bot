@@ -24,7 +24,7 @@ def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
 def main_menu_kb(owner_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
     """BOSH MENU: faqat umumiy bo'limlar. Shaxsiy narsalar (kartalar, bonus, VIP, do'stlar...) PROFILda."""
     b = InlineKeyboardBuilder()
-    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, "🎁 PAKETLAR", "packs"))
+    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, "🎁 PAKET (1/kun)", "packs"))
     b.row(
         _nav(owner_id, "🛒 BOZOR", "market"),
         InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
@@ -53,7 +53,8 @@ GROUP_MENUS = {
         "🃏 <b>Omadli karta</b> — kunlik bepul omad sovg‘asi\n"
         "🧠 <b>Viktorina</b> — savollarga birinchi javob bering\n"
         "🎯 <b>Event</b> — cheklangan maxsus kartalar\n"
-        "📋 <b>Vazifalar</b> — bajaring, mukofot oling"
+        "📋 <b>Vazifalar</b> — bajaring, mukofot oling\n"
+        "🎁 <b>Paketlar (/pack)</b> — kuniga 1 marta coin evaziga karta paketi oching"
     ),
 }
 
@@ -65,8 +66,8 @@ def group_menu_kb(owner_id: int, group: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎲 MINI O‘YINLAR", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
             InlineKeyboardButton(text="🧠 VIKTORINA", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
         )
-        b.row(_nav(owner_id, "🎯 EVENT", "event"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
-        b.row(_nav(owner_id, "🎁 KARTA PAKETLARI", "packs"))
+        b.row(_nav(owner_id, "🎯 EVENTLAR", "event"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
+        b.row(_nav(owner_id, "🎁 PAKETLAR (1/kun)", "packs"))
     b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
     return b.as_markup()
 

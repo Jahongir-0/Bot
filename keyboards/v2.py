@@ -23,7 +23,7 @@ from utils.callback_data import (
     VipCb,
     WishCb,
 )
-from utils.constants import ADMIN_PERMISSION_SECTIONS, PACK_CONFIG, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
+from utils.constants import ADMIN_PERMISSION_SECTIONS, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_pack_configs, get_rarity_meta
 
 
 def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboardMarkup:
@@ -54,16 +54,16 @@ def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboar
 def admin_v2_cards_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="➕ Add Card", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="add_menu").pack()),
-        InlineKeyboardButton(text="👁 View Card", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext="sent_group", p=1).pack()),
+        InlineKeyboardButton(text="➕ Karta qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="add_menu").pack()),
+        InlineKeyboardButton(text="👁 Kartalarni ko‘rish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext="sent_group", p=1).pack()),
     )
     b.row(
-        InlineKeyboardButton(text="✏️ Edit Card", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="edit_list", p=1).pack()),
-        InlineKeyboardButton(text="🗑 Delete Card", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="del_list", p=1).pack()),
+        InlineKeyboardButton(text="✏️ Karta tahrirlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="edit_list", p=1).pack()),
+        InlineKeyboardButton(text="🗑 Karta o‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="del_list", p=1).pack()),
     )
     b.row(
-        InlineKeyboardButton(text="🎬 Anime", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext="anime", p=1).pack()),
-        InlineKeyboardButton(text="📖 Manga", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext="manga", p=1).pack()),
+        InlineKeyboardButton(text="🎬 Anime bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext="anime", p=1).pack()),
+        InlineKeyboardButton(text="📖 Manga bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext="manga", p=1).pack()),
     )
     b.row(
         InlineKeyboardButton(text="🔍 Qidirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="search").pack()),
@@ -93,14 +93,14 @@ def admin_v2_add_choice_kb(owner_id: int) -> InlineKeyboardMarkup:
 
 def _view_tabs_rows(builder: InlineKeyboardBuilder, owner_id: int, active_tab: str) -> None:
     tabs = [
-        ("sent_group", "Sent Group"),
-        ("not_sent", "Not Sent"),
+        ("sent_group", "Tushganlar"),
+        ("not_sent", "Tushmaganlar"),
         ("anime", "Anime"),
         ("manga", "Manga"),
         ("movie", "Kino"),
-        ("cartoon", "Cartoon"),
+        ("cartoon", "Multfilm"),
         ("event", "Event"),
-        ("other", "Other"),
+        ("other", "Boshqa"),
         ("all", "Barchasi"),
     ]
     for i in range(0, len(tabs), 3):
@@ -253,27 +253,27 @@ def admin_v2_cards_action_list_kb(
 def admin_v2_card_detail_kb(owner_id: int, card: Card, tab: str = "all", page: int = 1, is_super: bool = False) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="✏️ EDIT", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="edit_pick", tid=card.id).pack()),
-        InlineKeyboardButton(text="🗑 DELETE", callback_data=AdminCb(owner_id=owner_id, section="cards", action="delete_confirm", target_id=card.id).pack()),
+        InlineKeyboardButton(text="✏️ Tahrirlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="edit_pick", tid=card.id).pack()),
+        InlineKeyboardButton(text="🗑 O‘chirish", callback_data=AdminCb(owner_id=owner_id, section="cards", action="delete_confirm", target_id=card.id).pack()),
     )
     b.row(
-        InlineKeyboardButton(text="📖 ABOUT", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="about", tid=card.id).pack()),
-        InlineKeyboardButton(text="🔨 AUCTION", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="new_card", tid=card.id).pack()),
+        InlineKeyboardButton(text="📖 Batafsil", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="about", tid=card.id).pack()),
+        InlineKeyboardButton(text="🔨 Auksion", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="new_card", tid=card.id).pack()),
     )
     if card.dropped_count == 0 and not card.is_event_card and not card.is_deleted:
         b.row(
             InlineKeyboardButton(
-                text="📤 SEND TO GROUP",
+                text="📤 Guruhga tashlash",
                 callback_data=AdminCb(owner_id=owner_id, section="cards", action="drop_pick_grp", target_id=card.id, page=page).pack(),
             )
         )
     b.row(
-        InlineKeyboardButton(text="👤 OWNER", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="owners", tid=card.id).pack()),
-        InlineKeyboardButton(text="📜 HISTORY", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="hist", tid=card.id).pack()),
+        InlineKeyboardButton(text="👤 Egalari", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="owners", tid=card.id).pack()),
+        InlineKeyboardButton(text="📜 Tarixi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="hist", tid=card.id).pack()),
     )
     if card.is_deleted and is_super:
         b.row(
-            InlineKeyboardButton(text="♻️ RESTORE CARD", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="restore", tid=card.id).pack())
+            InlineKeyboardButton(text="♻️ Kartani tiklash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="restore", tid=card.id).pack())
         )
     b.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext=tab, p=page).pack()),
@@ -325,7 +325,7 @@ def admin_rbac_menu_kb(owner_id: int, roles: List[AdminRole], is_super: bool) ->
     b = InlineKeyboardBuilder()
     if is_super:
         b.row(
-            InlineKeyboardButton(text="➕ Add Admin", callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="add_pick", p=1).pack()),
+            InlineKeyboardButton(text="➕ Admin qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="admins", act="add_pick", p=1).pack()),
         )
     for r in roles:
         if not r.is_active:
@@ -570,15 +570,18 @@ def lucky_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def packs_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
+def packs_menu_kb(owner_id: int, can_open: bool = True) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for tier, cfg in PACK_CONFIG.items():
-        b.row(
-            InlineKeyboardButton(
-                text=f"{cfg['emoji']} {cfg['name']} — {int(cfg['price']):,} 🪙",
-                callback_data=PackCb(owner_id=owner_id, act="open", tier=tier).pack(),
+    if can_open:
+        for tier, cfg in get_pack_configs().items():
+            b.row(
+                InlineKeyboardButton(
+                    text=f"{cfg['emoji']} {cfg['name']} — {int(cfg['price']):,} 🪙",
+                    callback_data=PackCb(owner_id=owner_id, act="open", tier=tier).pack(),
+                )
             )
-        )
+    else:
+        b.row(InlineKeyboardButton(text="🎮 Mini o‘yinlarga o‘tish", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
     b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return b.as_markup()
 

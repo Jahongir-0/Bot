@@ -103,11 +103,11 @@ def admin_users_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="👥 View Users (20/sahifa)",
+            text="👥 Foydalanuvchilar (20/sahifa)",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra="all", page=1).pack(),
         ),
         InlineKeyboardButton(
-            text="🔍 Search User",
+            text="🔍 Qidirish",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="search_prompt").pack(),
         ),
     )
@@ -209,11 +209,11 @@ def admin_user_detail_kb(owner_id: int, target_user: User) -> InlineKeyboardMark
     )
     builder.row(
         InlineKeyboardButton(
-            text="➕ Card berish",
+            text="➕ Karta berish",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="give_pick", target_id=target_user.id, page=1).pack(),
         ),
         InlineKeyboardButton(
-            text="➖ Card olish",
+            text="➖ Karta olish",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="rem_pick", target_id=target_user.id, page=1).pack(),
         ),
     )
@@ -467,7 +467,7 @@ def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = F
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="🎁 Daily Bonus",
+            text="🎁 Kunlik bonus",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_menu").pack(),
         ),
         InlineKeyboardButton(
@@ -477,11 +477,11 @@ def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = F
     )
     builder.row(
         InlineKeyboardButton(
-            text="📡 Drop Qoidalari",
+            text="📡 Drop qoidalari",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="drop_rules").pack(),
         ),
         InlineKeyboardButton(
-            text="👋 Welcome Matni",
+            text="👋 Kirish matni",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="welcome_edit").pack(),
         ),
     )
@@ -491,7 +491,7 @@ def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = F
             callback_data=AdmV2Cb(owner_id=owner_id, sec="ranks", act="v").pack(),
         ),
         InlineKeyboardButton(
-            text="🎯 Priority Karta",
+            text="🎯 Navbatdagi karta",
             callback_data=AdminCb(owner_id=owner_id, section="priority", action="view").pack(),
         ),
     )
@@ -505,11 +505,16 @@ def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = F
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="maint_tog").pack(),
         ),
     )
+    mode_labels = {
+        RankingMode.WEIGHTED.value: "⚖️ Rank vazni bo‘yicha",
+        RankingMode.UNIQUE_FIRST.value: "✨ Noyoblar birinchi",
+        RankingMode.TOTAL_CARDS.value: "🎴 Jami kartalar",
+    }
     for mode in (RankingMode.WEIGHTED.value, RankingMode.UNIQUE_FIRST.value, RankingMode.TOTAL_CARDS.value):
         mark = "✅ " if mode == ranking_mode else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{mark}🏆 Ranking: {mode}",
+                text=f"{mark}🏆 Reyting: {mode_labels.get(mode, mode)}",
                 callback_data=AdminCb(owner_id=owner_id, section="settings", action="set_rank", extra=mode).pack(),
             )
         )
