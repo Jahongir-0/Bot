@@ -14,6 +14,7 @@ from services.community_service import CommunityService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import SupCb
+from utils.constants import DEFAULT_RANK_DEFINITIONS, sync_runtime_ranks
 from utils.tg_helpers import is_super_admin, schedule_delete
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
             is_adm, admin_perms = await CommunityService.get_admin_permissions(
                 session, tg_user.id, tg_user.username
             )
+            ranks_raw = await SettingsService.get_value(session, "rank_definitions", DEFAULT_RANK_DEFINITIONS)
+            if isinstance(ranks_raw, list) and ranks_raw:
+                sync_runtime_ranks(ranks_raw)
             maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
 
             # Forced subscription faqat shaxsiy chatda (support/start/payment bundan mustasno)
