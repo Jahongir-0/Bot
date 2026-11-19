@@ -103,11 +103,11 @@ def admin_users_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="👥 Foydalanuvchilar (20/sahifa)",
+            text="👥 View Users (20/sahifa)",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra="all", page=1).pack(),
         ),
         InlineKeyboardButton(
-            text="🔍 Qidirish",
+            text="🔍 Search User",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="search_prompt").pack(),
         ),
     )
@@ -209,11 +209,11 @@ def admin_user_detail_kb(owner_id: int, target_user: User) -> InlineKeyboardMark
     )
     builder.row(
         InlineKeyboardButton(
-            text="➕ Karta berish",
+            text="➕ Card berish",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="give_pick", target_id=target_user.id, page=1).pack(),
         ),
         InlineKeyboardButton(
-            text="➖ Karta olish",
+            text="➖ Card olish",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="rem_pick", target_id=target_user.id, page=1).pack(),
         ),
     )
@@ -223,28 +223,27 @@ def admin_user_detail_kb(owner_id: int, target_user: User) -> InlineKeyboardMark
             callback_data=AdminCb(owner_id=owner_id, section="users", action="msg_prompt", target_id=target_user.id).pack(),
         ),
         InlineKeyboardButton(
-            text="⏱ Vaqtli ban",
-            callback_data=AdminCb(owner_id=owner_id, section="ban", action="temp_menu", target_id=target_user.id).pack(),
-        ),
-    )
-    builder.row(
-        InlineKeyboardButton(
             text="💎 VIP berish / olish",
             callback_data=AdminCb(owner_id=owner_id, section="users", action="vip_menu", target_id=target_user.id).pack(),
         ),
     )
-    ban_btn = (
+    builder.row(
         InlineKeyboardButton(
-            text="🔓 Bandan chiqarish",
-            callback_data=AdminCb(owner_id=owner_id, section="ban", action="unban", target_id=target_user.id).pack(),
-        )
-        if target_user.is_banned
-        else InlineKeyboardButton(
-            text="🚫 Ban qilish",
-            callback_data=AdminCb(owner_id=owner_id, section="ban", action="ban", target_id=target_user.id).pack(),
-        )
+            text="⏱ Vaqtli ban",
+            callback_data=AdminCb(owner_id=owner_id, section="ban", action="temp_menu", target_id=target_user.id).pack(),
+        ),
+        (
+            InlineKeyboardButton(
+                text="🔓 Bandan chiqarish",
+                callback_data=AdminCb(owner_id=owner_id, section="ban", action="unban", target_id=target_user.id).pack(),
+            )
+            if target_user.is_banned
+            else InlineKeyboardButton(
+                text="🚫 Ban qilish",
+                callback_data=AdminCb(owner_id=owner_id, section="ban", action="ban", target_id=target_user.id).pack(),
+            )
+        ),
     )
-    builder.row(ban_btn)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ ORQAGA",
@@ -463,31 +462,26 @@ def admin_group_settings_kb(owner_id: int, group: Group) -> InlineKeyboardMarkup
     return builder.as_markup()
 
 
-def admin_settings_kb(
-    owner_id: int,
-    ranking_mode: str,
-    maintenance_on: bool = False,
-    pack_daily_limit: int = 1,
-) -> InlineKeyboardMarkup:
+def admin_settings_kb(owner_id: int, ranking_mode: str, maintenance_on: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=f"🎁 Paket limiti ({pack_daily_limit}/kun)",
-            callback_data=AdminCb(owner_id=owner_id, section="settings", action="pack_limit").pack(),
-        ),
-        InlineKeyboardButton(
-            text="🎁 Kunlik bonus",
+            text="🎁 Daily Bonus",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_menu").pack(),
         ),
-    )
-    builder.row(
         InlineKeyboardButton(
             text="🤝 Referal & Guruh",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="rewards_menu").pack(),
         ),
+    )
+    builder.row(
         InlineKeyboardButton(
-            text="📡 Drop qoidalari",
+            text="📡 Drop Qoidalari",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="drop_rules").pack(),
+        ),
+        InlineKeyboardButton(
+            text="👋 Welcome Matni",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="welcome_edit").pack(),
         ),
     )
     builder.row(
@@ -496,7 +490,7 @@ def admin_settings_kb(
             callback_data=AdmV2Cb(owner_id=owner_id, sec="ranks", act="v").pack(),
         ),
         InlineKeyboardButton(
-            text="🎯 Navbatdagi karta",
+            text="🎯 Priority Karta",
             callback_data=AdminCb(owner_id=owner_id, section="priority", action="view").pack(),
         ),
     )
@@ -506,26 +500,15 @@ def admin_settings_kb(
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_menu").pack(),
         ),
         InlineKeyboardButton(
-            text="👋 Kirish matni",
-            callback_data=AdminCb(owner_id=owner_id, section="settings", action="welcome_edit").pack(),
-        ),
-    )
-    builder.row(
-        InlineKeyboardButton(
             text=("🔴 Texnik rejim: YOQILGAN" if maintenance_on else "🟢 Texnik rejim: O‘CHIQ"),
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="maint_tog").pack(),
         ),
     )
-    mode_labels = {
-        RankingMode.WEIGHTED.value: "⚖️ Rank vazni bo‘yicha",
-        RankingMode.UNIQUE_FIRST.value: "✨ Noyoblar birinchi",
-        RankingMode.TOTAL_CARDS.value: "🎴 Jami kartalar",
-    }
     for mode in (RankingMode.WEIGHTED.value, RankingMode.UNIQUE_FIRST.value, RankingMode.TOTAL_CARDS.value):
         mark = "✅ " if mode == ranking_mode else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{mark}🏆 Reyting: {mode_labels.get(mode, mode)}",
+                text=f"{mark}🏆 Ranking: {mode}",
                 callback_data=AdminCb(owner_id=owner_id, section="settings", action="set_rank", extra=mode).pack(),
             )
         )
