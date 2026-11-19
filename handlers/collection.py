@@ -51,10 +51,12 @@ def _ints(value: str, count: int) -> List[int]:
 
 async def _show_summary(target, owner_id: int, db_user: User) -> None:
     async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
+        fresh = await session.get(User, db_user.id) or db_user
         anime_counts, rarity_counts, favorites = await CollectionService.get_summary(
             session, db_user.id
         )
-    text = format_collection_summary(db_user, anime_counts, rarity_counts, favorites)
+    text = format_collection_summary(fresh, anime_counts, rarity_counts, favorites)
     await edit_or_answer(target, text, reply_markup=collection_summary_kb(owner_id))
 
 

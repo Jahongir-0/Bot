@@ -34,7 +34,7 @@ def _extended_titles() -> dict[str, tuple[str, str]]:
         "trades": ("🤝 ENG FAOL SAVDOGARLAR", "savdo"),
         "auction": ("🔨 AUKSION G‘OLIBLARI", "g‘alaba"),
         "refs": ("👥 ENG KO‘P DO‘ST TAKLIF QILGANLAR", "do‘st"),
-        "rare": ("💎 NOYOB KARTALAR KOLLEKSIONERLARI", "karta"),
+        "rare": ("⭐ YUQORI RANK KARTALARI KOLLEKSIONERLARI", "karta"),
         "mythic": (f"{m5.emoji} {r5.upper()} KOLLEKSIONERLAR", "karta"),
         "divine": (f"{m6.emoji} {r6.upper()} KOLLEKSIONERLAR", "karta"),
     }
