@@ -12,6 +12,14 @@ def esc(value: object) -> str:
     return "" if value is None else html.escape(str(value))
 
 
+LINE = "━━━━━━━━━━━━━━━"
+
+
+def header(title: str) -> str:
+    """Bir xil sarlavha: qalin nom + chiziq."""
+    return f"{title}\n{LINE}"
+
+
 def fmt_coins(amount: int) -> str:
     return f"{int(amount):,}"
 
@@ -24,6 +32,19 @@ def xp_progress_bar(xp: int, xp_per_level: int = 250) -> str:
     return "█" * filled + "░" * (10 - filled) + f" {into_lvl}/{xp_per_level}"
 
 
+_STATE_LABELS = {
+    "AVAILABLE": "🟢 Mavjud",
+    "OWNED": "👤 Egasi bor",
+    "MARKET": "🛒 Sotuvda",
+    "AUCTION": "🔨 Auksionda",
+    "EVENT": "🎯 Event",
+    "TRADE": "🤝 Almashuvda",
+    "LOCKED": "🔒 Band",
+    "UNRELEASED": "⚪ Hali chiqmagan",
+    "DELETED": "🗑 O‘chirilgan",
+}
+
+
 def format_card_block(
     card: Card,
     show_status: bool = False,
@@ -34,25 +55,26 @@ def format_card_block(
     meta = get_rarity_meta(card.rarity)
     mtype = getattr(card, "media_type", "Anime") or "Anime"
     cstate = state_label or getattr(card, "card_state", "AVAILABLE") or "AVAILABLE"
+    cstate = _STATE_LABELS.get(str(cstate).upper(), esc(cstate))
     serial_str = f"#{serial_number}" if serial_number else "—"
     lines = [
-        f"🎴 <b>Character:</b> {esc(card.character_name)}",
-        f"📺 <b>{esc(mtype)}:</b> {esc(card.anime_name)}",
-        f"⭐ <b>Rank:</b> {meta.emoji} {esc(card.rarity)}",
-        f"💎 <b>Value:</b> {fmt_coins(card.base_value)} coins",
-        f"🆔 <b>Serial:</b> <code>{serial_str}</code> | <code>{esc(card.card_code)}</code>",
-        f"📦 <b>State:</b> {esc(cstate)}",
+        f"🎴 <b>{esc(card.character_name)}</b>",
+        f"📺 {esc(mtype)}: <b>{esc(card.anime_name)}</b>",
+        f"⭐ Rank: {meta.emoji} <b>{esc(card.rarity)}</b>",
+        f"💎 Qiymati: <b>{fmt_coins(card.base_value)}</b> 🪙",
+        f"🆔 Serial: <code>{serial_str}</code> · <code>{esc(card.card_code)}</code>",
+        f"📦 Holati: {cstate}",
     ]
     if owner_name:
-        lines.append(f"👤 <b>Owner:</b> {esc(owner_name)}")
+        lines.append(f"👤 Egasi: <b>{esc(owner_name)}</b>")
     if card.is_event_card:
         total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
         lines.append(f"🎯 <b>EVENT KARTA</b> · cheklangan nusxa ({total})")
     if show_status:
         status_text = "🟢 Mavjud" if (card.is_available and not card.is_deleted) else "🔴 O'chirilgan/Nofaol"
-        lines.append(f"📌 <b>Status:</b> {status_text} (Weight: {card.drop_weight})")
+        lines.append(f"📌 Holat: {status_text} · tushish og‘irligi: {card.drop_weight}")
         if not card.is_event_card:
-            lines.append(f"🔁 <b>Tashlanish:</b> {card.dropped_count}/{card.drop_limit}")
+            lines.append(f"🔁 Guruhlarga tashlangan: <b>{card.dropped_count}/{card.drop_limit}</b>")
     return "\n".join(lines)
 
 
