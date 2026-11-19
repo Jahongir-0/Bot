@@ -9,6 +9,7 @@ from config.settings import get_settings
 from database.redis_client import init_lock_manager
 from database.seed import seed_initial_data
 from database.session import close_db, get_session, init_db
+from services.gameplay_service import GameplayService
 from utils.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ async def main() -> None:
     await init_db()
     async with get_session() as session:
         await seed_initial_data(session)
+        await GameplayService.sync_runtime_and_legacy_ranks(session)
+        await session.commit()
 
     lock_manager = await init_lock_manager(settings.redis_url)
     bot = create_bot(settings)
