@@ -48,6 +48,7 @@ from models.event import Event
 from models.group import Group, GroupMember
 from models.schedule import ActiveDrop
 from models.user import User
+from models.v2_features import SecurityIncident, SupportTicket
 from services.admin_service import AdminService
 from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
@@ -143,6 +144,7 @@ class AdminStates(StatesGroup):
     edit_drop_rule_field = State()
     edit_welcome_text = State()
     edit_vip_price = State()
+    edit_pack_limit = State()
 
     # Stars
     stars_add = State()
@@ -159,12 +161,33 @@ class AdminStates(StatesGroup):
     bonus_hours = State()
 
 
+async def _build_admin_home_text() -> str:
+    async with get_session() as session:
+        u_cnt = int((await session.execute(select(func.count(User.id)))).scalar_one() or 0)
+        g_cnt = int((await session.execute(select(func.count(Group.id)).where(Group.is_active.is_(True)))).scalar_one() or 0)
+        c_cnt = int((await session.execute(select(func.count(Card.id)).where(Card.is_deleted.is_(False)))).scalar_one() or 0)
+        open_sup = int((await session.execute(select(func.count(SupportTicket.id)).where(SupportTicket.status == "open"))).scalar_one() or 0)
+        sec_cnt = int((await session.execute(select(func.count(SecurityIncident.id)).where(SecurityIncident.status == "open"))).scalar_one() or 0)
+        gcfg = await GameplayService.get_game_config(session)
+        maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
+    pack_lim = int(gcfg.get("pack_daily_limit", 1))
+    maint_txt = "🔴 Yoqilgan" if (isinstance(maint, dict) and maint.get("enabled")) else "🟢 O‘chiq"
+    return (
+        "🛡️ <b>ADMIN BOSHQARUV MARKAZI</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"👤 Userlar: <b>{u_cnt:,}</b>  ·  👥 Guruhlar: <b>{g_cnt:,}</b>  ·  🎴 Kartalar: <b>{c_cnt:,}</b>\n"
+        f"🎁 Paket limiti: <b>{pack_lim}/kun</b>  ·  💬 Murojaat: <b>{open_sup}</b>  ·  🔐 Hodisa: <b>{sec_cnt}</b>\n"
+        f"🛠 Texnik rejim: {maint_txt}\n\n"
+        "👇 Kerakli boshqaruv toifasini tanlang:"
+    )
+
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext, admin_perms: set | None = None) -> None:
     await state.clear()
     perms = resolve_admin_perms(message.from_user, admin_perms)
     await message.answer(
-        "🛡️ <b>ADMIN PANEL</b>\n━━━━━━━━━━━━━━━\nBoshqaruv bo‘limini tanlang:",
+        await _build_admin_home_text(),
         reply_markup=admin_v2_home_kb(message.from_user.id, perms),
     )
 
@@ -206,7 +229,7 @@ async def cb_admin_home(callback: CallbackQuery, state: FSMContext, admin_perms:
     perms = resolve_admin_perms(callback.from_user, admin_perms)
     await edit_or_answer(
         callback,
-        "🛡️ <b>ADMIN PANEL</b>\n\nBoshqaruv bo‘limini tanlang:",
+        await _build_admin_home_text(),
         reply_markup=admin_v2_home_kb(callback.from_user.id, perms),
     )
 
@@ -1479,21 +1502,29 @@ async def _render_settings_home(target, owner_id: int) -> None:
         ref_cfg = await SettingsService.get_referral_config(session)
         grp_coins = await SettingsService.get_group_add_reward_coins(session)
         dcfg = await SettingsService.get_daily_config(session)
+        gcfg = await GameplayService.get_game_config(session)
         maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
 
     maint_on = bool(isinstance(maint, dict) and maint.get("enabled"))
+    pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
     r3_name = get_rank_name_by_order(3, "Epic")
     r3_meta = get_rarity_meta(r3_name)
     mode_lbl = _RANKING_MODE_LABELS.get(rank_mode, rank_mode)
+    pack_txt = f"<b>{pack_lim}</b> marta/kun" if pack_lim > 0 else "🔴 O‘chirilgan (0)"
     lines = [
         "⚙️ <b>BOT SOZLAMALARI</b>\n━━━━━━━━━━━━━━━",
-        f"🎁 <b>Kunlik bonus:</b> {dcfg['base_coins']} 🪙 (+{dcfg['streak_step']}/kun, max +{dcfg['max_streak_bonus']})",
+        f"🎁 <b>Paket limiti (/pack):</b> {pack_txt}",
+        f"🎉 <b>Kunlik bonus:</b> {dcfg['base_coins']} 🪙 (+{dcfg['streak_step']}/kun, max +{dcfg['max_streak_bonus']})",
         f"🤝 <b>Referal:</b> {ref_cfg['inviter_coins']:,} 🪙 / {ref_cfg['invitee_coins']:,} 🪙",
         f"🏰 <b>Guruhga qo‘shish:</b> {grp_coins:,} 🪙 + {r3_meta.emoji} 1 {esc(r3_name)}",
         f"🏆 <b>Reyting tartibi:</b> {esc(mode_lbl)}",
         f"🛠 <b>Texnik rejim:</b> {'🔴 Yoqilgan' if maint_on else '🟢 O‘chirilgan'}",
     ]
-    await edit_or_answer(target, "\n".join(lines), reply_markup=admin_settings_kb(owner_id, rank_mode, maint_on))
+    await edit_or_answer(
+        target,
+        "\n".join(lines),
+        reply_markup=admin_settings_kb(owner_id, rank_mode, maint_on, pack_daily_limit=pack_lim),
+    )
 
 
 async def _render_daily_menu(target, owner_id: int) -> None:
@@ -1648,6 +1679,26 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
         )
         return
 
+    if act == "pack_limit":
+        async with get_session() as session:
+            gcfg = await GameplayService.get_game_config(session)
+        cur_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
+        await state.set_state(AdminStates.edit_pack_limit)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(
+            callback,
+            "🎁 <b>KUNLIK PAKET LIMITI (/pack)</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"Hozirgi limit: <b>{cur_lim} marta/kun</b>\n\n"
+            "Bir foydalanuvchi 1 kunda nechta paket ocha olsin?\n"
+            "• <code>1</code> — standart (kuniga 1 marta)\n"
+            "• <code>0</code> — paketlarni vaqtincha yopish\n"
+            "• <code>1–100</code> — kunlik limit soni\n\n"
+            "Yangi sonni kiriting:",
+            reply_markup=_settings_cancel_kb(owner_id, "view"),
+        )
+        return
+
     await state.clear()
     async with get_session() as session:
         if act == "set_rank":
@@ -1668,6 +1719,30 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
             await callback.answer("🛠 Texnik rejim o‘zgartirildi!")
 
     await _render_settings_home(callback, owner_id)
+
+
+@router.message(AdminStates.edit_pack_limit, NotCommandFilter())
+async def fsm_edit_pack_limit(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or not (0 <= int(raw) <= 100):
+        await message.answer("⚠️ 0 dan 100 gacha butun son kiriting.")
+        return
+    val = int(raw)
+    await state.clear()
+    async with get_session() as session:
+        gcfg = await GameplayService.get_game_config(session)
+        gcfg["pack_daily_limit"] = val
+        gcfg["pack_enabled"] = val > 0
+        await SettingsService.set_value(session, "game_config", gcfg)
+        await AdminService.log_action(
+            session, message.from_user.id, "set_pack_daily_limit", "settings", "pack_daily_limit", {"limit": val}
+        )
+        await session.commit()
+    await message.answer(f"✅ Kunlik paket limiti <b>{val}/kun</b> qilib saqlandi!")
+    await _render_settings_home(message, message.from_user.id)
 
 
 @router.message(AdminStates.edit_daily_field, NotCommandFilter())

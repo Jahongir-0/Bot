@@ -21,6 +21,7 @@ from admin.filters import IsAdminFilter, has_admin_perm, resolve_admin_perms
 from config.settings import get_settings
 from database.session import get_session
 from keyboards.v2 import (
+    ADMIN_HUB_CATEGORIES,
     admin_rank_detail_kb,
     admin_ranks_list_kb,
     admin_rbac_menu_kb,
@@ -33,6 +34,7 @@ from keyboards.v2 import (
     admin_v2_cards_menu_kb,
     admin_v2_edit_fields_kb,
     admin_v2_home_kb,
+    admin_v2_hub_kb,
     admin_v2_media_titles_kb,
     admin_v2_title_cards_kb,
     admin_v2_view_cards_kb,
@@ -166,6 +168,26 @@ def _parse_local_dt(raw: str) -> Optional[datetime]:
         except ValueError:
             continue
     return None
+
+
+# ===========================================================================
+# 0. ADMIN HUB CATEGORY ROUTER (sec="hub")
+# ===========================================================================
+@router.callback_query(AdmV2Cb.filter(F.sec == "hub"))
+async def cb_v2_hub(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
+    await state.clear()
+    perms = resolve_admin_perms(callback.from_user, admin_perms)
+    cat_key = callback_data.ext or "cards_evt"
+    cat_info = next(((title, desc, secs) for k, title, desc, secs in ADMIN_HUB_CATEGORIES if k == cat_key), None)
+    if cat_info is None or not any(s in perms for s in cat_info[2]):
+        await callback.answer("⛔ Bu toifaga ruxsatingiz yo‘q.", show_alert=True)
+        return
+    title, desc, _secs = cat_info
+    await edit_or_answer(
+        callback,
+        f"<b>{esc(title)}</b>\n━━━━━━━━━━━━━━━\n{esc(desc)}\n\n👇 Kerakli bo‘limni tanlang:",
+        reply_markup=admin_v2_hub_kb(callback.from_user.id, cat_key, perms),
+    )
 
 
 # ===========================================================================
@@ -1853,7 +1875,8 @@ async def _show_games_home(target, owner_id: int) -> None:
     d_on = "🟢" if cfg.get("dice_enabled", True) else "🔴"
     f_on = "🟢" if cfg.get("coinflip_enabled", True) else "🔴"
     l_on = "🟢" if cfg.get("lucky_enabled", True) else "🔴"
-    p_on = "🟢" if cfg.get("pack_enabled", True) else "🔴"
+    pack_lim = max(0, int(cfg.get("pack_daily_limit", 1)))
+    p_on = "🟢" if (cfg.get("pack_enabled", True) and pack_lim > 0) else "🔴"
     txt = (
         "🎮 <b>MINI O‘YINLAR VA PAKETLAR SOZLAMASI</b>\n"
         "━━━━━━━━━━━━━━━\n"
@@ -1862,8 +1885,8 @@ async def _show_games_home(target, owner_id: int) -> None:
         f"{f_on} <b>Tanga tashlash:</b> kuniga {cfg.get('coinflip_daily_limit', 5)} ta (2x garov)\n"
         f"{l_on} <b>Omadli karta:</b> kuniga {cfg.get('lucky_daily_limit', 3)} ta "
         f"({cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙)\n"
-        f"{p_on} <b>Karta paketlari (/pack):</b> kuniga qat’iy 1 marta\n"
-        "   <i>(Userlar Bronze/Silver/Gold paketni coin evaziga ochadi, dublikat tushsa 50% keshbek qaytadi)</i>"
+        f"{p_on} <b>Karta paketlari (/pack):</b> kuniga <b>{pack_lim}</b> marta\n"
+        "   <i>(Dublikat karta tushsa 50% coin keshbek qaytadi)</i>"
     )
     b = InlineKeyboardBuilder()
     b.row(
@@ -1872,7 +1895,8 @@ async def _show_games_home(target, owner_id: int) -> None:
         InlineKeyboardButton(text=f"{l_on} Omadli", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="lucky_enabled").pack()),
     )
     b.row(
-        InlineKeyboardButton(text=f"{p_on} Paket (/pack) — 1/kun qat’iy", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="pack_enabled").pack()),
+        InlineKeyboardButton(text=f"{p_on} Paket holati", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="pack_enabled").pack()),
+        InlineKeyboardButton(text=f"🎁 Paket limiti ({pack_lim}/kun)", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="pack_daily_limit").pack()),
     )
     b.row(
         InlineKeyboardButton(text="🎲 Tosh yutug‘i", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_jackpot_reward").pack()),
@@ -1901,7 +1925,7 @@ async def cb_v2_games(callback: CallbackQuery, callback_data: AdmV2Cb, state: FS
         label = _GAME_FIELD_LABELS.get(field, field)
         await state.set_state(AdminV2States.waiting_games_field)
         await state.update_data(owner_tg_id=owner_id, g_field=field)
-        min_note = "0 yoki musbat son" if field == "dice_cooldown_minutes" else "kamida 1 butun son"
+        min_note = "0 (o‘chirish) yoki musbat son" if field in ("dice_cooldown_minutes", "pack_daily_limit") else "kamida 1 butun son"
         await edit_or_answer(
             callback,
             f"🎮 <b>{esc(label)}</b>\n\nYangi qiymatni kiriting ({min_note}):",
@@ -1927,14 +1951,17 @@ async def fsm_v2_games_field(message: Message, state: FSMContext) -> None:
         return
     raw = (message.text or "").strip().replace(",", "").replace(" ", "")
     field = data["g_field"]
-    min_val = 0 if field == "dice_cooldown_minutes" else 1
-    if not raw.isdigit() or int(raw) < min_val:
-        await message.answer(f"⚠️ Kamida {min_val} butun son kiriting.")
+    min_val = 0 if field in ("dice_cooldown_minutes", "pack_daily_limit") else 1
+    if not raw.isdigit() or int(raw) < min_val or (field == "pack_daily_limit" and int(raw) > 100):
+        note = "0–100 oralig‘ida" if field == "pack_daily_limit" else f"kamida {min_val}"
+        await message.answer(f"⚠️ {note} butun son kiriting.")
         return
     await state.clear()
     async with get_session() as session:
         cfg = await GameplayService.get_game_config(session)
         cfg[field] = int(raw)
+        if field == "pack_daily_limit":
+            cfg["pack_enabled"] = int(raw) > 0
         await SettingsService.set_value(session, "game_config", cfg)
         await session.commit()
     await _show_games_home(message, message.from_user.id)
@@ -2365,18 +2392,25 @@ async def cb_v2_message_menu(callback: CallbackQuery, callback_data: AdmV2Cb, st
     owner_id = callback.from_user.id
 
     if act == "who":
-        await state.update_data(owner_tg_id=owner_id, msg_scope=callback_data.ext or "all")
+        scope_val = callback_data.ext or "all"
+        scope_names = {"all": "🌍 Barchaga (Userlar + Guruhlar)", "users": "👤 Faqat Userlarga", "groups": "👥 Faqat Guruhlarga"}
+        await state.update_data(owner_tg_id=owner_id, msg_scope=scope_val)
         b = InlineKeyboardBuilder()
         b.row(
             InlineKeyboardButton(text="⚡ Hozir yuborish", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="when_now").pack()),
             InlineKeyboardButton(text="⏰ Vaqtga rejalash", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="when_sched").pack()),
         )
         b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="v").pack()))
-        await edit_or_answer(callback, f"🎯 Qabul qiluvchilar: <b>{esc(callback_data.ext.upper())}</b>\n\nQachon yuborilsin?", reply_markup=b.as_markup())
+        await edit_or_answer(
+            callback,
+            f"🎯 Qabul qiluvchilar: <b>{scope_names.get(scope_val, scope_val)}</b>\n\nQachon yuborilsin?",
+            reply_markup=b.as_markup(),
+        )
         return
 
     if act == "when_now":
-        await state.update_data(msg_when="now", msg_sched_dt=None)
+        data = await state.get_data()
+        await state.update_data(owner_tg_id=owner_id, msg_scope=data.get("msg_scope", "all"), msg_when="now", msg_sched_dt=None)
         await state.set_state(AdminV2States.waiting_msg_content)
         await edit_or_answer(
             callback,
@@ -2386,6 +2420,8 @@ async def cb_v2_message_menu(callback: CallbackQuery, callback_data: AdmV2Cb, st
         return
 
     if act == "when_sched":
+        data = await state.get_data()
+        await state.update_data(owner_tg_id=owner_id, msg_scope=data.get("msg_scope", "all"))
         await state.set_state(AdminV2States.waiting_msg_sched_dt)
         await edit_or_answer(
             callback,
@@ -2402,7 +2438,7 @@ async def cb_v2_message_menu(callback: CallbackQuery, callback_data: AdmV2Cb, st
         InlineKeyboardButton(text="👥 Faqat Guruhlarga", callback_data=AdmV2Cb(owner_id=owner_id, sec="message", act="who", ext="groups").pack()),
     )
     b.row(_back_home_btn(owner_id))
-    await edit_or_answer(callback, "📨 <b>XABARLAR VA BROADCAST</b>\n\nKimga xabar yuboramiz?", reply_markup=b.as_markup())
+    await edit_or_answer(callback, "📨 <b>XABARLAR VA BROADCAST</b>\n━━━━━━━━━━━━━━━\nKimga xabar yuboramiz?", reply_markup=b.as_markup())
 
 
 @router.message(AdminV2States.waiting_msg_sched_dt, NotCommandFilter())
@@ -2415,7 +2451,10 @@ async def fsm_v2_msg_sched_dt(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(msg_when="sched", msg_sched_dt=dt_utc.isoformat())
     await state.set_state(AdminV2States.waiting_msg_content)
-    await message.answer("✉️ Endi rejalangan xabarni (matn/media/forward) yuboring:")
+    await message.answer(
+        "✉️ Endi rejalangan xabarni (matn/media/forward) yuboring:",
+        reply_markup=_cancel_kb(message.from_user.id, "message", "v"),
+    )
 
 
 @router.message(AdminV2States.waiting_msg_content, NotCommandFilter())
@@ -2464,8 +2503,6 @@ async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
         f"⏳ Xabar yuborilmoqda...\n👤 Userlar: {len(user_ids)} ta · 👥 Guruhlar: {len(group_ids)} ta"
     )
 
-    user_set = set(user_ids)
-    # Bitta chat ID ikki marta yuborilmasligi uchun birlashtiramiz (guruhlar va userlar alohida sanaladi)
     ordered_targets: List[tuple[str, int]] = []
     seen_cids: set = set()
     for cid in group_ids:
@@ -2479,13 +2516,16 @@ async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
 
     sent_users = 0
     sent_groups = 0
+    failed_users = 0
+    failed_groups = 0
     migrated: List[tuple[int, int]] = []
     sem = asyncio.Semaphore(4)
 
     async def _deliver_one(kind: str, cid: int) -> None:
-        nonlocal sent_users, sent_groups
+        nonlocal sent_users, sent_groups, failed_users, failed_groups
         async with sem:
             target_cid = cid
+            delivered = False
             for attempt in range(3):
                 try:
                     await message.bot.copy_message(
@@ -2493,10 +2533,7 @@ async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
                         from_chat_id=message.chat.id,
                         message_id=message.message_id,
                     )
-                    if kind == "group":
-                        sent_groups += 1
-                    else:
-                        sent_users += 1
+                    delivered = True
                     break
                 except TelegramRetryAfter as exc:
                     await asyncio.sleep(float(exc.retry_after) + 0.5)
@@ -2505,17 +2542,23 @@ async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
                     migrated.append((target_cid, new_cid))
                     target_cid = new_cid
                 except Exception:
-                    # Ba'zi xabar turlari copy_message da xato bersa oddiy matn bilan urinamiz
                     if attempt == 0 and (message.text or message.caption):
                         try:
                             await message.bot.send_message(target_cid, message.text or message.caption)
-                            if kind == "group":
-                                sent_groups += 1
-                            else:
-                                sent_users += 1
+                            delivered = True
                         except Exception:
                             pass
                     break
+            if delivered:
+                if kind == "group":
+                    sent_groups += 1
+                else:
+                    sent_users += 1
+            else:
+                if kind == "group":
+                    failed_groups += 1
+                else:
+                    failed_users += 1
             await asyncio.sleep(0.05)
 
     if ordered_targets:
@@ -2533,14 +2576,19 @@ async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
     total_targets = len(ordered_targets)
     breakdown = []
     if scope in ("users", "all"):
-        breakdown.append(f"👤 Userlar: <b>{sent_users}</b> / {len(user_ids)}")
+        breakdown.append(f"👤 Userlar: <b>{sent_users}</b> / {len(user_ids)} (xato: {failed_users})")
     if scope in ("groups", "all"):
-        breakdown.append(f"👥 Guruhlar: <b>{sent_groups}</b> / {len(group_ids)}")
+        breakdown.append(f"👥 Guruhlar: <b>{sent_groups}</b> / {len(group_ids)} (xato: {failed_groups})")
     detail = "\n".join(breakdown)
-    await wait.edit_text(
-        f"✅ <b>XABAR YUBORISH YAKUNLANDI!</b>\n\n{detail}\n📤 Jami yetkazildi: <b>{total_sent}</b> / {total_targets}",
-        reply_markup=admin_v2_home_kb(message.from_user.id, perms),
+    summary_text = (
+        f"✅ <b>XABAR YUBORISH YAKUNLANDI!</b>\n\n{detail}\n"
+        f"📤 Jami yetkazildi: <b>{total_sent}</b> / {total_targets}"
     )
+    markup = admin_v2_home_kb(message.from_user.id, perms)
+    try:
+        await wait.edit_text(summary_text, reply_markup=markup)
+    except Exception:
+        await message.answer(summary_text, reply_markup=markup)
 
 
 # ===========================================================================
