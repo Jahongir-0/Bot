@@ -514,10 +514,21 @@ def quiz_question_kb(owner_id: int, question: QuizQuestion) -> InlineKeyboardMar
     return b.as_markup()
 
 
-def games_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
+def games_menu_kb(owner_id: int, can_play: bool = True) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="🎲 DICE ROLL (Tosh otish)", callback_data=GameCb(owner_id=owner_id, act="dice").pack()))
+    if can_play:
+        b.row(InlineKeyboardButton(text="🎲 O‘ynash", callback_data=GameCb(owner_id=owner_id, act="dice").pack()))
     b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    return b.as_markup()
+
+
+def dice_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    faces = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]
+    for n, face in enumerate(faces, start=1):
+        b.add(InlineKeyboardButton(text=face, callback_data=GameCb(owner_id=owner_id, act="pick", val=n).pack()))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
     return b.as_markup()
 
 
