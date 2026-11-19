@@ -39,10 +39,10 @@ class PackService:
 
     @staticmethod
     async def get_daily_pack_status(session: AsyncSession, user_id: int) -> Tuple[bool, int, int]:
-        """(yoqilganmi, bugun nechta paket ochgan, kunlik limit — qat'iy kuniga 1 ta)"""
+        """(yoqilganmi, bugun nechta paket ochgan, kunlik limit)"""
         cfg = await GameplayService.get_game_config(session)
         enabled = bool(cfg.get("pack_enabled", True))
-        daily_limit = 1
+        daily_limit = max(0, int(cfg.get("pack_daily_limit", 1)))
         tz = ZoneInfo(get_settings().timezone)
         today = datetime.now(tz).date()
         used = int(
@@ -79,7 +79,7 @@ class PackService:
 
         async with get_lock_manager().lock(f"pack:{user_id}", ttl_ms=5000):
             enabled, used_today, daily_limit = await PackService.get_daily_pack_status(session, user_id)
-            if not enabled:
+            if not enabled or daily_limit <= 0:
                 return PackOpenResult(
                     success=False,
                     message="🎁 Karta paketlari bo‘limi hozircha o‘chirilgan.",
@@ -89,7 +89,7 @@ class PackService:
                     success=False,
                     message=(
                         f"⏳ <b>Kunlik paket limiti tugadi!</b> ({used_today}/{daily_limit})\n"
-                        "Har kuni ko‘pi bilan kunlik limit doirasida paket ochishingiz mumkin. Ertaga qayting!"
+                        f"Kuniga eng ko‘pi bilan <b>{daily_limit}</b> ta paket ochishingiz mumkin. Ertaga qayting!"
                     ),
                 )
 

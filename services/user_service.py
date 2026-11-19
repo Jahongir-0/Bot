@@ -163,6 +163,7 @@ class UserService:
             update(User)
             .where(User.id == user_id)
             .values(coins=User.coins + amount, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
         )
         new_balance = (
             await session.execute(select(User.coins).where(User.id == user_id))
@@ -197,6 +198,7 @@ class UserService:
             update(User)
             .where(User.id == user_id, User.coins >= amount)
             .values(coins=User.coins - amount, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
         )
         if res.rowcount != 1:
             raise InsufficientCoinsError("Coin yetarli emas!")
@@ -270,6 +272,7 @@ class UserService:
             update(User)
             .where(User.id == new_user.id, User.referred_by_id.is_(None))
             .values(referred_by_id=referrer.id, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
         )
         if upd.rowcount != 1:
             return None
@@ -278,6 +281,7 @@ class UserService:
             update(User)
             .where(User.id == referrer.id)
             .values(referral_count=User.referral_count + 1, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
         )
         new_user.referred_by_id = referrer.id
         referrer.referral_count = int(referrer.referral_count or 0) + 1

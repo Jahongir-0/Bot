@@ -67,6 +67,9 @@ class GameplayService:
             }
         await SettingsService.set_value(session, "rarity_config", rcfg)
         sync_runtime_ranks(ranks)
+        from services.ranking_service import RankingService
+
+        RankingService.invalidate_cache()
 
     @staticmethod
     async def _propagate_rank_rename(session: AsyncSession, old_name: str, new_name: str) -> None:
@@ -239,6 +242,9 @@ class GameplayService:
             r["order"] = i
         await SettingsService.set_value(session, "rank_definitions", kept)
         sync_runtime_ranks(kept)
+        from services.ranking_service import RankingService
+
+        RankingService.invalidate_cache()
         return kept
 
     @staticmethod
@@ -278,6 +284,9 @@ class GameplayService:
         sync_runtime_ranks(ranks)
         if new_name and new_name.strip() and str(target["name"]) != old_name:
             await GameplayService._propagate_rank_rename(session, old_name, str(target["name"]))
+        from services.ranking_service import RankingService
+
+        RankingService.invalidate_cache()
         return ranks
 
     @staticmethod
@@ -560,11 +569,15 @@ class GameplayService:
     @staticmethod
     async def play_dice_game(
         session: AsyncSession,
-        user: User,
+        user_or_id: Union[User, int],
         dice_value: Optional[int] = None,
         guessed_number: Optional[int] = None,
     ) -> Tuple[bool, str, int, int]:
         """Qaytaradi: (ok, msg, roll, reward_coins)."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", 0, 0
         cfg = await GameplayService.get_game_config(session)
         if not cfg.get("dice_enabled", True):
             return False, "🎮 Mini o‘yinlar vaqtincha o‘chirilgan.", 0, 0
@@ -579,7 +592,7 @@ class GameplayService:
                 await session.execute(
                     select(GameSession)
                     .where(
-                        GameSession.user_id == user.id,
+                        GameSession.user_id == uid,
                         GameSession.game_type == "dice",
                         GameSession.created_date == today,
                     )
@@ -592,7 +605,7 @@ class GameplayService:
         if len(today_rolls) >= limit:
             return False, f"🎲 Bugungi o‘yin limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0, 0
 
-        if guessed_number is None and today_rolls:
+        if guessed_number is None and today_rolls and cooldown_m > 0:
             last_dt = ensure_utc(today_rolls[0].created_at)
             diff_sec = (utcnow() - last_dt).total_seconds()
             if diff_sec < cooldown_m * 60:
@@ -612,7 +625,7 @@ class GameplayService:
 
         session.add(
             GameSession(
-                user_id=user.id,
+                user_id=uid,
                 game_type="dice",
                 roll_value=roll,
                 reward_coins=reward_coins,
@@ -623,16 +636,16 @@ class GameplayService:
         if reward_coins > 0:
             await UserService.credit_coins(
                 session,
-                user.id,
+                uid,
                 reward_coins,
                 "mini_game_dice",
                 f"Dice roll: {roll}",
-                reference_id=f"dice:{user.id}:{today.isoformat()}:{len(today_rolls)+1}",
+                reference_id=f"dice:{uid}:{today.isoformat()}:{len(today_rolls)+1}",
             )
             user.game_wins = int(user.game_wins or 0) + 1
             user.xp = int(user.xp or 0) + reward_xp
             user.level = max(1, 1 + (user.xp // 250))
-            await GameplayService.add_season_points(session, user.id, points=10, xp=reward_xp)
+            await GameplayService.add_season_points(session, uid, points=10, xp=reward_xp)
         await session.flush()
 
         if guessed_number is not None:
@@ -674,11 +687,16 @@ class GameplayService:
     @staticmethod
     async def play_coin_flip(
         session: AsyncSession,
-        user: User,
+        user_or_id: Union[User, int],
         choice: str,
         bet: int,
     ) -> Tuple[bool, str, bool, int]:
         """Tanga tashlash (gerb/raqam). Qaytaradi: (ok, msg, won, net_delta)."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", False, 0
+
         cfg = await GameplayService.get_game_config(session)
         if not cfg.get("coinflip_enabled", True):
             return False, "🪙 Tanga tashlash o‘yini vaqtincha o‘chirilgan.", False, 0
@@ -696,7 +714,7 @@ class GameplayService:
             (
                 await session.execute(
                     select(func.count(GameSession.id)).where(
-                        GameSession.user_id == user.id,
+                        GameSession.user_id == uid,
                         GameSession.game_type == "coinflip",
                         GameSession.created_date == today,
                     )
@@ -710,11 +728,11 @@ class GameplayService:
         try:
             await UserService.debit_coins(
                 session,
-                user.id,
+                uid,
                 bet_amt,
                 "mini_game_coinflip_bet",
                 f"Coin flip bet ({choice_norm})",
-                reference_id=f"cf_bet:{user.id}:{today.isoformat()}:{used + 1}",
+                reference_id=f"cf_bet:{uid}:{today.isoformat()}:{used + 1}",
             )
         except InsufficientCoinsError:
             return False, f"🪙 Coinlaringiz yetarli emas ({bet_amt:,} 🪙 kerak).", False, 0
@@ -726,7 +744,7 @@ class GameplayService:
 
         session.add(
             GameSession(
-                user_id=user.id,
+                user_id=uid,
                 game_type="coinflip",
                 roll_value=1 if result_side == "heads" else 2,
                 reward_coins=payout,
@@ -737,16 +755,16 @@ class GameplayService:
         if won:
             await UserService.credit_coins(
                 session,
-                user.id,
+                uid,
                 payout,
                 "mini_game_coinflip_win",
                 f"Coin flip won ({result_side})",
-                reference_id=f"cf_win:{user.id}:{today.isoformat()}:{used + 1}",
+                reference_id=f"cf_win:{uid}:{today.isoformat()}:{used + 1}",
             )
             user.game_wins = int(user.game_wins or 0) + 1
             user.xp = int(user.xp or 0) + reward_xp
             user.level = max(1, 1 + (user.xp // 250))
-            await GameplayService.add_season_points(session, user.id, points=10, xp=reward_xp)
+            await GameplayService.add_season_points(session, uid, points=10, xp=reward_xp)
         await session.flush()
 
         side_lbl = "🦅 Gerb" if result_side == "heads" else "🔢 Raqam"
@@ -784,10 +802,15 @@ class GameplayService:
     @staticmethod
     async def play_lucky_card(
         session: AsyncSession,
-        user: User,
+        user_or_id: Union[User, int],
         picked_slot: int,
     ) -> Tuple[bool, str, int]:
         """3 ta yopiq kartadan 1 tasini ochish (bepul kunlik omad o'yini)."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", 0
+
         cfg = await GameplayService.get_game_config(session)
         if not cfg.get("lucky_enabled", True):
             return False, "🃏 Omadli karta o‘yini vaqtincha o‘chirilgan.", 0
@@ -801,7 +824,7 @@ class GameplayService:
             (
                 await session.execute(
                     select(func.count(GameSession.id)).where(
-                        GameSession.user_id == user.id,
+                        GameSession.user_id == uid,
                         GameSession.game_type == "lucky",
                         GameSession.created_date == today,
                     )
@@ -823,7 +846,7 @@ class GameplayService:
 
         session.add(
             GameSession(
-                user_id=user.id,
+                user_id=uid,
                 game_type="lucky",
                 roll_value=picked_slot,
                 reward_coins=reward_coins,
@@ -833,17 +856,17 @@ class GameplayService:
         )
         await UserService.credit_coins(
             session,
-            user.id,
+            uid,
             reward_coins,
             "mini_game_lucky",
             f"Lucky card #{picked_slot}",
-            reference_id=f"lucky:{user.id}:{today.isoformat()}:{used + 1}",
+            reference_id=f"lucky:{uid}:{today.isoformat()}:{used + 1}",
         )
         if is_jackpot:
             user.game_wins = int(user.game_wins or 0) + 1
         user.xp = int(user.xp or 0) + reward_xp
         user.level = max(1, 1 + (user.xp // 250))
-        await GameplayService.add_season_points(session, user.id, points=8, xp=reward_xp)
+        await GameplayService.add_season_points(session, uid, points=8, xp=reward_xp)
         await session.flush()
 
         cards_reveal = "  ".join(

@@ -17,6 +17,7 @@ from utils.constants import (
     RankingMode,
     Rarity,
     get_rank_name_by_order,
+    get_rarity_aliases,
     get_rarity_meta,
     get_runtime_ranks,
 )
@@ -144,6 +145,8 @@ class RankingService:
         r4_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 4), get_rank_name_by_order(4, Rarity.LEGENDARY.value))
         r5_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 5), get_rank_name_by_order(5, Rarity.MYTHIC.value))
         r4_low, r5_low = r4_name.lower(), r5_name.lower()
+        r4_aliases = set(get_rarity_aliases(r4_name) or [r4_low])
+        r5_aliases = set(get_rarity_aliases(r5_name) or [r5_low])
 
         user_ids = [r[0].id for r in rows]
         rarity_rows = (
@@ -152,14 +155,16 @@ class RankingService:
                 .join(Card, Card.id == UserCard.card_id)
                 .where(
                     UserCard.user_id.in_(user_ids),
-                    func.lower(Card.rarity).in_([r4_low, r5_low]),
+                    func.lower(Card.rarity).in_(list(r4_aliases | r5_aliases)),
                 )
                 .group_by(UserCard.user_id, func.lower(Card.rarity))
             )
         ).all()
         by_user: Dict[int, Dict[str, int]] = {}
         for uid, rarity_low, cnt in rarity_rows:
-            by_user.setdefault(uid, {})[str(rarity_low)] = int(cnt)
+            r_l = str(rarity_low)
+            canonical_key = r4_low if r_l in r4_aliases else (r5_low if r_l in r5_aliases else r_l)
+            by_user.setdefault(uid, {})[canonical_key] = by_user.get(uid, {}).get(canonical_key, 0) + int(cnt)
 
         entries: List[RankEntry] = []
         for idx, (user, score) in enumerate(rows, start=1):
@@ -365,10 +370,17 @@ class RankingService:
 
         if scope in ("rare", "mythic", "divine"):
             ranks = await RankingService._live_ranks(session)
+
+            def _expand(names: List[str]) -> List[str]:
+                out = set()
+                for n in names:
+                    out.update(get_rarity_aliases(n) or [n.lower()])
+                return list(out)
+
             rarity_map = {
-                "rare": [str(r["name"]).lower() for r in ranks if int(r.get("order", 0)) >= 2],
-                "mythic": [str(r["name"]).lower() for r in ranks if int(r.get("order", 0)) == 5] or ["mythic"],
-                "divine": [str(r["name"]).lower() for r in ranks if int(r.get("order", 0)) == 6] or ["divine"],
+                "rare": _expand([str(r["name"]) for r in ranks if int(r.get("order", 0)) >= 2]),
+                "mythic": _expand([str(r["name"]) for r in ranks if int(r.get("order", 0)) == 5] or ["Mythic"]),
+                "divine": _expand([str(r["name"]) for r in ranks if int(r.get("order", 0)) == 6] or ["Divine"]),
             }
             target_rarities = rarity_map.get(scope, [])
             stmt = (
