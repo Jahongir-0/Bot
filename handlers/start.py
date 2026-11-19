@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database.session import get_session
-from keyboards.main_menu import back_home_kb, main_menu_kb
+from keyboards.main_menu import GROUP_MENUS, back_home_kb, group_menu_kb, main_menu_kb
 from models.user import User
 from services.drop_service import DropService
 from services.ranking_service import RankingService
@@ -20,31 +20,39 @@ from utils.tg_helpers import edit_or_answer, is_admin_user, send_card_message
 router = Router(name="start")
 
 WELCOME_TEXT = (
-    "🎴 <b>Anime Card Collection</b> o‘yiniga xush kelibsiz!\n\n"
-    "Anime qahramonlari kartalarini yig‘ing, noyob kolleksiya yarating, "
-    "marketda soting, do‘stlaringiz bilan almashing va reytingda 1-o‘ringa chiqing!\n\n"
-    "👇 Quyidagi menyudan bo‘limni tanlang:"
+    "🎴 <b>Anime Card Collection</b> — anime kartalarini yig‘ish o‘yini!\n\n"
+    "📌 <b>Qisqacha:</b> guruhlarda kartalar tashlanadi, siz personaj ismini topib kartani olasiz. "
+    "Kartalaringizni yig‘ing, almashing, soting va reytingda yuqoriga chiqing."
 )
 
 HELP_TEXT = (
-    "❓ <b>YORDAM VA V2 BUYRUQLAR</b>\n\n"
-    "🏠 /menu, /start — Asosiy menyu (inline tugmalar)\n"
-    "👤 /me, /profil — Shaxsiy V2 profil va bezaklar\n"
-    "🎴 /cards — Kolleksiya (20/sahifa, filtrlar)\n"
-    "🎁 /daily — Kunlik coin + tasodifiy karta\n"
-    "🧠 /quiz — Viktorina savollari\n"
-    "🎮 /game — Mini o‘yinlar (Dice Roll)\n"
-    "🔨 /auction — Jonli auksionlar\n"
-    "💖 /wishlist — Orzu qilingan kartalar\n"
-    "🎯 /event — Limitli event kartalari\n"
-    "🛒 /market, /sell, /buy — Global bozor\n"
-    "🤝 /trade, /give — Karta almashish / berish\n"
-    "💎 /vip, ⭐ /stars — VIP va Stars do‘koni\n"
-    "🏆 /top — Reytinglar · 🔔 /notif — Xabarlar · 💬 /support — Yordam\n\n"
-    "📌 <b>Karta olish qoidasi (V2):</b>\n"
-    "Guruhda karta rasmi tashlanganda uning nomi yashirin bo‘ladi — "
-    "xabarga <b>REPLY</b> qilib personaj ismini yozing va kartani qo‘lga kiriting!"
+    "❓ <b>QANDAY O‘YNALADI?</b>\n\n"
+    "<b>1️⃣ Karta olish</b>\n"
+    "Botni guruhga qo‘shing. Guruhda karta rasmi tashlanadi (ismi yashirin). "
+    "O‘sha xabarga <b>REPLY</b> qilib personaj ismini yozing. Birinchi to‘g‘ri topgan kartani oladi!\n\n"
+    "<b>2️⃣ Coin va XP</b>\n"
+    "🎁 Kunlik bonus, 🎲 tosh o‘yini, 🧠 viktorina va 📋 vazifalar orqali coin yutasiz.\n\n"
+    "<b>3️⃣ Kartalar bilan nima qilish mumkin?</b>\n"
+    "🛒 Bozorda soting · 🔨 auksionda qatnashing · 🤝 do‘stingiz bilan almashing · 👤 profilingizga qo‘ying.\n\n"
+    "<b>4️⃣ Foydali buyruqlar</b>\n"
+    "/menu — bosh menyu\n"
+    "/daily — kunlik bonus\n"
+    "/cards — kartalarim\n"
+    "/game — tosh o‘yini\n"
+    "/top — reyting\n"
+    "/me — profil\n\n"
+    "💬 Savol yoki taklif bo‘lsa, menyudagi <b>ALOQA</b> tugmasi orqali adminga yozing."
 )
+
+
+def _home_text(db_user: User, welcome: str = WELCOME_TEXT) -> str:
+    return (
+        f"🏠 <b>BOSH MENU</b>\n\n"
+        f"👤 <b>{esc(db_user.display_name)}</b>\n"
+        f"🪙 <b>{fmt_coins(db_user.coins)}</b> coin  ·  ⭐ <b>{db_user.level}</b>-daraja  ·  ✨ <b>{fmt_coins(db_user.xp)}</b> XP\n\n"
+        f"{welcome}\n\n"
+        "👇 Bo‘limni tanlang:"
+    )
 
 
 async def _show_referral(target, tg_id: int, db_user: User) -> None:
@@ -131,7 +139,7 @@ async def cmd_start(
                 await session.rollback()
 
     is_admin = is_bot_admin or is_admin_user(message.from_user)
-    text = f"Salom, <b>{esc(db_user.display_name)}</b>!\n\n{ref_notice}{welcome_txt}"
+    text = f"{ref_notice}{_home_text(db_user, welcome_txt)}"
     await message.answer(text, reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin))
 
 
@@ -166,8 +174,14 @@ async def cb_home(
 ) -> None:
     await state.clear()
     is_admin = is_bot_admin or is_admin_user(callback.from_user)
-    text = f"🏠 <b>BOSH MENU</b> — {esc(db_user.display_name)}\n\n{WELCOME_TEXT}"
-    await edit_or_answer(callback, text, reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin))
+    await edit_or_answer(callback, _home_text(db_user), reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin))
+
+
+@router.callback_query(NavCb.filter(F.target.in_({"grp_play", "grp_trade", "grp_vip"})))
+async def cb_group_menu(callback: CallbackQuery, callback_data: NavCb) -> None:
+    group = callback_data.target
+    await edit_or_answer(callback, GROUP_MENUS[group], reply_markup=group_menu_kb(callback.from_user.id, group))
+    await callback.answer()
 
 
 @router.callback_query(NavCb.filter(F.target == "help"))
@@ -218,7 +232,7 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
     if new_status in ("member", "administrator") and old_status not in ("member", "administrator"):
         welcome_lines = [
             f"🎴 <b>Anime Card Collection</b> boti <b>{esc(group_title)}</b> guruhiga qo‘shildi!",
-            "Har kuni tasodifiy vaqtlarda anime kartalari tashlanadi — birinchi bo‘lib <b>[🎴 KARTANI OLISH]</b> tugmasini bosing!",
+            "Har kuni tasodifiy vaqtlarda anime kartalari tashlanadi. Karta xabariga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!",
             "🏆 Guruh reytingi: /top | 🎯 Eventlar: /event",
         ]
         if reward_result is not None and event.from_user:

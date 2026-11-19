@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import Optional
@@ -7,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from config.settings import get_settings
@@ -15,6 +17,7 @@ from keyboards.main_menu import back_home_kb, main_menu_kb
 from keyboards.v2 import (
     auction_detail_kb,
     auctions_list_kb,
+    dice_pick_kb,
     games_menu_kb,
     notifications_kb,
     profile_custom_kb,
@@ -33,7 +36,7 @@ from services.auction_wishlist_service import AuctionWishlistService
 from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
 from services.user_service import UserService
-from utils.callback_data import AchCb, AucCb, GameCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
+from utils.callback_data import AchCb, AucCb, GameCb, NavCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
 from utils.constants import get_rarity_meta
 from utils.formatting import esc, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_admin_user, send_card_message
@@ -181,45 +184,118 @@ async def msg_reply_quiz_answer(message: Message, db_user: User) -> None:
 
 
 # ------------------------------------------------------------------
-# MINI GAMES (/game)
+# TOSH O'YINI (/game): son tanlaysiz -> bot tosh tashlaydi -> mos tushsa yutasiz
 # ------------------------------------------------------------------
-@router.message(Command("game", "games"))
-async def cmd_game(message: Message) -> None:
-    async with get_session() as session:
-        cfg = await GameplayService.get_game_config(session)
-    txt = (
-        "🎮 <b>MINI O‘YINLAR</b>\n\n"
-        f"🎲 <b>Dice Roll:</b> Kuniga {cfg.get('dice_daily_limit', 3)} marta tosh oting!\n"
-        f"🎉 6 tushsa JACKPOT: <b>+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙</b>\n"
-        f"⏳ Cooldown: {cfg.get('dice_cooldown_minutes', 30)} daqiqa"
+_PLAYING: set = set()
+
+
+def _game_menu_text(cfg: dict, used: int) -> str:
+    limit = int(cfg.get("dice_daily_limit", 3))
+    left = max(0, limit - used)
+    if not cfg.get("dice_enabled", True):
+        return "🎲 <b>TOSH O‘YINI</b>\n\n🔴 O‘yin hozircha o‘chirilgan."
+    return (
+        "🎲 <b>TOSH O‘YINI</b>\n\n"
+        "1️⃣ 1 dan 6 gacha son tanlaysiz\n"
+        "2️⃣ Bot tosh tashlaydi 🎲\n"
+        "3️⃣ Tanlagan soningiz tushsa — <b>yutasiz!</b>\n\n"
+        f"🏆 Yutuq: <b>+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙</b>\n"
+        f"🎟 Bugungi urinishlar: <b>{left}/{limit}</b> qoldi"
     )
-    await message.answer(txt, reply_markup=games_menu_kb(message.from_user.id))
+
+
+async def _game_state(user_id: int):
+    async with get_session() as session:
+        user = await session.get(User, user_id)
+        cfg = await GameplayService.get_game_config(session)
+        enabled, used, limit = await GameplayService.get_dice_status(session, user)
+    return cfg, enabled, used, limit
+
+
+@router.message(Command("game", "games"))
+async def cmd_game(message: Message, db_user: User) -> None:
+    cfg, enabled, used, limit = await _game_state(db_user.id)
+    await message.answer(_game_menu_text(cfg, used), reply_markup=games_menu_kb(message.from_user.id, enabled and used < limit))
 
 
 @router.callback_query(GameCb.filter(F.act == "v"))
-async def cb_games_menu(callback: CallbackQuery) -> None:
-    async with get_session() as session:
-        cfg = await GameplayService.get_game_config(session)
-    txt = (
-        "🎮 <b>MINI O‘YINLAR</b>\n\n"
-        f"🎲 <b>Dice Roll:</b> Kuniga {cfg.get('dice_daily_limit', 3)} marta tosh oting!\n"
-        f"🎉 6 tushsa JACKPOT: <b>+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙</b>"
-    )
-    await edit_or_answer(callback, txt, reply_markup=games_menu_kb(callback.from_user.id))
+async def cb_games_menu(callback: CallbackQuery, db_user: User) -> None:
+    cfg, enabled, used, limit = await _game_state(db_user.id)
+    await edit_or_answer(callback, _game_menu_text(cfg, used), reply_markup=games_menu_kb(callback.from_user.id, enabled and used < limit))
+    await callback.answer()
 
 
 @router.callback_query(GameCb.filter(F.act == "dice"))
 async def cb_game_dice(callback: CallbackQuery, db_user: User) -> None:
-    async with get_session() as session:
-        user = await session.get(User, db_user.id)
-        ok, msg, _roll, _coins = await GameplayService.play_dice_game(session, user)
-        if ok:
-            await session.commit()
-        else:
-            await session.rollback()
-    await callback.answer(msg.replace("<b>", "").replace("</b>", "")[:190], show_alert=True)
-    if ok:
-        await edit_or_answer(callback, f"🎮 <b>DICE ROLL</b>\n\n{msg}", reply_markup=games_menu_kb(callback.from_user.id))
+    """Son tanlash ekrani."""
+    cfg, enabled, used, limit = await _game_state(db_user.id)
+    if not enabled:
+        await callback.answer("🔴 O‘yin hozircha o‘chirilgan.", show_alert=True)
+        return
+    if used >= limit:
+        await callback.answer(f"🎟 Bugungi urinishlar tugadi ({limit}/{limit}). Ertaga qayting!", show_alert=True)
+        return
+    await edit_or_answer(
+        callback,
+        f"🎲 <b>SONNI TANLANG</b>\n\nTosh qaysi songa tushadi deb o‘ylaysiz?\n🏆 To‘g‘ri topsangiz: <b>+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙</b>",
+        reply_markup=dice_pick_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "pick"))
+async def cb_game_pick(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    guess = int(callback_data.val)
+    if not 1 <= guess <= 6:
+        await callback.answer("Noto‘g‘ri son", show_alert=True)
+        return
+    uid = db_user.id
+    if uid in _PLAYING:
+        await callback.answer("⏳ Tosh aylanmoqda, biroz kuting...")
+        return
+    _PLAYING.add(uid)
+    try:
+        cfg, enabled, used, limit = await _game_state(uid)
+        if not enabled:
+            await callback.answer("🔴 O‘yin hozircha o‘chirilgan.", show_alert=True)
+            return
+        if used >= limit:
+            await callback.answer(f"🎟 Bugungi urinishlar tugadi ({limit}/{limit}). Ertaga qayting!", show_alert=True)
+            return
+        await callback.answer()
+        chat_id = callback.message.chat.id
+        try:
+            await callback.message.edit_text(f"🎲 Siz <b>{guess}</b> ni tanladingiz.\nTosh aylanmoqda...", reply_markup=None)
+        except Exception:
+            pass
+
+        # Telegram'ning haqiqiy zari: natijani Telegram o'zi tasodifiy tanlaydi (aldab bo'lmaydi)
+        dice_msg = await callback.bot.send_dice(chat_id, emoji="🎲")
+        value = int(dice_msg.dice.value)
+        await asyncio.sleep(3.8)  # animatsiya tugashini kutamiz
+
+        async with get_session() as session:
+            user = await session.get(User, uid)
+            ok, msg, _roll, _coins = await GameplayService.play_dice_game(
+                session, user, dice_value=value, guessed_number=guess
+            )
+            if ok:
+                await session.commit()
+            else:
+                await session.rollback()
+            _en, used_now, limit_now = await GameplayService.get_dice_status(session, user)
+        left = max(0, limit_now - used_now)
+        footer = f"\n\n🎟 Qolgan urinishlar: <b>{left}/{limit_now}</b>"
+        b = InlineKeyboardBuilder()
+        if left > 0:
+            b.row(InlineKeyboardButton(text="🎲 Yana o‘ynash", callback_data=GameCb(owner_id=callback.from_user.id, act="dice").pack()))
+        b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=callback.from_user.id, target="home").pack()))
+        await callback.bot.send_message(chat_id, msg + (footer if ok else ""), reply_markup=b.as_markup())
+    except Exception:
+        logger.exception("Tosh o'yinida xato")
+        await callback.bot.send_message(callback.message.chat.id, "⚠️ O‘yinda xatolik bo‘ldi. Iltimos, qayta urinib ko‘ring.")
+    finally:
+        _PLAYING.discard(uid)
 
 
 # ------------------------------------------------------------------
