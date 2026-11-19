@@ -26,9 +26,10 @@ from models.card import Card
 from services.card_service import CardService
 from services.card_zip_import import rank_table, resolve_rank
 from services.community_service import CommunityService
+from services.gameplay_service import GameplayService
 from services.settings_service import SettingsService
 from utils.callback_data import AdmV2Cb
-from utils.constants import MEDIA_TYPES, get_rarity_meta
+from utils.constants import MEDIA_TYPES, get_rarity_meta, list_rarities, sync_runtime_ranks
 from utils.formatting import esc
 from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
@@ -97,7 +98,7 @@ async def _perm_ok(callback: CallbackQuery, admin_perms: Optional[set]) -> bool:
 
 # ---------------------------------------------------------------- status
 def _status_text(data: dict) -> str:
-    rarity = data.get("q_rank", "Common")
+    rarity = data.get("q_rank") or (list_rarities() or ["Basic"])[0]
     meta = get_rarity_meta(rarity)
     recent: List[str] = data.get("q_recent", [])[-8:]
     lines = [
@@ -135,6 +136,8 @@ async def cb_start(callback: CallbackQuery, state: FSMContext, admin_perms: Opti
     if not await _perm_ok(callback, admin_perms):
         return
     await state.clear()
+    async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
     await edit_or_answer(
         callback,
         "⚡ <b>TEZKOR QO‘SHISH</b>\n\n1/3 — Bu kartalar qaysi turdagi asardan?",
@@ -167,6 +170,8 @@ async def msg_media_name(message: Message, state: FSMContext) -> None:
     if not (1 <= len(name) <= 120):
         await message.answer("⚠️ Nom 1 dan 120 gacha belgi bo‘lsin.")
         return
+    async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
     await state.update_data(q_media=name)
     await message.answer("⚡ 3/3 — Bu rasmlar qaysi rank bo‘lsin?", reply_markup=_rank_kb(message.from_user.id))
 
@@ -175,6 +180,8 @@ async def msg_media_name(message: Message, state: FSMContext) -> None:
 async def cb_rank_pick(callback: CallbackQuery, admin_perms: Optional[set] = None) -> None:
     if not await _perm_ok(callback, admin_perms):
         return
+    async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
     await edit_or_answer(callback, "🎚 Yangi rasmlar uchun rankni tanlang:", reply_markup=_rank_kb(callback.from_user.id))
     await callback.answer()
 
@@ -208,7 +215,7 @@ async def _add_one(data: dict, file_id: str, character: str, admin_tg_id: int) -
                     select(Card.id).where(
                         func.lower(Card.character_name) == character.lower(),
                         func.lower(Card.anime_name) == media.lower(),
-                        Card.rarity == rarity,
+                        func.lower(Card.rarity) == str(rarity).lower(),
                         Card.is_deleted.is_(False),
                     )
                 )
@@ -342,7 +349,7 @@ async def cb_done(callback: CallbackQuery, state: FSMContext, admin_perms: Optio
     owner_id = callback.from_user.id
     b = InlineKeyboardBuilder()
     b.row(_btn(owner_id, "⚡ Yana qo‘shish", "start"))
-    b.row(InlineKeyboardButton(text="🎴 Card bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()))
+    b.row(InlineKeyboardButton(text="🎴 Kartalar bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()))
     await edit_or_answer(
         callback,
         "🏁 <b>TUGADI</b>\n\n"
