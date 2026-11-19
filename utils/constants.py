@@ -221,6 +221,38 @@ DEFAULT_GAME_CONFIG: Dict[str, object] = {
     "dice_base_reward": 50,
     "dice_jackpot_reward": 300,
     "dice_xp": 15,
+    "coinflip_enabled": True,
+    "coinflip_daily_limit": 5,
+    "coinflip_xp": 10,
+    "lucky_enabled": True,
+    "lucky_daily_limit": 3,
+    "lucky_min_reward": 60,
+    "lucky_max_reward": 350,
+    "lucky_xp": 10,
+}
+
+PACK_CONFIG: Dict[str, Dict[str, object]] = {
+    "bronze": {
+        "name": "Bronze Paket",
+        "emoji": "🥉",
+        "price": 500,
+        "weights": {"Common": 60, "Rare": 30, "Epic": 10},
+        "desc": "Common / Rare / Epic kartalar (Epic 10%)",
+    },
+    "silver": {
+        "name": "Silver Paket",
+        "emoji": "🥈",
+        "price": 1500,
+        "weights": {"Rare": 50, "Epic": 35, "Legendary": 15},
+        "desc": "Rare / Epic / Legendary kartalar (Legendary 15%)",
+    },
+    "gold": {
+        "name": "Gold Paket",
+        "emoji": "🥇",
+        "price": 4000,
+        "weights": {"Epic": 45, "Legendary": 35, "Mythic": 16, "Divine": 4},
+        "desc": "Epic / Legendary / Mythic / Divine kartalar",
+    },
 }
 
 DEFAULT_DAILY_RANDOM_CARD: Dict[str, object] = {
@@ -309,10 +341,14 @@ QUEST_DEFINITIONS: List[Dict[str, object]] = [
     {"id": "first_card", "title": "🎴 Ilk qadam", "desc": "Kamida 1 ta karta yig‘ing", "metric": "total_cards", "target": 1, "reward": 150},
     {"id": "cards_10", "title": "📦 Kolleksioner", "desc": "10 ta karta yig‘ing", "metric": "total_cards", "target": 10, "reward": 400},
     {"id": "cards_25", "title": "🏛️ Karta Ustasi", "desc": "25 ta karta yig‘ing", "metric": "total_cards", "target": 25, "reward": 1000},
-    {"id": "rare_hunter", "title": "💎 Noyob ovchi", "desc": "Epic+ karta oling", "metric": "high_rarity", "target": 1, "reward": 500},
+    {"id": "cards_50", "title": "🌌 Karta Afsonasi", "desc": "50 ta karta yig‘ing", "metric": "total_cards", "target": 50, "reward": 2500},
+    {"id": "rare_hunter", "title": "💎 Noyob ovchi", "desc": "Epic, Legendary, Mythic yoki Divine karta oling", "metric": "high_rarity", "target": 1, "reward": 500},
     {"id": "streak_3", "title": "🔥 3 kunlik seriya", "desc": "Ketma-ket 3 kun /daily oling", "metric": "daily_streak", "target": 3, "reward": 300},
     {"id": "streak_7", "title": "🌟 Haftalik faollik", "desc": "Ketma-ket 7 kun /daily oling", "metric": "daily_streak", "target": 7, "reward": 800},
-    {"id": "ref_1", "title": "🤝 Ilk do‘st", "desc": "1 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 1, "reward": 300},
+    {"id": "quiz_5", "title": "🧠 Viktorina bilimdoni", "desc": "Viktorinalarda 5 ta to‘g‘ri javob bering", "metric": "quiz_wins", "target": 5, "reward": 600},
+    {"id": "game_5", "title": "🎮 Mini-o‘yin g‘olibi", "desc": "Mini-o‘yinlarda 5 marta yuting", "metric": "game_wins", "target": 5, "reward": 550},
+    {"id": "trade_1", "title": "🤝 Ilk almashuv", "desc": "1 marta karta almashuvini yakunlang", "metric": "trade_count", "target": 1, "reward": 400},
+    {"id": "ref_1", "title": "👥 Ilk do‘st", "desc": "1 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 1, "reward": 300},
     {"id": "ref_5", "title": "📣 Jamoa yetakchisi", "desc": "5 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 5, "reward": 1500},
 ]
 

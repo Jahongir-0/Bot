@@ -9,6 +9,7 @@ from handlers.drop import router as drop_router
 from handlers.event import router as event_router
 from handlers.market import router as market_router
 from handlers.offer import router as offer_router
+from handlers.pack import router as pack_router
 from handlers.premium_emoji_admin import router as premium_emoji_router
 from handlers.profile import router as profile_router
 from handlers.quests import router as quests_router
@@ -38,4 +39,5 @@ def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(quests_router)
     dp.include_router(stars_router)
     dp.include_router(event_router)
+    dp.include_router(pack_router)
     dp.include_router(v2_features_router)

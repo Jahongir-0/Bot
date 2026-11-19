@@ -23,7 +23,7 @@ from models.v2_features import (
     UserAchievement,
 )
 from services.settings_service import SettingsService
-from services.user_service import UserService
+from services.user_service import InsufficientCoinsError, UserService
 from utils.constants import (
     DEFAULT_DAILY_RANDOM_CARD,
     DEFAULT_GAME_CONFIG,
@@ -426,7 +426,9 @@ class GameplayService:
             (
                 await session.execute(
                     select(func.count(GameSession.id)).where(
-                        GameSession.user_id == user.id, GameSession.created_date == today
+                        GameSession.user_id == user.id,
+                        GameSession.game_type == "dice",
+                        GameSession.created_date == today,
                     )
                 )
             ).scalar_one()
@@ -455,7 +457,11 @@ class GameplayService:
             (
                 await session.execute(
                     select(GameSession)
-                    .where(GameSession.user_id == user.id, GameSession.created_date == today)
+                    .where(
+                        GameSession.user_id == user.id,
+                        GameSession.game_type == "dice",
+                        GameSession.created_date == today,
+                    )
                     .order_by(GameSession.id.desc())
                 )
             )
@@ -520,6 +526,211 @@ class GameplayService:
 
         jackpot_txt = " 🎉 JACKPOT!" if roll == 6 else ""
         return True, f"🎲 Tosh: <b>{roll}</b>{jackpot_txt}\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
+
+    # ------------------------------------------------------------------
+    # Mini Games: Coin Flip & Lucky Card
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def get_coinflip_status(session: AsyncSession, user: User) -> Tuple[bool, int, int]:
+        cfg = await GameplayService.get_game_config(session)
+        tz = ZoneInfo(get_settings().timezone)
+        today = datetime.now(tz).date()
+        used = int(
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.user_id == user.id,
+                        GameSession.game_type == "coinflip",
+                        GameSession.created_date == today,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        return bool(cfg.get("coinflip_enabled", True)), used, int(cfg.get("coinflip_daily_limit", 5))
+
+    @staticmethod
+    async def play_coin_flip(
+        session: AsyncSession,
+        user: User,
+        choice: str,
+        bet: int,
+    ) -> Tuple[bool, str, bool, int]:
+        """Tanga tashlash (gerb/raqam). Qaytaradi: (ok, msg, won, net_delta)."""
+        cfg = await GameplayService.get_game_config(session)
+        if not cfg.get("coinflip_enabled", True):
+            return False, "🪙 Tanga tashlash o‘yini vaqtincha o‘chirilgan.", False, 0
+        choice_norm = (choice or "").strip().lower()
+        if choice_norm not in ("heads", "tails"):
+            return False, "Noto‘g‘ri tanlov.", False, 0
+        bet_amt = int(bet)
+        if bet_amt not in (50, 100, 250, 500):
+            return False, "Garov miqdori 50, 100, 250 yoki 500 coin bo‘lishi kerak.", False, 0
+
+        tz = ZoneInfo(get_settings().timezone)
+        today = datetime.now(tz).date()
+        limit = int(cfg.get("coinflip_daily_limit", 5))
+        used = int(
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.user_id == user.id,
+                        GameSession.game_type == "coinflip",
+                        GameSession.created_date == today,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        if used >= limit:
+            return False, f"🪙 Bugungi Tanga tashlash limiti tugadi ({limit}/{limit}). Ertaga qayting!", False, 0
+
+        try:
+            await UserService.debit_coins(
+                session,
+                user.id,
+                bet_amt,
+                "mini_game_coinflip_bet",
+                f"Coin flip bet ({choice_norm})",
+                reference_id=f"cf_bet:{user.id}:{today.isoformat()}:{used + 1}",
+            )
+        except InsufficientCoinsError:
+            return False, f"🪙 Coinlaringiz yetarli emas ({bet_amt:,} 🪙 kerak).", False, 0
+
+        result_side = random.choice(["heads", "tails"])
+        won = result_side == choice_norm
+        reward_xp = int(cfg.get("coinflip_xp", 10))
+        payout = bet_amt * 2 if won else 0
+
+        session.add(
+            GameSession(
+                user_id=user.id,
+                game_type="coinflip",
+                roll_value=1 if result_side == "heads" else 2,
+                reward_coins=payout,
+                reward_xp=reward_xp if won else 0,
+                created_date=today,
+            )
+        )
+        if won:
+            await UserService.credit_coins(
+                session,
+                user.id,
+                payout,
+                "mini_game_coinflip_win",
+                f"Coin flip won ({result_side})",
+                reference_id=f"cf_win:{user.id}:{today.isoformat()}:{used + 1}",
+            )
+            user.game_wins = int(user.game_wins or 0) + 1
+            user.xp = int(user.xp or 0) + reward_xp
+            user.level = max(1, 1 + (user.xp // 250))
+            await GameplayService.add_season_points(session, user.id, points=10, xp=reward_xp)
+        await session.flush()
+
+        side_lbl = "🦅 Gerb" if result_side == "heads" else "🔢 Raqam"
+        pick_lbl = "🦅 Gerb" if choice_norm == "heads" else "🔢 Raqam"
+        if won:
+            return True, (
+                f"🎉 <b>YUTDINGIZ!</b>\n\nSiz: <b>{pick_lbl}</b> · Tushdi: <b>{side_lbl}</b>\n"
+                f"🪙 Mukofot: <b>+{payout:,}</b> coin (sof foyda: +{bet_amt:,} 🪙) · ⚡ +{reward_xp} XP"
+            ), True, bet_amt
+        return True, (
+            f"😔 <b>Yutqazdingiz</b>\n\nSiz: <b>{pick_lbl}</b> · Tushdi: <b>{side_lbl}</b>\n"
+            f"🪙 Yo‘qotildi: <b>-{bet_amt:,}</b> coin"
+        ), False, -bet_amt
+
+    @staticmethod
+    async def get_lucky_status(session: AsyncSession, user: User) -> Tuple[bool, int, int]:
+        cfg = await GameplayService.get_game_config(session)
+        tz = ZoneInfo(get_settings().timezone)
+        today = datetime.now(tz).date()
+        used = int(
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.user_id == user.id,
+                        GameSession.game_type == "lucky",
+                        GameSession.created_date == today,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        return bool(cfg.get("lucky_enabled", True)), used, int(cfg.get("lucky_daily_limit", 3))
+
+    @staticmethod
+    async def play_lucky_card(
+        session: AsyncSession,
+        user: User,
+        picked_slot: int,
+    ) -> Tuple[bool, str, int]:
+        """3 ta yopiq kartadan 1 tasini ochish (bepul kunlik omad o'yini)."""
+        cfg = await GameplayService.get_game_config(session)
+        if not cfg.get("lucky_enabled", True):
+            return False, "🃏 Omadli karta o‘yini vaqtincha o‘chirilgan.", 0
+        if picked_slot not in (1, 2, 3):
+            return False, "1 dan 3 gacha karta tanlang.", 0
+
+        tz = ZoneInfo(get_settings().timezone)
+        today = datetime.now(tz).date()
+        limit = int(cfg.get("lucky_daily_limit", 3))
+        used = int(
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.user_id == user.id,
+                        GameSession.game_type == "lucky",
+                        GameSession.created_date == today,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        if used >= limit:
+            return False, f"🃏 Bugungi Omadli karta limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0
+
+        min_r = max(10, int(cfg.get("lucky_min_reward", 60)))
+        max_r = max(min_r, int(cfg.get("lucky_max_reward", 350)))
+        mid_r = (min_r + max_r) // 2
+        prizes = [min_r, mid_r, max_r]
+        random.shuffle(prizes)
+        reward_coins = prizes[picked_slot - 1]
+        is_jackpot = reward_coins == max_r
+        reward_xp = int(cfg.get("lucky_xp", 10))
+
+        session.add(
+            GameSession(
+                user_id=user.id,
+                game_type="lucky",
+                roll_value=picked_slot,
+                reward_coins=reward_coins,
+                reward_xp=reward_xp,
+                created_date=today,
+            )
+        )
+        await UserService.credit_coins(
+            session,
+            user.id,
+            reward_coins,
+            "mini_game_lucky",
+            f"Lucky card #{picked_slot}",
+            reference_id=f"lucky:{user.id}:{today.isoformat()}:{used + 1}",
+        )
+        if is_jackpot:
+            user.game_wins = int(user.game_wins or 0) + 1
+        user.xp = int(user.xp or 0) + reward_xp
+        user.level = max(1, 1 + (user.xp // 250))
+        await GameplayService.add_season_points(session, user.id, points=8, xp=reward_xp)
+        await session.flush()
+
+        cards_reveal = "  ".join(
+            f"[{'🌟' if i + 1 == picked_slot else '▫️'} #{i + 1}: {p}🪙]" for i, p in enumerate(prizes)
+        )
+        title = "🌟 <b>OMADLI JACKPOT!</b>" if is_jackpot else "🃏 <b>KARTA OCHILDI!</b>"
+        return True, (
+            f"{title}\n\n{cards_reveal}\n\n"
+            f"Siz <b>#{picked_slot}</b> kartani ochdingiz: <b>+{reward_coins:,} 🪙</b> · ⚡ +{reward_xp} XP"
+        ), reward_coins
 
     # ------------------------------------------------------------------
     # Daily Random Card (faqat released/faol kartalardan)

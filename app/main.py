@@ -20,6 +20,7 @@ async def _set_bot_commands(bot) -> None:
         BotCommand(command="me", description="Shaxsiy profilim va VIP status"),
         BotCommand(command="cards", description="Kartalar kolleksiyam (filter + showcase)"),
         BotCommand(command="daily", description="Kunlik bonus"),
+        BotCommand(command="pack", description="Karta paketlari (Bronze, Silver, Gold)"),
         BotCommand(command="quiz", description="Kunlik anime quizlar"),
         BotCommand(command="game", description="Mini o‘yinlar (Coin Flip, Dice, Lucky Card)"),
         BotCommand(command="auction", description="Jonli karta auksionlari"),

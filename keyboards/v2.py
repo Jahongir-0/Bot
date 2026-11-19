@@ -16,13 +16,14 @@ from utils.callback_data import (
     GameCb,
     NavCb,
     NotifCb,
+    PackCb,
     QuizCb,
     SupCb,
     TradeCb,
     VipCb,
     WishCb,
 )
-from utils.constants import ADMIN_PERMISSION_SECTIONS, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
+from utils.constants import ADMIN_PERMISSION_SECTIONS, PACK_CONFIG, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
 
 
 def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboardMarkup:
@@ -514,10 +515,19 @@ def quiz_question_kb(owner_id: int, question: QuizQuestion) -> InlineKeyboardMar
     return b.as_markup()
 
 
-def games_menu_kb(owner_id: int, can_play: bool = True) -> InlineKeyboardMarkup:
+def games_menu_kb(
+    owner_id: int,
+    can_dice: bool = True,
+    can_flip: bool = True,
+    can_lucky: bool = True,
+) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    if can_play:
-        b.row(InlineKeyboardButton(text="🎲 O‘ynash", callback_data=GameCb(owner_id=owner_id, act="dice").pack()))
+    if can_dice:
+        b.row(InlineKeyboardButton(text="🎲 Tosh o‘yini", callback_data=GameCb(owner_id=owner_id, act="dice").pack()))
+    if can_flip:
+        b.row(InlineKeyboardButton(text="🪙 Tanga tashlash (2x)", callback_data=GameCb(owner_id=owner_id, act="flip").pack()))
+    if can_lucky:
+        b.row(InlineKeyboardButton(text="🃏 Omadli karta", callback_data=GameCb(owner_id=owner_id, act="lucky").pack()))
     b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return b.as_markup()
 
@@ -529,6 +539,47 @@ def dice_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
         b.add(InlineKeyboardButton(text=face, callback_data=GameCb(owner_id=owner_id, act="pick", val=n).pack()))
     b.adjust(3)
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    return b.as_markup()
+
+
+def coinflip_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for bet in (50, 100, 250, 500):
+        b.row(
+            InlineKeyboardButton(
+                text=f"🦅 Gerb ({bet} 🪙)",
+                callback_data=GameCb(owner_id=owner_id, act="flip_go", val=bet, extra="heads").pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"🔢 Raqam ({bet} 🪙)",
+                callback_data=GameCb(owner_id=owner_id, act="flip_go", val=bet, extra="tails").pack(),
+            ),
+        )
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    return b.as_markup()
+
+
+def lucky_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🃏 #1", callback_data=GameCb(owner_id=owner_id, act="lucky_pick", val=1).pack()),
+        InlineKeyboardButton(text="🃏 #2", callback_data=GameCb(owner_id=owner_id, act="lucky_pick", val=2).pack()),
+        InlineKeyboardButton(text="🃏 #3", callback_data=GameCb(owner_id=owner_id, act="lucky_pick", val=3).pack()),
+    )
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    return b.as_markup()
+
+
+def packs_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for tier, cfg in PACK_CONFIG.items():
+        b.row(
+            InlineKeyboardButton(
+                text=f"{cfg['emoji']} {cfg['name']} — {int(cfg['price']):,} 🪙",
+                callback_data=PackCb(owner_id=owner_id, act="open", tier=tier).pack(),
+            )
+        )
+    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return b.as_markup()
 
 

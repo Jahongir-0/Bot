@@ -34,7 +34,12 @@ class QuestService:
                     .where(
                         UserCard.user_id == user.id,
                         Card.rarity.in_(
-                            [Rarity.EPIC.value, Rarity.LEGENDARY.value, Rarity.MYTHIC.value]
+                            [
+                                Rarity.EPIC.value,
+                                Rarity.LEGENDARY.value,
+                                Rarity.MYTHIC.value,
+                                Rarity.DIVINE.value,
+                            ]
                         ),
                     )
                 )
@@ -46,6 +51,9 @@ class QuestService:
             "high_rarity": high_cnt,
             "daily_streak": int(user.daily_streak or 0),
             "referrals": int(user.referral_count or 0),
+            "quiz_wins": int(getattr(user, "quiz_wins", 0) or 0),
+            "game_wins": int(getattr(user, "game_wins", 0) or 0),
+            "trade_count": int(getattr(user, "trade_count", 0) or 0),
         }
 
     @staticmethod

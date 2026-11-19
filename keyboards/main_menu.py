@@ -21,14 +21,10 @@ def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=NavCb(owner_id=owner_id, target=target).pack())
 
 
-def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=NavCb(owner_id=owner_id, target=target).pack())
-
-
 def main_menu_kb(owner_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
     """BOSH MENU: faqat umumiy bo'limlar. Shaxsiy narsalar (kartalar, bonus, VIP, do'stlar...) PROFILda."""
     b = InlineKeyboardBuilder()
-    b.row(_nav(owner_id, "👤 PROFILIM", "profile"))
+    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, "🎁 PAKETLAR", "packs"))
     b.row(
         _nav(owner_id, "🛒 BOZOR", "market"),
         InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
@@ -53,6 +49,8 @@ GROUP_MENUS = {
         "━━━━━━━━━━━━━━━\n"
         "O‘ynang, coin va XP yutib oling:\n\n"
         "🎲 <b>Tosh o‘yini</b> — sonni toping, coin yuting\n"
+        "🪙 <b>Tanga tashlash</b> — 2x garov o‘yini\n"
+        "🃏 <b>Omadli karta</b> — kunlik bepul omad sovg‘asi\n"
         "🧠 <b>Viktorina</b> — savollarga birinchi javob bering\n"
         "🎯 <b>Event</b> — cheklangan maxsus kartalar\n"
         "📋 <b>Vazifalar</b> — bajaring, mukofot oling"
@@ -64,10 +62,11 @@ def group_menu_kb(owner_id: int, group: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     if group == "grp_play":
         b.row(
-            InlineKeyboardButton(text="🎲 TOSH O‘YINI", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
+            InlineKeyboardButton(text="🎲 MINI O‘YINLAR", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
             InlineKeyboardButton(text="🧠 VIKTORINA", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
         )
         b.row(_nav(owner_id, "🎯 EVENT", "event"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
+        b.row(_nav(owner_id, "🎁 KARTA PAKETLARI", "packs"))
     b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
     return b.as_markup()
 

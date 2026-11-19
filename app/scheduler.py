@@ -400,12 +400,13 @@ async def run_scheduler_loop(bot: Bot, stop_event: asyncio.Event) -> None:
             if tick % 2 == 0:
                 await finalize_ended_events(bot)
             await _process_v2_periodic_jobs(bot, tick)
-            # Muddati o'tgan takliflar/transferlar ~5 daqiqada bir (10 tick * 30s)
+            # Muddati o'tgan takliflar/transferlar/tradelar ~5 daqiqada bir (10 tick * 30s)
             if tick % 10 == 0:
                 async with get_session() as session:
                     expired = await OfferService.expire_stale_offers(session)
                     expired_transfers = await TransferService.expire_stale_transfers(session)
-                    if expired or expired_transfers:
+                    expired_trades = await AuctionWishlistService.expire_stale_trades(session)
+                    if expired or expired_transfers or expired_trades:
                         await session.commit()
             tick += 1
         except Exception as exc:
