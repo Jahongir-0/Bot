@@ -101,7 +101,7 @@ async def cb_event_buy_stars(callback: CallbackQuery, callback_data: EvtCb, bot:
         await bot.send_invoice(
             chat_id=callback.from_user.id,
             title=f"🎯 {card.character_name}"[:32],
-            description=f"Limitli event kartasi ({card.rarity}) — {card.anime_name}. Bir kishi — bitta nusxa."[:255],
+            description=f"Limitli event kartasi ({get_rarity_meta(card.rarity).name}) — {card.anime_name}. Bir kishi — bitta nusxa."[:255],
             payload=payload,
             currency="XTR",
             prices=[LabeledPrice(label=f"{card.character_name}"[:32], amount=int(event.price_stars))],

@@ -8,8 +8,10 @@ from database.session import get_session
 from keyboards.market import ranking_kb
 from models.group import Group
 from models.user import User
+from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from utils.callback_data import NavCb, RankingCb
+from utils.constants import get_rank_name_by_order, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, fmt_coins
 from utils.tg_helpers import edit_or_answer
 
@@ -18,18 +20,26 @@ router = Router(name="ranking")
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 LINE = "━━━━━━━━━━━━━━━"
 
-EXTENDED_TITLES = {
-    "coins": ("🪙 ENG BOY O‘YINCHILAR", "coin"),
-    "xp": ("⚡ ENG YUQORI DARAJA", "XP"),
-    "quiz": ("🧠 VIKTORINA CHEMPIONLARI", "g‘alaba"),
-    "games": ("🎲 O‘YIN USTALARI", "yutuq"),
-    "trades": ("🤝 ENG FAOL SAVDOGARLAR", "savdo"),
-    "auction": ("🔨 AUKSION G‘OLIBLARI", "g‘alaba"),
-    "refs": ("👥 ENG KO‘P DO‘ST TAKLIF QILGANLAR", "do‘st"),
-    "rare": ("💎 NOYOB KARTALAR KOLLEKSIONERLARI", "karta"),
-    "mythic": ("🔴 MYTHIC KOLLEKSIONERLAR", "karta"),
-    "divine": ("✨ DIVINE KOLLEKSIONERLAR", "karta"),
-}
+
+def _extended_titles() -> dict[str, tuple[str, str]]:
+    r5 = get_rank_name_by_order(5, "Mythic")
+    r6 = get_rank_name_by_order(6, "Divine")
+    m5 = get_rarity_meta(r5)
+    m6 = get_rarity_meta(r6)
+    return {
+        "coins": ("🪙 ENG BOY O‘YINCHILAR", "coin"),
+        "xp": ("⚡ ENG YUQORI DARAJA", "XP"),
+        "quiz": ("🧠 VIKTORINA CHEMPIONLARI", "g‘alaba"),
+        "games": ("🎲 O‘YIN USTALARI", "yutuq"),
+        "trades": ("🤝 ENG FAOL SAVDOGARLAR", "savdo"),
+        "auction": ("🔨 AUKSION G‘OLIBLARI", "g‘alaba"),
+        "refs": ("👥 ENG KO‘P DO‘ST TAKLIF QILGANLAR", "do‘st"),
+        "rare": ("💎 NOYOB KARTALAR KOLLEKSIONERLARI", "karta"),
+        "mythic": (f"{m5.emoji} {r5.upper()} KOLLEKSIONERLAR", "karta"),
+        "divine": (f"{m6.emoji} {r6.upper()} KOLLEKSIONERLAR", "karta"),
+    }
+
+
 PERIOD_LABELS = {"all": "barcha vaqt", "monthly": "shu oy", "weekly": "shu hafta"}
 
 
@@ -48,7 +58,13 @@ async def _show_ranking(
     in_group = db_group is not None
     if scope == "group" and not in_group:
         scope = "global"
+
+    async with get_session() as session:
+        ranks = await GameplayService.get_rank_definitions(session)
+        sync_runtime_ranks(ranks)
+
     kb = ranking_kb(owner_id=owner_id, current_scope=scope, in_group=in_group, period=period)
+    titles = _extended_titles()
 
     # ---------- guruhlar reytingi ----------
     if scope == "groups":
@@ -69,8 +85,8 @@ async def _show_ranking(
         return
 
     # ---------- maxsus reytinglar ----------
-    if scope in EXTENDED_TITLES:
-        hdr, unit = EXTENDED_TITLES[scope]
+    if scope in titles:
+        hdr, unit = titles[scope]
         async with get_session() as session:
             rows = await RankingService.get_extended_top(session, scope, period=period, limit=10)
         lines = [f"<b>{hdr}</b>", f"{LINE}\n🗓 {PERIOD_LABELS.get(period, period)}\n"]
@@ -97,6 +113,9 @@ async def _show_ranking(
                 session=session, user_id=db_user.id, group_id=db_group.id if db_group else None
             )
 
+    r4_meta = get_rarity_meta(get_rank_name_by_order(4, "Legend"))
+    r5_meta = get_rarity_meta(get_rank_name_by_order(5, "Mythic"))
+
     lines = [header, LINE]
     if not entries:
         lines.append("📭 Hozircha reyting ma’lumotlari yo‘q.")
@@ -105,7 +124,10 @@ async def _show_ranking(
         for e in entries:
             me = " 👈" if db_user is not None and e.user.id == db_user.id else ""
             lines.append(f"{_prefix(e.rank)} <b>{esc(e.user.display_name)}</b>{me}")
-            lines.append(f"      ✨ {e.unique_cards} noyob · 🎴 {e.total_cards} jami · 🟡 {e.legendary_cards} · 🔴 {e.mythic_cards}")
+            lines.append(
+                f"      ✨ {e.unique_cards} noyob · 🎴 {e.total_cards} jami · "
+                f"{r4_meta.emoji} {e.legendary_cards} · {r5_meta.emoji} {e.mythic_cards}"
+            )
     mine = my_group if scope == "group" else my_global
     if mine is not None:
         lines.append(f"\n📍 Sizning o‘riningiz: <b>#{mine}</b>")

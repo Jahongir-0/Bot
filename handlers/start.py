@@ -10,10 +10,12 @@ from database.session import get_session
 from keyboards.main_menu import GROUP_MENUS, back_home_kb, group_menu_kb, main_menu_kb
 from models.user import User
 from services.drop_service import DropService
+from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 from utils.callback_data import NavCb
+from utils.constants import get_rank_name_by_order, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, fmt_coins, format_card_block, header
 from utils.tg_helpers import edit_or_answer, is_admin_user, send_card_message
 
@@ -30,18 +32,17 @@ HELP_TEXT = (
     "<b>1️⃣ Karta olish</b>\n"
     "Botni guruhga qo‘shing. Guruhda karta rasmi tashlanadi (ismi yashirin). "
     "O‘sha xabarga <b>REPLY</b> qilib personaj ismini yozing. Birinchi to‘g‘ri topgan kartani oladi!\n\n"
-    "<b>2️⃣ Coin va XP</b>\n"
-    "🎁 Kunlik bonus, 🎲 tosh o‘yini, 🧠 viktorina va 📋 vazifalar orqali coin yutasiz.\n\n"
+    "<b>2️⃣ Coin, XP va Paketlar</b>\n"
+    "🎁 Kunlik bonus (/daily), 🎲 mini-o‘yinlar (/game), 🧠 viktorina (/quiz), 📋 vazifalar va 🎁 kunlik paket (/pack) orqali coin hamda kartalar yuting.\n\n"
     "<b>3️⃣ Kartalar bilan nima qilish mumkin?</b>\n"
-    "🛒 Bozorda soting · 🔨 auksionda qatnashing · 🤝 do‘stingiz bilan almashing · 👤 profilingizga qo‘ying.\n\n"
-    "<b>4️⃣ Foydali buyruqlar</b>\n"
-    "/menu — bosh menyu\n"
-    "/daily — kunlik bonus\n"
-    "/cards — kartalarim\n"
-    "/game — tosh o‘yini\n"
-    "/top — reyting\n"
-    "/me — profil\n\n"
-    "💬 Savol yoki taklif bo‘lsa, menyudagi <b>ALOQA</b> tugmasi orqali adminga yozing."
+    "🛒 Bozorda soting (/market) · 🔨 auksion (/auction) · 🤝 do‘stingiz bilan almashing (/trade) · 💖 istaklar (/wishlist).\n\n"
+    "<b>4️⃣ Asosiy buyruqlar</b>\n"
+    "/menu — bosh menyu · /me — profilim\n"
+    "/cards — kartalarim · /search — qidiruv\n"
+    "/daily — kunlik bonus · /pack — paket (kuniga 1 marta)\n"
+    "/game — mini-o‘yinlar · /quiz — viktorina\n"
+    "/top — reytinglar · /vip — VIP imtiyozlar\n\n"
+    "💬 Savol yoki taklif bo‘lsa, menyudagi <b>ALOQA</b> (/support) tugmasi orqali adminga yozing."
 )
 
 
@@ -64,11 +65,14 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
     ref_link = f"https://t.me/{bot_username}?start=ref_{tg_id}" if bot_username else f"/start ref_{tg_id}"
 
     async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
         fresh_user = await session.get(User, db_user.id)
         ref_cfg = await SettingsService.get_referral_config(session)
         grp_coins = await SettingsService.get_group_add_reward_coins(session)
 
     ref_count = int(fresh_user.referral_count if fresh_user else db_user.referral_count or 0)
+    r3_name = get_rank_name_by_order(3, "Epic")
+    r3_meta = get_rarity_meta(r3_name)
     text = (
         f"{header('👥 <b>DO‘STLAR VA MUKOFOTLAR</b>')}\n"
         f"👥 Taklif qilgan do‘stlaringiz: <b>{ref_count}</b> ta\n\n"
@@ -77,7 +81,7 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
         f"• Do‘stingiz: <b>+{fmt_coins(ref_cfg['invitee_coins'])}</b> 🪙\n"
         "<i>(Faqat botga birinchi marta kirgan do‘stlar uchun)</i>\n\n"
         "🏰 <b>Botni guruhga qo‘shsangiz</b>\n"
-        f"• <b>+{fmt_coins(grp_coins)}</b> 🪙 + 🟣 eksklyuziv <b>Epic karta</b>\n"
+        f"• <b>+{fmt_coins(grp_coins)}</b> 🪙 + {r3_meta.emoji} eksklyuziv <b>{esc(r3_name)} karta</b>\n"
         "<i>(Bu karta boshqa guruhlarga tashlanmaydi, faqat sizga beriladi)</i>\n\n"
         f"🔗 <b>Sizning havolangiz</b> (bosib nusxalang):\n<code>{esc(ref_link)}</code>"
     )
@@ -175,8 +179,17 @@ async def cb_home(
     is_bot_admin: bool = False,
 ) -> None:
     await state.clear()
+    welcome_txt = WELCOME_TEXT
+    async with get_session() as session:
+        custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
+        if custom_w:
+            welcome_txt = str(custom_w)
     is_admin = is_bot_admin or is_admin_user(callback.from_user)
-    await edit_or_answer(callback, _home_text(db_user), reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin))
+    await edit_or_answer(
+        callback,
+        _home_text(db_user, welcome_txt),
+        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin),
+    )
 
 
 @router.callback_query(NavCb.filter(F.target == "grp_play"))
@@ -246,7 +259,11 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
         ]
         if reward_result is not None and event.from_user:
             coins, epic_card = reward_result
-            extra = f" + 🟣 <b>{esc(epic_card.character_name)}</b> (Epic)" if epic_card else ""
+            if epic_card:
+                ec_meta = get_rarity_meta(epic_card.rarity)
+                extra = f" + {ec_meta.emoji} <b>{esc(epic_card.character_name)}</b> ({esc(ec_meta.name)})"
+            else:
+                extra = ""
             welcome_lines.append(
                 f"\n🎁 <b>{esc(event.from_user.first_name)}</b> botni qo‘shgani uchun "
                 f"<b>+{fmt_coins(coins)} 🪙</b>{extra} mukofot oldi!"
@@ -264,8 +281,9 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
             )
             try:
                 if epic_card is not None:
+                    ec_meta = get_rarity_meta(epic_card.rarity)
                     pm_text += (
-                        f"\n🟣 Eksklyuziv Epic karta (guruhlarga tashlanmaydi):\n\n"
+                        f"\n{ec_meta.emoji} Eksklyuziv {esc(ec_meta.name)} karta (guruhlarga tashlanmaydi):\n\n"
                         f"{format_card_block(epic_card)}"
                     )
                     await send_card_message(event.bot, adder_tg_id, epic_card, pm_text)

@@ -22,9 +22,10 @@ from models.card import Card
 from models.user import User
 from models.user_card import UserCard
 from services.collection_service import CollectionService
+from services.gameplay_service import GameplayService
 from services.market_service import MarketService
 from utils.callback_data import CollectionCb, NavCb
-from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta
+from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, event_tag, fmt_coins, format_card_about, format_card_block, format_collection_summary
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
 
@@ -199,7 +200,7 @@ async def cb_char_open(callback: CallbackQuery, callback_data: CollectionCb, db_
         meta = get_rarity_meta(v.card.rarity)
         tag = "  🎯 <i>EVENT · cheklangan nusxa</i>" if v.card.is_event_card else ""
         lines.append(
-            f"{event_tag(v.card)}{meta.emoji} {esc(v.card.rarity)} · <code>{esc(v.card.card_code)}</code> × {v.quantity} "
+            f"{event_tag(v.card)}{meta.emoji} {esc(meta.name)} · <code>{esc(v.card.card_code)}</code> × {v.quantity} "
             f"— 💰 {fmt_coins(v.card.base_value)}{tag}"
         )
     await edit_or_answer(
@@ -216,9 +217,11 @@ async def cb_char_open(callback: CallbackQuery, callback_data: CollectionCb, db_
 # ---------------------------------------------------------------------------
 @router.callback_query(CollectionCb.filter(F.action == "by_rarity"))
 async def cb_by_rarity(callback: CallbackQuery) -> None:
+    async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
     await edit_or_answer(
         callback,
-        "⭐ <b>Rarity bo‘yicha filtrlash:</b>",
+        "⭐ <b>Rank bo‘yicha filtrlash:</b>",
         reply_markup=collection_rarity_filter_kb(callback.from_user.id),
     )
 

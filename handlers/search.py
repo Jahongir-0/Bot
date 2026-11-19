@@ -15,9 +15,10 @@ from keyboards.market import (
     search_results_kb,
 )
 from models.user import User
+from services.gameplay_service import GameplayService
 from services.search_service import SearchService
 from utils.callback_data import NavCb, SearchCb
-from utils.constants import PAGE_SIZE, get_rarity_meta
+from utils.constants import PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import header, esc, event_tag, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
@@ -65,7 +66,7 @@ async def _render_results(
             )
             lines.append(
                 f"🎴 {event_tag(item.card)}<b>{esc(item.card.character_name)}</b>\n"
-                f"📺 {esc(item.card.anime_name)} · {meta.emoji} {esc(item.card.rarity)}\n"
+                f"📺 {esc(item.card.anime_name)} · {meta.emoji} {esc(meta.name)}\n"
                 f"👤 Egasi: {esc(item.owner.display_name)} · {status_line}\n"
             )
         await edit_or_answer(
@@ -91,7 +92,7 @@ async def _render_results(
         for card in catalog_cards:
             meta = get_rarity_meta(card.rarity)
             lines.append(
-                f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(card.rarity)}\n"
+                f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(meta.name)}\n"
                 f"📺 {esc(card.anime_name)} · 💰 {fmt_coins(card.base_value)} 🪙 · <code>{esc(card.card_code)}</code>\n"
             )
         await edit_or_answer(
@@ -160,6 +161,8 @@ async def cb_search_mode(
     state: FSMContext,
 ) -> None:
     if callback_data.mode == "rarity":
+        async with get_session() as session:
+            sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
         await edit_or_answer(
             callback,
             f"{header('⭐ <b>RANK BO‘YICHA QIDIRUV</b>')}\nRankni tanlang:",
@@ -237,8 +240,8 @@ async def cb_search_inspect(
     )
     text = (
         f"{format_card_block(item.card)}\n\n"
-        f"👤 <b>Owner:</b> {esc(item.owner.display_name)}\n"
-        f"📌 <b>Status:</b> {status}\n"
+        f"👤 <b>Egasi:</b> {esc(item.owner.display_name)}\n"
+        f"📌 <b>Holati:</b> {status}\n"
         f"🆔 <b>Nusxa ID:</b> <code>{item.user_card.id}</code>"
     )
     kb = search_inspect_kb(

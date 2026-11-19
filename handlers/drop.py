@@ -137,7 +137,7 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
     success_text = (
         f"✅ <b>{esc(result.winner.display_name)}</b>, to‘g‘ri topdingiz!\n"
         f"🎴 <b>{esc(result.card.character_name)}</b>\n"
-        f"📺 {esc(result.card.anime_name)} · {meta.emoji} {esc(result.card.rarity)}\n"
+        f"📺 {esc(result.card.anime_name)} · {meta.emoji} {esc(meta.name)}\n"
         f"✨ <b>+20 XP</b> berildi, karta kolleksiyangizga qo‘shildi!"
     )
     card_deleted = await safe_delete(bot, chat_id, replied.message_id)

@@ -68,16 +68,16 @@ async def _create_transfer_and_text(db_user: User, recipient_id: int, user_card_
     if price == 0:
         confirm_actor_tg_id = db_user.telegram_id
         text = (
-            f"🎁 <b>FREE TRANSFER TASDIQLASH</b>\n\n"
-            f"🎴 Karta: <b>{esc(res.card.character_name)}</b> ({esc(res.card.rarity)} · {esc(res.card.card_code)})\n"
+            f"🎁 <b>BEPUL YUBORISH TASDIQLASH</b>\n\n"
+            f"🎴 Karta: <b>{esc(res.card.character_name)}</b> ({esc(get_rarity_meta(res.card.rarity).name)} · {esc(res.card.card_code)})\n"
             f"👤 Qabul qiluvchi: {esc(res.to_user.display_name)}\n\n"
             f"Ushbu kartani {esc(res.to_user.display_name)} ga berishni tasdiqlaysizmi?"
         )
     else:
         confirm_actor_tg_id = res.to_user.telegram_id
         text = (
-            f"💰 <b>PAID TRANSFER TAKLIFI</b>\n\n"
-            f"🎴 Karta: <b>{esc(res.card.character_name)}</b> ({esc(res.card.rarity)} · {esc(res.card.card_code)})\n"
+            f"💰 <b>PULLIK SOTUV TAKLIFI</b>\n\n"
+            f"🎴 Karta: <b>{esc(res.card.character_name)}</b> ({esc(get_rarity_meta(res.card.rarity).name)} · {esc(res.card.card_code)})\n"
             f"👤 Yuboruvchi: {esc(res.from_user.display_name)}\n"
             f"👤 Qabul qiluvchi: {esc(res.to_user.display_name)}\n"
             f"🪙 Narxi: <b>{fmt_coins(price)} coins</b>\n\n"
@@ -114,12 +114,12 @@ async def _show_matches(target: Message, state: FSMContext, db_user: User, query
     notes = []
     for uc, card in matches:
         meta = get_rarity_meta(card.rarity)
-        label = f"{meta.emoji} {card.rarity} · {card.character_name} ({card.card_code})"[:60]
+        label = f"{meta.emoji} {meta.name} · {card.character_name} ({card.card_code})"[:60]
         if uc.is_locked:
-            notes.append(f"🔒 {esc(card.character_name)} ({esc(card.rarity)}) — marketda/transferda band")
+            notes.append(f"🔒 {esc(card.character_name)} ({esc(meta.name)}) — marketda/almashuvda band")
             continue
         if card.id in recipient_has:
-            notes.append(f"🚫 {esc(card.character_name)} ({esc(card.rarity)}) — qabul qiluvchida allaqachon bor")
+            notes.append(f"🚫 {esc(card.character_name)} ({esc(meta.name)}) — qabul qiluvchida allaqachon bor")
             continue
         builder.row(
             InlineKeyboardButton(

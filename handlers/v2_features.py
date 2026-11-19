@@ -194,31 +194,53 @@ async def msg_reply_quiz_answer(message: Message, db_user: User) -> None:
 _PLAYING: set = set()
 
 
-def _game_menu_text(cfg: dict, dice_used: int, flip_used: int, lucky_used: int) -> str:
+def _game_menu_text(
+    cfg: dict,
+    dice_en: bool,
+    dice_used: int,
+    flip_en: bool,
+    flip_used: int,
+    lucky_en: bool,
+    lucky_used: int,
+    coins: int = 0,
+) -> str:
     d_limit = int(cfg.get("dice_daily_limit", 3))
     f_limit = int(cfg.get("coinflip_daily_limit", 5))
     l_limit = int(cfg.get("lucky_daily_limit", 3))
-    return (
-        "🎮 <b>MINI O‘YINLAR MARKAZI</b>\n"
-        "━━━━━━━━━━━━━━━\n"
-        f"🎲 <b>Tosh o‘yini</b> — 1..6 sonni toping (+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙)\n"
-        f"   🎟 Bugun qoldi: <b>{max(0, d_limit - dice_used)}/{d_limit}</b>\n\n"
-        "🪙 <b>Tanga tashlash</b> — gerb yoki raqam (2x yutuq)\n"
-        f"   🎟 Bugun qoldi: <b>{max(0, f_limit - flip_used)}/{f_limit}</b>\n\n"
-        f"🃏 <b>Omadli karta</b> — bepul omad ({cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙)\n"
-        f"   🎟 Bugun qoldi: <b>{max(0, l_limit - lucky_used)}/{l_limit}</b>"
-    )
+    d_left = max(0, d_limit - dice_used)
+    f_left = max(0, f_limit - flip_used)
+    l_left = max(0, l_limit - lucky_used)
+    lines = [
+        "🎮 <b>MINI O‘YINLAR MARKAZI</b>",
+        "━━━━━━━━━━━━━━━",
+        f"🪙 Balansingiz: <b>{fmt_coins(coins)}</b> coin\n",
+        f"🎲 <b>Tosh o‘yini</b> — 1..6 sonni toping (+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙)",
+        f"   {'🔴 O‘chirilgan' if not dice_en else f'🎟 Bugun qoldi: <b>{d_left}/{d_limit}</b>'}\n",
+        "🪙 <b>Tanga tashlash</b> — gerb yoki raqam (2x yutuq)",
+        f"   {'🔴 O‘chirilgan' if not flip_en else f'🎟 Bugun qoldi: <b>{f_left}/{f_limit}</b>'}\n",
+        f"🃏 <b>Omadli karta</b> — bepul omad ({cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙)",
+        f"   {'🔴 O‘chirilgan' if not lucky_en else f'🎟 Bugun qoldi: <b>{l_left}/{l_limit}</b>'}",
+    ]
+    if not (
+        (dice_en and d_left > 0)
+        or (flip_en and f_left > 0)
+        or (lucky_en and l_left > 0)
+    ):
+        lines.append("\n⏳ <i>Bugungi barcha mini-o‘yin urinishlaringiz tugadi. Ertaga qayting!</i>")
+    return "\n".join(lines)
 
 
 async def _game_state(user_id: int):
     async with get_session() as session:
         user = await session.get(User, user_id)
         cfg = await GameplayService.get_game_config(session)
-        d_en, d_used, d_lim = await GameplayService.get_dice_status(session, user)
-        f_en, f_used, f_lim = await GameplayService.get_coinflip_status(session, user)
-        l_en, l_used, l_lim = await GameplayService.get_lucky_status(session, user)
+        d_en, d_used, d_lim = await GameplayService.get_dice_status(session, user_id)
+        f_en, f_used, f_lim = await GameplayService.get_coinflip_status(session, user_id)
+        l_en, l_used, l_lim = await GameplayService.get_lucky_status(session, user_id)
+        coins = int(user.coins or 0) if user is not None else 0
     return {
         "cfg": cfg,
+        "coins": coins,
         "dice_enabled": d_en,
         "dice_used": d_used,
         "dice_limit": d_lim,
@@ -235,7 +257,16 @@ async def _game_state(user_id: int):
 async def cmd_game(message: Message, db_user: User) -> None:
     st = await _game_state(db_user.id)
     await message.answer(
-        _game_menu_text(st["cfg"], st["dice_used"], st["flip_used"], st["lucky_used"]),
+        _game_menu_text(
+            st["cfg"],
+            st["dice_enabled"],
+            st["dice_used"],
+            st["flip_enabled"],
+            st["flip_used"],
+            st["lucky_enabled"],
+            st["lucky_used"],
+            coins=st["coins"],
+        ),
         reply_markup=games_menu_kb(
             message.from_user.id,
             can_dice=st["dice_enabled"] and st["dice_used"] < st["dice_limit"],
@@ -250,7 +281,16 @@ async def cb_games_menu(callback: CallbackQuery, db_user: User) -> None:
     st = await _game_state(db_user.id)
     await edit_or_answer(
         callback,
-        _game_menu_text(st["cfg"], st["dice_used"], st["flip_used"], st["lucky_used"]),
+        _game_menu_text(
+            st["cfg"],
+            st["dice_enabled"],
+            st["dice_used"],
+            st["flip_enabled"],
+            st["flip_used"],
+            st["lucky_enabled"],
+            st["lucky_used"],
+            coins=st["coins"],
+        ),
         reply_markup=games_menu_kb(
             callback.from_user.id,
             can_dice=st["dice_enabled"] and st["dice_used"] < st["dice_limit"],
@@ -310,16 +350,21 @@ async def cb_game_pick(callback: CallbackQuery, callback_data: GameCb, db_user: 
         value = int(dice_msg.dice.value)
         await asyncio.sleep(3.8)  # animatsiya tugashini kutamiz
 
+        used_now = st["dice_used"]
+        limit_now = st["dice_limit"]
         async with get_session() as session:
             user = await session.get(User, uid)
-            ok, msg, _roll, _coins = await GameplayService.play_dice_game(
-                session, user, dice_value=value, guessed_number=guess
-            )
+            if user is None:
+                ok, msg = False, "Foydalanuvchi topilmadi."
+            else:
+                ok, msg, _roll, _coins = await GameplayService.play_dice_game(
+                    session, user, dice_value=value, guessed_number=guess
+                )
             if ok:
                 await session.commit()
+                _en, used_now, limit_now = await GameplayService.get_dice_status(session, uid)
             else:
                 await session.rollback()
-            _en, used_now, limit_now = await GameplayService.get_dice_status(session, user)
         left = max(0, limit_now - used_now)
         footer = f"\n\n🎟 Qolgan urinishlar: <b>{left}/{limit_now}</b>"
         b = InlineKeyboardBuilder()
@@ -346,7 +391,12 @@ async def cb_game_flip_menu(callback: CallbackQuery, db_user: User) -> None:
     left = max(0, st["flip_limit"] - st["flip_used"])
     await edit_or_answer(
         callback,
-        f"🪙 <b>TANGA TASHLASH (2x)</b>\n\nTomon va garov miqdorini tanlang:\n🎟 Qolgan urinishlar: <b>{left}/{st['flip_limit']}</b>",
+        (
+            f"🪙 <b>TANGA TASHLASH (2x)</b>\n\n"
+            f"Tomon va garov miqdorini tanlang:\n"
+            f"💰 Balansingiz: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Qolgan urinishlar: <b>{left}/{st['flip_limit']}</b>"
+        ),
         reply_markup=coinflip_pick_kb(callback.from_user.id),
     )
     await callback.answer()
@@ -354,16 +404,24 @@ async def cb_game_flip_menu(callback: CallbackQuery, db_user: User) -> None:
 
 @router.callback_query(GameCb.filter(F.act == "flip_go"))
 async def cb_game_flip_go(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    used_now = 0
+    limit_now = 5
+    new_coins = int(db_user.coins or 0)
     async with get_session() as session:
-        user = await session.get(User, db_user.id)
-        ok, msg, _won, _delta = await GameplayService.play_coin_flip(
-            session, user, choice=callback_data.extra, bet=callback_data.val
-        )
+        user = await session.get(User, uid)
+        if user is None:
+            ok, msg = False, "Foydalanuvchi topilmadi."
+        else:
+            ok, msg, _won, _delta = await GameplayService.play_coin_flip(
+                session, user, choice=callback_data.extra, bet=callback_data.val
+            )
         if ok:
+            new_coins = int(user.coins or 0)
             await session.commit()
+            _en, used_now, limit_now = await GameplayService.get_coinflip_status(session, uid)
         else:
             await session.rollback()
-        _en, used_now, limit_now = await GameplayService.get_coinflip_status(session, user)
     if not ok:
         await callback.answer(msg[:190], show_alert=True)
         return
@@ -375,7 +433,11 @@ async def cb_game_flip_go(callback: CallbackQuery, callback_data: GameCb, db_use
         InlineKeyboardButton(text="🎮 O‘yinlar", callback_data=GameCb(owner_id=callback.from_user.id, act="v").pack()),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=callback.from_user.id, target="home").pack()),
     )
-    await edit_or_answer(callback, f"{msg}\n\n🎟 Qolgan urinishlar: <b>{left}/{limit_now}</b>", reply_markup=b.as_markup())
+    await edit_or_answer(
+        callback,
+        f"{msg}\n\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qolgan urinishlar: <b>{left}/{limit_now}</b>",
+        reply_markup=b.as_markup(),
+    )
     await callback.answer()
 
 
@@ -399,14 +461,20 @@ async def cb_game_lucky_menu(callback: CallbackQuery, db_user: User) -> None:
 
 @router.callback_query(GameCb.filter(F.act == "lucky_pick"))
 async def cb_game_lucky_pick(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    used_now = 0
+    limit_now = 3
     async with get_session() as session:
-        user = await session.get(User, db_user.id)
-        ok, msg, _coins = await GameplayService.play_lucky_card(session, user, picked_slot=callback_data.val)
+        user = await session.get(User, uid)
+        if user is None:
+            ok, msg = False, "Foydalanuvchi topilmadi."
+        else:
+            ok, msg, _coins = await GameplayService.play_lucky_card(session, user, picked_slot=callback_data.val)
         if ok:
             await session.commit()
+            _en, used_now, limit_now = await GameplayService.get_lucky_status(session, uid)
         else:
             await session.rollback()
-        _en, used_now, limit_now = await GameplayService.get_lucky_status(session, user)
     if not ok:
         await callback.answer(msg[:190], show_alert=True)
         return
@@ -898,7 +966,7 @@ async def cmd_trade(message: Message, state: FSMContext, db_user: User) -> None:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"🎴 {c.character_name[:28]} ({c.rarity})",
+                text=f"🎴 {c.character_name[:28]} ({get_rarity_meta(c.rarity).name})",
                 callback_data=TradeCb(owner_id=message.from_user.id, act="pick", tid=partner.id, ucid=uc.id).pack(),
             )
         ]
@@ -951,7 +1019,7 @@ async def cb_trade_pick(callback: CallbackQuery, callback_data: TradeCb, db_user
         rows = [
             [
                 InlineKeyboardButton(
-                    text=f"🔁 {c.character_name[:26]} ({c.rarity})",
+                    text=f"🔁 {c.character_name[:26]} ({get_rarity_meta(c.rarity).name})",
                     callback_data=TradeCb(owner_id=partner.telegram_id, act="accept", tid=trade.id, ucid=uc.id).pack(),
                 )
             ]
