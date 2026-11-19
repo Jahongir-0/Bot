@@ -64,7 +64,7 @@ Stars to'lovi tasdiqlanmasa avtomatik qaytarish, SQLite'da vaqt solishtirish xat
 - **Bir user bir xil kartadan faqat bitta nusxa** ola oladi: drop, market, offer, transfer, event va admin berishda tekshiriladi ("Bu kartadan sizda bor").
 
 ## Rank narxi va tashlash soni
-Admin → ⚙️ Sozlamalar → **🎖 RANK NARXI VA TASHLASH SONI**. Boshlang'ich: Common 1000 coin/3 ta, Rare 2500/2, Epic 5000/2, Legendary 10000/1, Mythic 25000/1.
+Admin → ⚙️ Sozlamalar → **⭐ Ranklar**. Boshlang'ich: Basic 1000 coin/3 ta, Elita 2500/2, Epic 5000/2, Legend 10000/1, Mythic 25000/1, Divine 60000/1.
 Karta qo'shishda faqat: personaj ismi → anime nomi → rank (inline tugma) → rasm. Narx va tashlash soni rankdan avtomatik olinadi.
 Rasm: Telegram foto yoki to'g'ri havola (jpg/png/webp). Noto'g'ri havola yoki boshqa format qabul qilinmaydi.
 
