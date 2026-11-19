@@ -1,7 +1,6 @@
 from aiogram import Dispatcher
 
 from admin.handlers import router as admin_router
-from admin.quick_add import router as admin_quick_add_router
 from admin.v2_handlers import router as admin_v2_router
 from handlers.collection import router as collection_router
 from handlers.daily import router as daily_router
@@ -9,8 +8,6 @@ from handlers.drop import router as drop_router
 from handlers.event import router as event_router
 from handlers.market import router as market_router
 from handlers.offer import router as offer_router
-from handlers.pack import router as pack_router
-from handlers.premium_emoji_admin import router as premium_emoji_router
 from handlers.profile import router as profile_router
 from handlers.quests import router as quests_router
 from handlers.ranking import router as ranking_router
@@ -23,9 +20,7 @@ from handlers.v2_features import router as v2_features_router
 
 def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(admin_router)
-    dp.include_router(admin_quick_add_router)
     dp.include_router(admin_v2_router)
-    dp.include_router(premium_emoji_router)
     dp.include_router(start_router)
     dp.include_router(drop_router)
     dp.include_router(profile_router)
@@ -39,5 +34,4 @@ def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(quests_router)
     dp.include_router(stars_router)
     dp.include_router(event_router)
-    dp.include_router(pack_router)
     dp.include_router(v2_features_router)

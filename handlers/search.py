@@ -15,11 +15,11 @@ from keyboards.market import (
     search_results_kb,
 )
 from models.user import User
-from services.gameplay_service import GameplayService
 from services.search_service import SearchService
 from utils.callback_data import NavCb, SearchCb
-from utils.constants import PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
-from utils.formatting import header, esc, event_tag, fmt_coins, format_card_block
+from utils.constants import PAGE_SIZE, get_rarity_meta
+from utils.formatting import esc, event_tag, fmt_coins, format_card_block
+from utils.i18n import get_lang, tr
 from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
 router = Router(name="search")
@@ -35,6 +35,7 @@ async def _render_results(
     mode: str,
     query: str,
     page: int,
+    lang: str = "uz",
 ) -> None:
     async with get_session() as session:
         items, total = await SearchService.search_global_cards(
@@ -56,18 +57,18 @@ async def _render_results(
             )
 
     if total > 0:
-        lines = [header("🔍 <b>QIDIRUV NATIJALARI</b>"), f"📌 Topildi: <b>{total}</b> ta\n"]
+        lines = [f"🔍 <b>GLOBAL SEARCH</b> ({total})\n"]
         for item in items:
             meta = get_rarity_meta(item.card.rarity)
             status_line = (
-                f"🟢 Sotuvda — <b>{fmt_coins(item.active_listing.price)} 🪙</b>"
+                f"🟢 Market — <b>{fmt_coins(item.active_listing.price)} 🪙</b>"
                 if item.active_listing is not None
-                else "🔴 Sotuvda emas"
+                else "⚪ Collection"
             )
             lines.append(
                 f"🎴 {event_tag(item.card)}<b>{esc(item.card.character_name)}</b>\n"
-                f"📺 {esc(item.card.anime_name)} · {meta.emoji} {esc(meta.name)}\n"
-                f"👤 Egasi: {esc(item.owner.display_name)} · {status_line}\n"
+                f"📺 {esc(item.card.anime_name)} · {meta.emoji} {esc(item.card.rarity)}\n"
+                f"👤 {esc(item.owner.display_name)} | {status_line}\n"
             )
         await edit_or_answer(
             target,
@@ -80,19 +81,17 @@ async def _render_results(
                 page=page,
                 total=total,
                 page_size=PAGE_SIZE,
+                lang=lang,
             ),
         )
         return
 
     if catalog_cards:
-        lines = [
-            f"📖 <b>KATALOGDAN TOPILGAN KARTALAR</b> (Jami: {catalog_total})\n"
-            "<i>Hali foydalanuvchilarda yo‘q, umumiy katalogdan topildi:</i>\n"
-        ]
+        lines = [f"📖 <b>CATALOG</b> ({catalog_total})\n"]
         for card in catalog_cards:
             meta = get_rarity_meta(card.rarity)
             lines.append(
-                f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(meta.name)}\n"
+                f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(card.rarity)}\n"
                 f"📺 {esc(card.anime_name)} · 💰 {fmt_coins(card.base_value)} 🪙 · <code>{esc(card.card_code)}</code>\n"
             )
         await edit_or_answer(
@@ -106,11 +105,12 @@ async def _render_results(
                 page=page,
                 total=catalog_total,
                 page_size=PAGE_SIZE,
+                lang=lang,
             ),
         )
         return
 
-    text = f"{header('🔍 <b>QIDIRUV</b>')}\nSo‘rov: <code>{esc(query or mode)}</code>\n📭 Hech qanday karta topilmadi.\n\n💡 Ismni qisqartirib yoki boshqacha yozib ko‘ring."
+    text = f"🔍 <b>SEARCH</b>\n\nQuery: <code>{esc(query or mode)}</code>\n📭 {tr(lang, 'not_found')}"
     await edit_or_answer(
         target,
         text,
@@ -122,35 +122,36 @@ async def _render_results(
             page=1,
             total=0,
             page_size=PAGE_SIZE,
+            lang=lang,
         ),
     )
 
 
 @router.message(Command("search"))
-async def cmd_search(message: Message, state: FSMContext) -> None:
+async def cmd_search(message: Message, state: FSMContext, db_user: User) -> None:
+    lang = get_lang(db_user)
     await state.clear()
     parts = message.text.split(maxsplit=1) if message.text else []
     if len(parts) == 2 and parts[1].strip():
         q = parts[1].strip()
         await state.update_data(last_search_query=q, last_search_mode="any")
-        await _render_results(message, message.from_user.id, "any", q, 1)
+        await _render_results(message, message.from_user.id, "any", q, 1, lang=lang)
         return
     await message.answer(
-        f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\n"
-        "Hamma foydalanuvchilar kartalari va umumiy katalog bo‘yicha qidiring.\n\n"
-        "💡 Tez qidirish: <code>/search Gojo</code>",
-        reply_markup=search_menu_kb(message.from_user.id),
+        tr(lang, "srch_title"),
+        reply_markup=search_menu_kb(message.from_user.id, lang=lang),
     )
 
 
 @router.callback_query(NavCb.filter(F.target == "search"))
 @router.callback_query(SearchCb.filter(F.action == "menu"))
-async def cb_search_menu(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_search_menu(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
+    lang = get_lang(db_user)
     await state.clear()
     await edit_or_answer(
         callback,
-        f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\nQanday qidiramiz?",
-        reply_markup=search_menu_kb(callback.from_user.id),
+        tr(lang, "srch_title"),
+        reply_markup=search_menu_kb(callback.from_user.id, lang=lang),
     )
 
 
@@ -159,44 +160,44 @@ async def cb_search_mode(
     callback: CallbackQuery,
     callback_data: SearchCb,
     state: FSMContext,
+    db_user: User,
 ) -> None:
+    lang = get_lang(db_user)
     if callback_data.mode == "rarity":
-        async with get_session() as session:
-            sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
         await edit_or_answer(
             callback,
-            f"{header('⭐ <b>RANK BO‘YICHA QIDIRUV</b>')}\nRankni tanlang:",
-            reply_markup=search_rarity_kb(callback.from_user.id),
+            tr(lang, "col_rarity_prompt"),
+            reply_markup=search_rarity_kb(callback.from_user.id, lang=lang),
         )
         return
 
     prompts = {
-        "character": "🔍 Qahramon ismini yozing (masalan: <code>Gojo</code>):",
-        "anime": "📺 Anime nomini yozing (masalan: <code>Jujutsu Kaisen</code>):",
-        "card_id": "🎴 Card ID yoki nusxa ID yozing (masalan: <code>CRD-0001</code> yoki <code>12</code>):",
+        "character": "🔍 Personaj ismini yozing / Character name (e.g. <code>Gojo</code>):",
+        "anime": "📺 Media nomini yozing / Media title (e.g. <code>Jujutsu Kaisen</code>):",
+        "card_id": "🎴 Card ID (e.g. <code>CRD-0001</code>):",
     }
     await state.set_state(SearchStates.waiting_query)
     await state.update_data(search_mode=callback_data.mode, owner_tg_id=callback.from_user.id)
     await edit_or_answer(
         callback,
-        prompts.get(callback_data.mode, "Qidiruv so‘zini yozing:") + "\n<i>Bekor qilish: /cancel</i>",
-        reply_markup=back_home_kb(callback.from_user.id, "search"),
+        prompts.get(callback_data.mode, "Query:") + "\n<i>/cancel</i>",
+        reply_markup=back_home_kb(callback.from_user.id, "search", lang),
     )
 
 
 @router.message(SearchStates.waiting_query, NotCommandFilter())
-async def fsm_search_query(message: Message, state: FSMContext) -> None:
+async def fsm_search_query(message: Message, state: FSMContext, db_user: User) -> None:
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
     query = (message.text or "").strip()
     if not query:
-        await message.answer("⚠️ Qidiruv so‘zini yozing.")
+        await message.answer("⚠️ Query?")
         return
     mode = data.get("search_mode", "character")
     await state.set_state(None)
     await state.update_data(last_search_query=query, last_search_mode=mode)
-    await _render_results(message, message.from_user.id, mode, query, 1)
+    await _render_results(message, message.from_user.id, mode, query, 1, lang=get_lang(db_user))
 
 
 @router.callback_query(SearchCb.filter(F.action.in_({"results", "random"})))
@@ -204,6 +205,7 @@ async def cb_search_results(
     callback: CallbackQuery,
     callback_data: SearchCb,
     state: FSMContext,
+    db_user: User,
 ) -> None:
     query = callback_data.query
     if callback_data.mode not in ("random", "rarity"):
@@ -217,6 +219,7 @@ async def cb_search_results(
         mode=callback_data.mode,
         query=query,
         page=callback_data.page,
+        lang=get_lang(db_user),
     )
 
 
@@ -226,23 +229,24 @@ async def cb_search_inspect(
     callback_data: SearchCb,
     db_user: User,
 ) -> None:
+    lang = get_lang(db_user)
     async with get_session() as session:
         item = await SearchService.inspect_user_card(session, callback_data.user_card_id)
 
     if item is None:
-        await callback.answer("Karta topilmadi.", show_alert=True)
+        await callback.answer(tr(lang, "card_not_found"), show_alert=True)
         return
 
     status = (
-        f"🟢 Sotuvda — <b>{fmt_coins(item.active_listing.price)} 🪙</b>"
+        f"🟢 Market — <b>{fmt_coins(item.active_listing.price)} 🪙</b>"
         if item.active_listing is not None
-        else "🔒 Sotuvda emas"
+        else "🔒 Collection"
     )
     text = (
-        f"{format_card_block(item.card)}\n\n"
-        f"👤 <b>Egasi:</b> {esc(item.owner.display_name)}\n"
-        f"📌 <b>Holati:</b> {status}\n"
-        f"🆔 <b>Nusxa ID:</b> <code>{item.user_card.id}</code>"
+        f"{format_card_block(item.card, lang=lang)}\n\n"
+        f"👤 <b>Owner:</b> {esc(item.owner.display_name)}\n"
+        f"📌 <b>Status:</b> {status}\n"
+        f"🆔 <b>Copy ID:</b> <code>{item.user_card.id}</code>"
     )
     kb = search_inspect_kb(
         owner_id=callback.from_user.id,
@@ -251,6 +255,7 @@ async def cb_search_inspect(
         mode=callback_data.mode,
         query=callback_data.query,
         page=callback_data.page,
+        lang=lang,
     )
     await edit_or_answer(callback, text, reply_markup=kb)
 
@@ -259,25 +264,28 @@ async def cb_search_inspect(
 async def cb_search_catalog_inspect(
     callback: CallbackQuery,
     callback_data: SearchCb,
+    db_user: User,
 ) -> None:
+    lang = get_lang(db_user)
     async with get_session() as session:
         card = await SearchService.inspect_catalog_card(session, callback_data.user_card_id)
 
     if card is None:
-        await callback.answer("Karta topilmadi.", show_alert=True)
+        await callback.answer(tr(lang, "card_not_found"), show_alert=True)
         return
 
     extra = (
-        "🎯 Bu karta limitli event kartasi."
+        "🎯 Limited Event Card"
         if card.is_event_card
-        else f"🔁 Guruhlarga tashlanishi: <b>{card.dropped_count}/{card.drop_limit}</b>"
+        else f"🔁 Drops: <b>{card.dropped_count}/{card.drop_limit}</b>"
     )
-    text = f"{format_card_block(card)}\n\n📖 <i>Umumiy katalogdan</i>\n{extra}"
+    text = f"{format_card_block(card, lang=lang)}\n\n{extra}"
     kb = search_catalog_inspect_kb(
         owner_id=callback.from_user.id,
         mode=callback_data.mode,
         query=callback_data.query,
         page=callback_data.page,
         card_id=card.id,
+        lang=lang,
     )
     await edit_or_answer(callback, text, reply_markup=kb)

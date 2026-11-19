@@ -13,6 +13,7 @@ from models.user import User
 from services.event_service import EventService
 from utils.callback_data import EvtCb, NavCb
 from utils.formatting import esc, format_event_message
+from utils.i18n import get_lang, tr
 from utils.tg_helpers import send_card_message
 
 logger = logging.getLogger(__name__)
@@ -21,37 +22,43 @@ router = Router(name="event")
 MAX_EVENTS_SHOWN = 5
 
 
-async def _send_active_events(bot: Bot, chat_id: int, owner_tg_id: int) -> None:
+async def _send_active_events(bot: Bot, chat_id: int, owner_tg_id: int, lang: str = "uz") -> None:
     async with get_session() as session:
         events = await EventService.get_active_events(session)
 
     if not events:
         await bot.send_message(
             chat_id,
-            "🎯 <b>EVENT</b>\n━━━━━━━━━━━━━━━\n📭 Hozircha faol event yo‘q.\n\n🔔 Yangi limitli event boshlanganda guruhlarga va sizga e’lon qilinadi!",
-            reply_markup=event_list_footer_kb(owner_tg_id),
+            tr(lang, "evt_none"),
+            reply_markup=event_list_footer_kb(owner_tg_id, lang=lang),
         )
         return
 
     tz = get_settings().timezone
     for event, card in events[:MAX_EVENTS_SHOWN]:
-        await send_card_message(bot, chat_id, card, format_event_message(card, event, tz, "active"), event_buy_kb(event))
+        await send_card_message(
+            bot,
+            chat_id,
+            card,
+            format_event_message(card, event, tz, "active", lang=lang),
+            event_buy_kb(event, lang=lang),
+        )
     await bot.send_message(
         chat_id,
-        "☝️ Faol limitli eventlar. Kartani olish uchun tugmani bosing. Har bir odamga 1 ta nusxa!",
-        reply_markup=event_list_footer_kb(owner_tg_id),
+        tr(lang, "evt_footer"),
+        reply_markup=event_list_footer_kb(owner_tg_id, lang=lang),
     )
 
 
 @router.message(Command("event", "events"))
 async def cmd_event(message: Message, db_user: User) -> None:
-    await _send_active_events(message.bot, message.chat.id, message.from_user.id)
+    await _send_active_events(message.bot, message.chat.id, message.from_user.id, lang=get_lang(db_user))
 
 
 @router.callback_query(NavCb.filter(F.target == "event"))
 async def nav_event(callback: CallbackQuery, db_user: User) -> None:
     await callback.answer()
-    await _send_active_events(callback.bot, callback.message.chat.id, callback.from_user.id)
+    await _send_active_events(callback.bot, callback.message.chat.id, callback.from_user.id, lang=get_lang(db_user))
 
 
 @router.callback_query(EvtCb.filter(F.action == "buy_coins"))
@@ -101,7 +108,7 @@ async def cb_event_buy_stars(callback: CallbackQuery, callback_data: EvtCb, bot:
         await bot.send_invoice(
             chat_id=callback.from_user.id,
             title=f"🎯 {card.character_name}"[:32],
-            description=f"Limitli event kartasi ({get_rarity_meta(card.rarity).name}) — {card.anime_name}. Bir kishi — bitta nusxa."[:255],
+            description=f"Limitli event kartasi ({card.rarity}) — {card.anime_name}. Bir kishi — bitta nusxa."[:255],
             payload=payload,
             currency="XTR",
             prices=[LabeledPrice(label=f"{card.character_name}"[:32], amount=int(event.price_stars))],

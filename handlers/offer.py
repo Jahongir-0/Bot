@@ -13,7 +13,8 @@ from services.offer_service import OfferService
 from services.search_service import SearchService
 from utils.callback_data import OfferCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE
-from utils.formatting import header, esc, fmt_coins
+from utils.formatting import esc, fmt_coins
+from utils.i18n import get_lang
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ async def fsm_offer_amount(message: Message, state: FSMContext, db_user: User) -
                 f"💰 Offer: <b>{fmt_coins(amount)} coins</b>\n"
                 f"👤 Xaridor: {esc(res.buyer.display_name)}"
             ),
-            reply_markup=offer_decision_kb(res.owner.telegram_id, res.offer.id),
+            reply_markup=offer_decision_kb(res.owner.telegram_id, res.offer.id, lang=get_lang(res.owner)),
         )
     except Exception as exc:
         logger.debug("Could not DM owner %s about new offer: %s", res.owner.telegram_id, exc)
@@ -122,9 +123,9 @@ async def cb_incoming_offers(callback: CallbackQuery, db_user: User) -> None:
         await session.commit()
 
     if not offers:
-        text = f"{header('📩 <b>KELGAN TAKLIFLAR</b>')}\n📭 Hozircha faol takliflar yo‘q."
+        text = "📩 <b>KELGAN TAKLIFLAR</b>\n\n📭 Hozircha faol takliflar yo‘q."
     else:
-        lines = [header("📩 <b>KELGAN TAKLIFLAR</b>"), f"📌 Jami: <b>{len(offers)}</b> ta\n"]
+        lines = [f"📩 <b>KELGAN TAKLIFLAR</b> ({len(offers)} ta)\n"]
         for off, card, buyer in offers[:8]:
             lines.append(
                 f"• <b>{esc(card.character_name)}</b> — <b>{fmt_coins(off.amount)} 🪙</b> | 👤 {esc(buyer.display_name)}"
@@ -134,7 +135,7 @@ async def cb_incoming_offers(callback: CallbackQuery, db_user: User) -> None:
     await edit_or_answer(
         callback,
         text,
-        reply_markup=incoming_offers_kb(callback.from_user.id, offers),
+        reply_markup=incoming_offers_kb(callback.from_user.id, offers, lang=get_lang(db_user)),
     )
 
 

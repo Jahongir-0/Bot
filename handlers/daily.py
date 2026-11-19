@@ -1,41 +1,22 @@
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from config.settings import get_settings
 from database.session import get_session
 from keyboards.main_menu import back_home_kb
 from models.user import User
 from services.daily_service import DailyService
 from utils.callback_data import NavCb
 from utils.constants import get_rarity_meta
-from utils.formatting import esc, fmt_coins, header
-from utils.tg_helpers import edit_or_answer, safe_delete, send_card_message
+from utils.formatting import esc, fmt_coins
+from utils.i18n import get_lang, tr
+from utils.tg_helpers import edit_or_answer, send_card_message
 
 router = Router(name="daily")
 
 
-def _week_dots(streak: int) -> str:
-    """Haftalik seriya: 7 ta katak."""
-    if streak <= 0:
-        return "⬜" * 7
-    filled = ((streak - 1) % 7) + 1
-    return "🟩" * filled + "⬜" * (7 - filled)
-
-
-def _time_left_text() -> str:
-    tz = ZoneInfo(get_settings().timezone)
-    now = datetime.now(tz)
-    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    mins = max(1, int((nxt - now).total_seconds() // 60))
-    h, m = divmod(mins, 60)
-    return f"{h} soat {m} daqiqa" if h else f"{m} daqiqa"
-
-
 async def _handle_daily(target, owner_id: int, db_user: User) -> None:
+    lang = get_lang(db_user)
     async with get_session() as session:
         res = await DailyService.claim_daily(session, db_user.id)
         if res.success:
@@ -43,43 +24,36 @@ async def _handle_daily(target, owner_id: int, db_user: User) -> None:
         else:
             await session.rollback()
 
-    kb = back_home_kb(owner_id, "profile")
-    if not res.success:
-        already = "Allaqachon" in res.message or "allaqachon" in res.message
-        text = (
-            f"{header('🎁 <b>KUNLIK BONUS</b>')}\n"
-            f"{'✅ Bugungi bonusni olib bo‘ldingiz.' if already else '⏳ ' + esc(res.message)}\n\n"
-            f"🔥 Seriya: <b>{res.streak}</b> kun\n{_week_dots(res.streak)}\n\n"
-            f"⏰ Keyingi bonus: <b>{_time_left_text()}</b> dan keyin"
+    if res.success:
+        card_line = ""
+        if res.card_awarded is not None:
+            meta = get_rarity_meta(res.card_awarded.rarity)
+            card_line = tr(
+                lang,
+                "daily_card_line",
+                emoji=meta.emoji,
+                char=esc(res.card_awarded.character_name),
+                anime=esc(res.card_awarded.anime_name),
+            )
+        text = tr(
+            lang,
+            "daily_ok",
+            coins=fmt_coins(res.coins_awarded),
+            streak=res.streak,
+            card_line=card_line,
         )
-        await edit_or_answer(target, text, reply_markup=kb)
-        return
-
-    card_line = ""
-    if res.card_awarded is not None:
-        meta = get_rarity_meta(res.card_awarded.rarity)
-        card_line = (
-            f"\n🎴 <b>Tasodifiy karta:</b>\n"
-            f"{meta.emoji} <b>{esc(res.card_awarded.character_name)}</b> · {esc(res.card_awarded.anime_name)}\n"
-        )
-    text = (
-        f"{header('🎁 <b>KUNLIK BONUS OLINDI!</b>')}\n"
-        f"🪙 <b>+{fmt_coins(res.coins_awarded)}</b> coin   ⚡ <b>+15</b> XP\n"
-        f"{card_line}\n"
-        f"🔥 Seriya: <b>{res.streak}</b> kun\n{_week_dots(res.streak)}\n\n"
-        "💡 Har kuni kiring: seriya uzaygan sari bonus oshadi!"
-    )
-    if res.card_awarded is not None:
-        if isinstance(target, CallbackQuery) and target.message is not None:
-            await target.answer()
-            await safe_delete(target.bot, target.message.chat.id, target.message.message_id)
-            await send_card_message(target.bot, target.message.chat.id, res.card_awarded, text, kb)
+        if res.card_awarded is not None and isinstance(target, Message):
+            await send_card_message(
+                target.bot,
+                target.chat.id,
+                res.card_awarded,
+                text,
+                back_home_kb(owner_id, "profile", lang),
+            )
             return
-        if isinstance(target, Message):
-            await send_card_message(target.bot, target.chat.id, res.card_awarded, text, kb)
-            return
-    await edit_or_answer(target, text, reply_markup=kb)
-
+    else:
+        text = tr(lang, "daily_wait", msg=esc(res.message), streak=res.streak)
+    await edit_or_answer(target, text, reply_markup=back_home_kb(owner_id, "profile", lang))
 
 
 @router.message(Command("daily"))

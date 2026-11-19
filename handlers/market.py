@@ -17,8 +17,8 @@ from services.market_service import MarketService
 from services.user_service import InsufficientCoinsError
 from utils.callback_data import MarketCb, NavCb
 from utils.constants import PAGE_SIZE
-from utils.constants import get_rarity_meta
-from utils.formatting import LINE, header, esc, fmt_coins, format_card_block
+from utils.formatting import esc, fmt_coins, format_card_block
+from utils.i18n import get_lang, tr
 from utils.tg_helpers import edit_or_answer
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ router = Router(name="market")
 
 
 async def _show_market(target, owner_id: int, db_user: User, page: int = 1, my_only: bool = False) -> None:
+    lang = get_lang(db_user)
     async with get_session() as session:
         listings, total = await MarketService.get_active_listings(
             session=session,
@@ -34,18 +35,16 @@ async def _show_market(target, owner_id: int, db_user: User, page: int = 1, my_o
             seller_id=db_user.id if my_only else None,
         )
 
-    title = header("📦 <b>MENING E’LONLARIM</b>" if my_only else "🛒 <b>BOZOR</b>")
+    title = tr(lang, "mkt_my_title") if my_only else tr(lang, "mkt_title")
     if not listings:
-        hint = "Kartani sotuvga qo‘yish uchun: 🎴 Kartalarim → kartani tanlang → «Sotish»." if my_only else "Hozircha sotuvda karta yo‘q. Kartangizni birinchi bo‘lib qo‘ying!"
-        text = f"{title}\n📭 E’lonlar yo‘q.\n\n💡 {hint}"
+        text = f"{title}\n\n{tr(lang, 'mkt_empty')}"
     else:
-        lines = [title, f"📌 Jami e’lonlar: <b>{total}</b>\n"]
+        lines = [f"{title} ({total})\n"]
         for item in listings:
-            meta = get_rarity_meta(item.card.rarity)
-            lines.append(f"{meta.emoji} <b>{esc(item.card.character_name)}</b>")
-            seller = "" if my_only else f" · 👤 {esc(item.seller.display_name)}"
-            lines.append(f"      💰 {fmt_coins(item.listing.price)} 🪙{seller}")
-        lines.append("\n👇 Kartani tanlang:")
+            lines.append(
+                f"• <b>[#{item.listing.id}] {esc(item.card.character_name)}</b> ({esc(item.card.rarity)}) — "
+                f"<b>{fmt_coins(item.listing.price)} 🪙</b> | 👤 {esc(item.seller.display_name)}"
+            )
         text = "\n".join(lines)
 
     await edit_or_answer(
@@ -58,6 +57,7 @@ async def _show_market(target, owner_id: int, db_user: User, page: int = 1, my_o
             total=total,
             my_only=my_only,
             page_size=PAGE_SIZE,
+            lang=lang,
         ),
     )
 
@@ -161,6 +161,7 @@ async def cb_my_listings(callback: CallbackQuery, callback_data: MarketCb, db_us
 
 @router.callback_query(MarketCb.filter(F.action == "view"))
 async def cb_listing_view(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
+    lang = get_lang(db_user)
     async with get_session() as session:
         detail = await MarketService.get_listing_detail(session, callback_data.listing_id)
 
@@ -170,23 +171,23 @@ async def cb_listing_view(callback: CallbackQuery, callback_data: MarketCb, db_u
         return
 
     text = (
-        f"{header('🛒 <b>BOZOR</b>')}\n"
-        f"{format_card_block(detail.card)}\n"
-        f"{LINE}\n"
-        f"👤 Sotuvchi: <b>{esc(detail.seller.display_name)}</b>\n"
-        f"💰 Narxi: <b>{fmt_coins(detail.listing.price)}</b> 🪙"
+        f"{format_card_block(detail.card, lang=lang)}\n\n"
+        f"{tr(lang, 'mkt_seller', name=esc(detail.seller.display_name))}\n"
+        f"{tr(lang, 'mkt_price', price=fmt_coins(detail.listing.price))}"
     )
     kb = listing_detail_kb(
         owner_id=callback.from_user.id,
         listing_id=detail.listing.id,
         is_seller=(detail.seller.id == db_user.id),
         page=callback_data.page,
+        lang=lang,
     )
     await edit_or_answer(callback, text, reply_markup=kb)
 
 
 @router.callback_query(MarketCb.filter(F.action == "buy"))
 async def cb_buy_listing(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
+    lang = get_lang(db_user)
     async with get_session() as session:
         try:
             res = await MarketService.buy_listing(
@@ -212,13 +213,11 @@ async def cb_buy_listing(callback: CallbackQuery, callback_data: MarketCb, db_us
         await callback.answer(f"❌ {res.message}", show_alert=True)
         return
 
-    await callback.answer("🎉 Karta sotib olindi!", show_alert=True)
+    await callback.answer("🎉!", show_alert=False)
     await edit_or_answer(
         callback,
-        f"🎉 <b>TABRIKLAYMIZ!</b>\n\n"
-        f"🎴 <b>{esc(res.card.character_name)}</b> kartasi sizning kolleksiyangizga o‘tkazildi!\n"
-        f"💰 To‘landi: <b>{fmt_coins(res.listing.price)} 🪙</b>",
-        reply_markup=back_home_kb(callback.from_user.id, "market"),
+        tr(lang, "mkt_bought", char=esc(res.card.character_name), price=fmt_coins(res.listing.price)),
+        reply_markup=back_home_kb(callback.from_user.id, "market", lang),
     )
 
 
