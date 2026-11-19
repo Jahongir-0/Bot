@@ -760,9 +760,20 @@ class AdminService:
         active_groups = int(
             (await session.execute(select(func.count(Group.id)).where(Group.is_active.is_(True)))).scalar_one() or 0
         )
-        games_total = int((await session.execute(select(func.count(GameSession.id)))).scalar_one() or 0)
+        games_total = int(
+            (await session.execute(select(func.count(GameSession.id)).where(GameSession.game_type != "pack"))).scalar_one()
+            or 0
+        )
         games_today = int(
-            (await session.execute(select(func.count(GameSession.id)).where(GameSession.created_date == today))).scalar_one() or 0
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.game_type != "pack",
+                        GameSession.created_date == today,
+                    )
+                )
+            ).scalar_one()
+            or 0
         )
         daily_claims_today = int(
             (await session.execute(select(func.count(DailyReward.id)).where(DailyReward.reward_date == today))).scalar_one() or 0

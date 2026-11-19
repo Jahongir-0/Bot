@@ -1,6 +1,6 @@
 import random
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.base import ensure_utc, utcnow
 from models.card import Card
+from models.schedule import Event
 from models.user import User
 from models.user_card import UserCard
 from models.v2_features import (
@@ -30,6 +31,8 @@ from utils.constants import (
     DEFAULT_RANK_DEFINITIONS,
     PROFILE_BACKGROUNDS,
     PROFILE_FRAMES,
+    get_rank_name_by_order,
+    sync_runtime_ranks,
 )
 
 
@@ -63,6 +66,117 @@ class GameplayService:
                 "drops": int(r.get("drop_limit", 1)),
             }
         await SettingsService.set_value(session, "rarity_config", rcfg)
+        sync_runtime_ranks(ranks)
+
+    @staticmethod
+    async def _propagate_rank_rename(session: AsyncSession, old_name: str, new_name: str) -> None:
+        old_clean = (old_name or "").strip()
+        new_clean = (new_name or "").strip()
+        if not old_clean or not new_clean or old_clean == new_clean:
+            return
+        await session.execute(
+            update(Card)
+            .where(func.lower(Card.rarity) == old_clean.lower())
+            .values(rarity=new_clean)
+        )
+        await session.execute(
+            update(Event)
+            .where(func.lower(Event.boosted_rarity) == old_clean.lower())
+            .values(boosted_rarity=new_clean)
+        )
+        # daily_random_card.allowed_rarities yangilash
+        drc = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
+        if isinstance(drc, dict) and isinstance(drc.get("allowed_rarities"), list):
+            new_allowed = [
+                new_clean if str(x).strip().lower() == old_clean.lower() else x
+                for x in drc["allowed_rarities"]
+            ]
+            drc["allowed_rarities"] = list(dict.fromkeys(new_allowed))
+            await SettingsService.set_value(session, "daily_random_card", drc)
+        # rarity_rewards kalitini ko'chirish
+        r_rew = await SettingsService.get_value(session, "rarity_rewards", {})
+        if isinstance(r_rew, dict):
+            matched_keys = [k for k in list(r_rew.keys()) if str(k).strip().lower() == old_clean.lower()]
+            if matched_keys:
+                val = r_rew.pop(matched_keys[0], 0)
+                for mk in matched_keys[1:]:
+                    r_rew.pop(mk, None)
+                r_rew.setdefault(new_clean, val)
+                await SettingsService.set_value(session, "rarity_rewards", r_rew)
+        # rarity_config eski kalitini tozalash
+        rcfg = await SettingsService.get_rarity_config(session)
+        changed_cfg = False
+        for k in list(rcfg.keys()):
+            if str(k).strip().lower() == old_clean.lower() and k != new_clean:
+                old_entry = rcfg.pop(k)
+                rcfg.setdefault(new_clean, old_entry)
+                changed_cfg = True
+        if changed_cfg:
+            await SettingsService.set_value(session, "rarity_config", rcfg)
+        from services.ranking_service import RankingService
+
+        RankingService.invalidate_cache()
+
+    @staticmethod
+    async def sync_runtime_and_legacy_ranks(session: AsyncSession) -> List[Dict[str, Any]]:
+        """Bot ishga tushganda DB ranklarini xotira bilan sinxronlaydi va eski Common/Rare/Legendary nomlarini yangilaydi."""
+        ranks = await GameplayService.get_rank_definitions(session)
+        current_names_lower = {str(r.get("name", "")).strip().lower() for r in ranks}
+        legacy_upgrade = {
+            "common": ("Basic", 1),
+            "rare": ("Elita", 2),
+            "legendary": ("Legend", 4),
+        }
+        migrated = False
+        defs_changed = False
+        for item in ranks:
+            order_num = int(item.get("order", 0) or 0)
+            cur_name = str(item.get("name", "")).strip()
+            up = legacy_upgrade.get(cur_name.lower())
+            if up is not None:
+                new_name, expected_order = up
+                if order_num == expected_order and new_name.lower() not in current_names_lower:
+                    item["name"] = new_name
+                    current_names_lower.discard(cur_name.lower())
+                    current_names_lower.add(new_name.lower())
+                    defs_changed = True
+                    await GameplayService._propagate_rank_rename(session, cur_name, new_name)
+                    migrated = True
+
+        if defs_changed:
+            await SettingsService.set_value(session, "rank_definitions", ranks)
+
+        sync_runtime_ranks(ranks)
+        default_by_order = {int(d["order"]): str(d["name"]) for d in DEFAULT_RANK_DEFINITIONS}
+        for item in ranks:
+            order_num = int(item.get("order", 0) or 0)
+            cur_name = str(item.get("name", "")).strip()
+            def_name = default_by_order.get(order_num)
+            if (
+                def_name
+                and cur_name
+                and cur_name.lower() != def_name.lower()
+                and def_name.lower() not in current_names_lower
+            ):
+                await GameplayService._propagate_rank_rename(session, def_name, cur_name)
+                migrated = True
+            # Legacy aliaslarni ham har ehtimolga qarshi sinxronlab o'tamiz
+            for old_alias, (canon_name, alias_order) in legacy_upgrade.items():
+                if order_num == alias_order and cur_name.lower() == canon_name.lower():
+                    old_cnt = int(
+                        (
+                            await session.execute(
+                                select(func.count(Card.id)).where(func.lower(Card.rarity) == old_alias)
+                            )
+                        ).scalar_one()
+                        or 0
+                    )
+                    if old_cnt > 0:
+                        await GameplayService._propagate_rank_rename(session, old_alias, cur_name)
+                        migrated = True
+        if migrated:
+            await session.flush()
+        return ranks
 
     @staticmethod
     async def update_rank_field(
@@ -124,6 +238,7 @@ class GameplayService:
         for i, r in enumerate(kept, start=1):
             r["order"] = i
         await SettingsService.set_value(session, "rank_definitions", kept)
+        sync_runtime_ranks(kept)
         return kept
 
     @staticmethod
@@ -140,6 +255,7 @@ class GameplayService:
         target = next((r for r in ranks if str(r["name"]).lower() == rank_name.lower()), None)
         if target is None:
             raise ValueError("Rank topilmadi.")
+        old_name = str(target["name"])
         if new_name and new_name.strip():
             clean = new_name.strip()[:32]
             if any(r is not target and str(r["name"]).lower() == clean.lower() for r in ranks):
@@ -159,6 +275,9 @@ class GameplayService:
                 "drops": int(r.get("drop_limit", 1)),
             }
         await SettingsService.set_value(session, "rarity_config", rcfg)
+        sync_runtime_ranks(ranks)
+        if new_name and new_name.strip() and str(target["name"]) != old_name:
+            await GameplayService._propagate_rank_rename(session, old_name, str(target["name"]))
         return ranks
 
     @staticmethod
@@ -187,6 +306,7 @@ class GameplayService:
         rcfg = await SettingsService.get_rarity_config(session)
         rcfg[name.strip()[:32]] = {"value": 0, "drops": max(1, int(drop_limit))}
         await SettingsService.set_value(session, "rarity_config", rcfg)
+        sync_runtime_ranks(ranks)
         return ranks
 
     @staticmethod
@@ -417,8 +537,9 @@ class GameplayService:
         return cfg
 
     @staticmethod
-    async def get_dice_status(session: AsyncSession, user: User) -> Tuple[bool, int, int]:
+    async def get_dice_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
         """(yoqilganmi, bugun nechta o'ynagan, kunlik limit)"""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
         cfg = await GameplayService.get_game_config(session)
         tz = ZoneInfo(get_settings().timezone)
         today = datetime.now(tz).date()
@@ -426,7 +547,7 @@ class GameplayService:
             (
                 await session.execute(
                     select(func.count(GameSession.id)).where(
-                        GameSession.user_id == user.id,
+                        GameSession.user_id == uid,
                         GameSession.game_type == "dice",
                         GameSession.created_date == today,
                     )
@@ -531,7 +652,8 @@ class GameplayService:
     # Mini Games: Coin Flip & Lucky Card
     # ------------------------------------------------------------------
     @staticmethod
-    async def get_coinflip_status(session: AsyncSession, user: User) -> Tuple[bool, int, int]:
+    async def get_coinflip_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
         cfg = await GameplayService.get_game_config(session)
         tz = ZoneInfo(get_settings().timezone)
         today = datetime.now(tz).date()
@@ -539,7 +661,7 @@ class GameplayService:
             (
                 await session.execute(
                     select(func.count(GameSession.id)).where(
-                        GameSession.user_id == user.id,
+                        GameSession.user_id == uid,
                         GameSession.game_type == "coinflip",
                         GameSession.created_date == today,
                     )
@@ -640,7 +762,8 @@ class GameplayService:
         ), False, -bet_amt
 
     @staticmethod
-    async def get_lucky_status(session: AsyncSession, user: User) -> Tuple[bool, int, int]:
+    async def get_lucky_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
         cfg = await GameplayService.get_game_config(session)
         tz = ZoneInfo(get_settings().timezone)
         today = datetime.now(tz).date()
@@ -648,7 +771,7 @@ class GameplayService:
             (
                 await session.execute(
                     select(func.count(GameSession.id)).where(
-                        GameSession.user_id == user.id,
+                        GameSession.user_id == uid,
                         GameSession.game_type == "lucky",
                         GameSession.created_date == today,
                     )
@@ -740,7 +863,15 @@ class GameplayService:
         cfg = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
         if not isinstance(cfg, dict) or not cfg.get("enabled", True):
             return None
-        allowed = list(cfg.get("allowed_rarities") or ["Common", "Rare", "Epic"])
+        allowed = list(
+            cfg.get("allowed_rarities")
+            or [
+                get_rank_name_by_order(1, "Basic"),
+                get_rank_name_by_order(2, "Elita"),
+                get_rank_name_by_order(3, "Epic"),
+            ]
+        )
+        allowed_lower = [str(a).strip().lower() for a in allowed if str(a).strip()]
         owned_ids = select(UserCard.card_id).where(UserCard.user_id == user.id)
         card = (
             await session.execute(
@@ -750,7 +881,7 @@ class GameplayService:
                     Card.is_deleted.is_(False),
                     Card.is_event_card.is_(False),
                     Card.dropped_count > 0,  # hech qachon unreleased karta berilmaydi
-                    Card.rarity.in_(allowed),
+                    func.lower(Card.rarity).in_(allowed_lower),
                     Card.id.not_in(owned_ids),
                 )
                 .order_by(func.random())

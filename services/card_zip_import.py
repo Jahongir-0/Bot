@@ -32,7 +32,13 @@ from models.card import Card
 from services.card_service import CardService
 from services.community_service import CommunityService
 from services.settings_service import SettingsService
-from utils.constants import MEDIA_TYPES, RARITY_REGISTRY
+from utils.constants import (
+    DEFAULT_RANK_DEFINITIONS,
+    LEGACY_RANK_ORDER_ALIASES,
+    MEDIA_TYPES,
+    get_runtime_ranks,
+    sync_runtime_ranks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,23 +71,29 @@ _MEDIA_LOOKUP.update({"tv": "TV Series", "series": "TV Series", "tvseries": "TV 
 
 def rank_table() -> List[Tuple[int, str]]:
     """[(rank_id, nom)] - rank_id = rankning tartib raqami (nomi o'zgarsa ham id o'zgarmaydi)."""
-    return [(m.order, m.name) for m in sorted(RARITY_REGISTRY.values(), key=lambda x: x.order)]
+    return [(int(r.get("order", i)), str(r["name"])) for i, r in enumerate(get_runtime_ranks(), start=1)]
 
 
 def resolve_rank(value: Any) -> Optional[str]:
-    """rank_id (1,2,3..) yoki rank nomi -> rarity nomi. Topilmasa None."""
+    """rank_id (1,2,3..) yoki rank nomi -> joriy rarity nomi. Topilmasa None."""
     raw = str(value).strip() if value is not None else ""
     if not raw:
         return None
+    table = rank_table()
     if raw.isdigit():
-        for rid, name in rank_table():
+        for rid, name in table:
             if rid == int(raw):
                 return name
         return None
     low = raw.lower()
-    for _, name in rank_table():
+    for _, name in table:
         if name.lower() == low:
             return name
+    alias_order = LEGACY_RANK_ORDER_ALIASES.get(low)
+    if alias_order is not None:
+        for rid, name in table:
+            if rid == alias_order:
+                return name
     return None
 
 
@@ -260,6 +272,9 @@ async def import_cards_from_zip(
         return report
 
     report.total_cards = len(records)
+    raw_ranks = await SettingsService.get_value(session, "rank_definitions", DEFAULT_RANK_DEFINITIONS)
+    if isinstance(raw_ranks, list) and raw_ranks:
+        sync_runtime_ranks(raw_ranks)
     rcfg = await SettingsService.get_rarity_config(session)
 
     # ---------------- 1-bosqich: HAMMASINI tekshirish (hech narsa yozilmaydi) ----------------
@@ -340,7 +355,7 @@ async def import_cards_from_zip(
                     select(Card.id).where(
                         func.lower(Card.character_name) == item.character_name.lower(),
                         func.lower(Card.anime_name) == item.media_name.lower(),
-                        Card.rarity == item.rarity,
+                        func.lower(Card.rarity) == item.rarity.lower(),
                         Card.is_deleted.is_(False),
                     )
                 )

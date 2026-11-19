@@ -338,12 +338,15 @@ class UserService:
                 reference_id=f"grp_add:{group.id}",
             )
 
+        from utils.constants import get_rank_name_by_order
+
+        order3_name = get_rank_name_by_order(3, Rarity.EPIC.value)
         has_owner = exists().where(UserCard.card_id == Card.id)
         epic_card = (
             await session.execute(
                 select(Card)
                 .where(
-                    Card.rarity == Rarity.EPIC.value,
+                    func.lower(Card.rarity) == order3_name.lower(),
                     Card.is_available.is_(True),
                     Card.is_deleted.is_(False),
                     Card.is_event_card.is_(False),
