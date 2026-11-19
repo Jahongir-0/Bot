@@ -417,6 +417,24 @@ class GameplayService:
         return cfg
 
     @staticmethod
+    async def get_dice_status(session: AsyncSession, user: User) -> Tuple[bool, int, int]:
+        """(yoqilganmi, bugun nechta o'ynagan, kunlik limit)"""
+        cfg = await GameplayService.get_game_config(session)
+        tz = ZoneInfo(get_settings().timezone)
+        today = datetime.now(tz).date()
+        used = int(
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.user_id == user.id, GameSession.created_date == today
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        return bool(cfg.get("dice_enabled", True)), used, int(cfg.get("dice_daily_limit", 3))
+
+    @staticmethod
     async def play_dice_game(
         session: AsyncSession,
         user: User,
@@ -492,8 +510,13 @@ class GameplayService:
 
         if guessed_number is not None:
             if won:
-                return True, f"🎉 TO‘G‘RI TOPDINGIZ! Tosh: <b>{roll}</b>\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
-            return True, f"😔 Afsus! Siz <b>{guessed_number}</b> tanladingiz, tosh esa <b>{roll}</b> tushdi.\nBugun yana urinib ko‘ring!", roll, 0
+                return True, (
+                    f"🎉 <b>YUTDINGIZ!</b>\n\nSiz <b>{guessed_number}</b> ni tanladingiz va tosh ham <b>{roll}</b> tushdi!\n"
+                    f"🪙 <b>+{reward_coins:,}</b> coin · ⚡ +{reward_xp} XP"
+                ), roll, reward_coins
+            return True, (
+                f"😔 <b>Yutqazdingiz</b>\n\nSiz <b>{guessed_number}</b> ni tanladingiz, tosh esa <b>{roll}</b> tushdi."
+            ), roll, 0
 
         jackpot_txt = " 🎉 JACKPOT!" if roll == 6 else ""
         return True, f"🎲 Tosh: <b>{roll}</b>{jackpot_txt}\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
