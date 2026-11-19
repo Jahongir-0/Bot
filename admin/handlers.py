@@ -44,6 +44,7 @@ from keyboards.event import (
 from keyboards.v2 import admin_v2_cards_menu_kb, admin_v2_home_kb
 from models.base import ensure_utc
 from models.card import Card
+from models.event import Event
 from models.group import Group, GroupMember
 from models.schedule import ActiveDrop
 from models.user import User
@@ -58,7 +59,7 @@ from services.ranking_service import RankingService
 from services.security_backup_service import SecurityBackupService
 from services.settings_service import SettingsService
 from utils.callback_data import AdmV2Cb, AdminCb, NavCb
-from utils.constants import EVENT_DURATION_HOURS, MEDIA_TYPES, PAGE_SIZE, RankingMode, get_rarity_meta
+from utils.constants import EVENT_DURATION_HOURS, MEDIA_TYPES, PAGE_SIZE, RARITY_REGISTRY, RankingMode, get_rarity_meta
 from utils.formatting import (
     esc,
     fmt_coins,
@@ -80,6 +81,7 @@ _LEGACY_SECTION_PERM_MAP = {
     "users": "users",
     "ban": "users",
     "evt": "events",
+    "events": "events",
     "stars": "stars",
     "stats": "stats",
     "settings": "settings",
@@ -151,6 +153,10 @@ class AdminStates(StatesGroup):
     evt_price_coins = State()
     evt_price_stars = State()
     evt_duration = State()
+
+    # Bonus event
+    bonus_name = State()
+    bonus_hours = State()
 
 
 @router.message(Command("admin"))
@@ -1823,6 +1829,131 @@ _EVT_STATUS = {"active": "🟢 Faol", "sold_out": "🔥 Sotilib bo‘ldi", "ende
 
 def _local_dt(dt):
     return ensure_utc(dt).astimezone(ZoneInfo(get_settings().timezone))
+
+
+# ----------------------------------------------------------------------
+# BONUS EVENT: ma'lum vaqt davomida biror rank tushish ehtimolini oshirish
+# ----------------------------------------------------------------------
+async def _render_bonus_menu(callback: CallbackQuery) -> None:
+    owner_id = callback.from_user.id
+    async with get_session() as session:
+        ev = await CardService.get_active_event(session)
+    b = InlineKeyboardBuilder()
+    if ev is not None:
+        text = (
+            "⚡ <b>BONUS EVENT</b>\n\n"
+            f"🟢 Hozir faol: <b>{esc(ev.name)}</b>\n"
+            f"🎯 {esc(ev.description)}\n"
+            f"⏳ Tugash: <b>{_local_dt(ev.ends_at):%d.%m.%Y %H:%M}</b>"
+        )
+        b.row(InlineKeyboardButton(text="⛔ Hozir to‘xtatish", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_stop", target_id=ev.id).pack()))
+    else:
+        text = (
+            "⚡ <b>BONUS EVENT</b>\n\n"
+            "Hozir faol bonus event yo‘q.\n"
+            "Bonus event — belgilangan vaqt davomida tanlangan rank kartalari guruhlarga tez-tez tushishini ta’minlaydi."
+        )
+    b.row(InlineKeyboardButton(text="➕ Yangi bonus event", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_new").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="evt", action="menu").pack()))
+    await edit_or_answer(callback, text, reply_markup=b.as_markup())
+
+
+@router.callback_query(AdminCb.filter(F.section == "events"))
+async def cb_admin_bonus_event(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
+    owner_id = callback.from_user.id
+    action = callback_data.action
+
+    if action == "bonus_menu":
+        await state.clear()
+        await _render_bonus_menu(callback)
+        return
+
+    if action == "bonus_stop":
+        async with get_session() as session:
+            ev = await session.get(Event, callback_data.target_id)
+            if ev is not None:
+                ev.is_active = False
+                await CommunityService.log_audit(session, owner_id, "bonus_event_stop", "event", str(ev.id))
+                await session.commit()
+        await callback.answer("⛔ Bonus event to‘xtatildi", show_alert=True)
+        await _render_bonus_menu(callback)
+        return
+
+    if action == "bonus_new":
+        await state.set_state(AdminStates.bonus_name)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(callback, "⚡ <b>YANGI BONUS EVENT</b>\n\n1/4 — Event nomini yozing (masalan: <i>Legendary haftaligi</i>):\n<i>Bekor: /cancel</i>")
+        return
+
+    if action == "bonus_rar":
+        # extra = rank nomi yoki "none"
+        await state.update_data(bonus_rarity=None if callback_data.extra == "none" else callback_data.extra)
+        b = InlineKeyboardBuilder()
+        for m in (2, 3, 5, 10):
+            b.add(InlineKeyboardButton(text=f"x{m}", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_go", extra=str(m)).pack()))
+        b.adjust(4)
+        await edit_or_answer(callback, "⚡ 4/4 — Tushish ehtimoli necha barobar oshsin?", reply_markup=b.as_markup())
+        return
+
+    if action == "bonus_go":
+        data = await state.get_data()
+        name = data.get("bonus_name_val")
+        hours = int(data.get("bonus_hours_val") or 24)
+        rarity = data.get("bonus_rarity")
+        try:
+            mult = float(callback_data.extra or 2)
+        except ValueError:
+            mult = 2.0
+        if not name:
+            await callback.answer("Ma’lumot yo‘qoldi, qaytadan boshlang.", show_alert=True)
+            return
+        await state.clear()
+        async with get_session() as session:
+            await AdminService.create_event(
+                session, owner_id, name, hours,
+                boosted_rarity=rarity, rarity_weight_multiplier=mult if rarity else 1.0,
+            )
+            await session.commit()
+        await callback.answer("✅ Bonus event boshlandi!", show_alert=True)
+        await _render_bonus_menu(callback)
+        return
+
+    await callback.answer()
+
+
+@router.message(AdminStates.bonus_name, NotCommandFilter())
+async def fsm_bonus_name(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    name = (message.text or "").strip()
+    if not (2 <= len(name) <= 100):
+        await message.answer("⚠️ Nom 2 dan 100 gacha belgi bo‘lsin.")
+        return
+    await state.update_data(bonus_name_val=name)
+    await state.set_state(AdminStates.bonus_hours)
+    await message.answer("⚡ 2/4 — Necha soat davom etsin? (1 dan 720 gacha son)")
+
+
+@router.message(AdminStates.bonus_hours, NotCommandFilter())
+async def fsm_bonus_hours(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= 720):
+        await message.answer("⚠️ 1 dan 720 gacha butun son kiriting.")
+        return
+    await state.update_data(bonus_hours_val=int(raw))
+    owner_id = message.from_user.id
+    b = InlineKeyboardBuilder()
+    for rarity in [m.name for m in sorted(RARITY_REGISTRY.values(), key=lambda x: x.order)]:
+        meta = get_rarity_meta(rarity)
+        b.add(InlineKeyboardButton(text=f"{meta.emoji} {rarity}", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_rar", extra=rarity).pack()))
+    b.adjust(2)
+    b.row(InlineKeyboardButton(text="Rank tanlamaslik (faqat e’lon)", callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_rar", extra="none").pack()))
+    await message.answer("⚡ 3/4 — Qaysi rank kartalari ko‘proq tushsin?", reply_markup=b.as_markup())
+
 
 
 async def _render_evt_menu(callback: CallbackQuery) -> None:
