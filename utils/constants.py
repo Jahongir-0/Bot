@@ -201,11 +201,6 @@ def get_rank_name_by_order(order: int, default: str = "") -> str:
     return str(ranks[0]["name"]) if ranks else Rarity.COMMON.value
 
 
-def sync_runtime_ranks(ranks: List[Dict[str, object]]) -> None:
-    """Backward-compatible alias for sync_rank_cache."""
-    sync_rank_cache(ranks)
-
-
 def get_rarity_meta(rarity: str) -> RarityMeta:
     key = (rarity or "").strip().lower()
     ranks = get_runtime_ranks()

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.admin import Setting
 from utils.cache_scope import cache_scope
-from utils.constants import DEFAULT_DROP_RULES, DEFAULT_SETTINGS, RARITY_REGISTRY
+from utils.constants import DEFAULT_DROP_RULES, DEFAULT_SETTINGS, get_rarity_meta, list_rarities
 
 
 # Sozlamalar juda tez-tez o'qiladi (har drop/claim/profilda): 15 soniyalik xotira keshi DB so'rovlarini keskin kamaytiradi
@@ -57,9 +57,11 @@ class SettingsService:
     async def get_rarity_config(session: AsyncSession) -> Dict[str, Dict[str, int]]:
         stored = await SettingsService.get_value(session, "rarity_config", None)
         stored = stored if isinstance(stored, dict) else {}
+        stored_low = {str(k).lower(): v for k, v in stored.items() if isinstance(v, dict)}
         out: Dict[str, Dict[str, int]] = {}
-        for name, meta in RARITY_REGISTRY.items():
-            s = stored.get(name) if isinstance(stored.get(name), dict) else {}
+        for name in list_rarities():
+            meta = get_rarity_meta(name)
+            s = stored.get(name) if isinstance(stored.get(name), dict) else stored_low.get(name.lower(), {})
             out[name] = {
                 "value": int(s.get("value", meta.default_base_value)),
                 "drops": int(s.get("drops", meta.default_drop_limit)),
@@ -73,19 +75,21 @@ class SettingsService:
         value: Optional[int] = None,
         drops: Optional[int] = None,
     ) -> Dict[str, int]:
-        if rarity not in RARITY_REGISTRY:
+        live = list_rarities()
+        matched = next((r for r in live if r.lower() == (rarity or "").strip().lower()), None)
+        if matched is None:
             raise ValueError("Noma’lum rank.")
         cfg = await SettingsService.get_rarity_config(session)
         if value is not None:
             if not (1 <= int(value) <= COINS_MAX):
                 raise ValueError(f"Narx 1 dan {COINS_MAX:,} gacha bo‘lishi kerak.")
-            cfg[rarity]["value"] = int(value)
+            cfg[matched]["value"] = int(value)
         if drops is not None:
             if not (1 <= int(drops) <= 1000):
                 raise ValueError("Tashlash soni 1 dan 1000 gacha bo‘lishi kerak.")
-            cfg[rarity]["drops"] = int(drops)
+            cfg[matched]["drops"] = int(drops)
         await SettingsService.set_value(session, "rarity_config", cfg)
-        return cfg[rarity]
+        return cfg[matched]
 
     @staticmethod
     async def get_drop_rules(session: AsyncSession) -> Dict[str, Any]:
