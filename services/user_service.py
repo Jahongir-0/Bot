@@ -13,6 +13,7 @@ from models.user import User
 from models.user_card import UserCard
 from services.settings_service import SettingsService
 from utils.constants import Rarity
+from utils.i18n import detect_lang, normalize_lang
 
 
 class InsufficientCoinsError(Exception):
@@ -26,6 +27,7 @@ class UserService:
         telegram_id: int,
         username: Optional[str],
         first_name: str,
+        language_code: Optional[str] = None,
     ) -> User:
         clean_username = username.lstrip("@").lower() if username else None
         result = await session.execute(select(User).where(User.telegram_id == telegram_id))
@@ -37,6 +39,7 @@ class UserService:
                 username=clean_username,
                 first_name=first_name[:128] if first_name else "Collector",
                 coins=100,
+                language=detect_lang(language_code),
                 stats={"claims": 0, "trades": 0, "sales": 0},
                 last_activity=now,
             )
@@ -60,6 +63,15 @@ class UserService:
             user.last_activity = now
             await session.flush()
         return user
+
+    @staticmethod
+    async def set_user_language(session: AsyncSession, user_id: int, lang: str) -> str:
+        norm = normalize_lang(lang)
+        await session.execute(
+            update(User).where(User.id == user_id).values(language=norm, updated_at=utcnow())
+        )
+        await session.flush()
+        return norm
 
     @staticmethod
     async def upsert_group_and_member(
@@ -163,7 +175,6 @@ class UserService:
             update(User)
             .where(User.id == user_id)
             .values(coins=User.coins + amount, updated_at=utcnow())
-            .execution_options(synchronize_session=False)
         )
         new_balance = (
             await session.execute(select(User.coins).where(User.id == user_id))
@@ -198,7 +209,6 @@ class UserService:
             update(User)
             .where(User.id == user_id, User.coins >= amount)
             .values(coins=User.coins - amount, updated_at=utcnow())
-            .execution_options(synchronize_session=False)
         )
         if res.rowcount != 1:
             raise InsufficientCoinsError("Coin yetarli emas!")
@@ -272,7 +282,6 @@ class UserService:
             update(User)
             .where(User.id == new_user.id, User.referred_by_id.is_(None))
             .values(referred_by_id=referrer.id, updated_at=utcnow())
-            .execution_options(synchronize_session=False)
         )
         if upd.rowcount != 1:
             return None
@@ -281,7 +290,6 @@ class UserService:
             update(User)
             .where(User.id == referrer.id)
             .values(referral_count=User.referral_count + 1, updated_at=utcnow())
-            .execution_options(synchronize_session=False)
         )
         new_user.referred_by_id = referrer.id
         referrer.referral_count = int(referrer.referral_count or 0) + 1
@@ -342,15 +350,12 @@ class UserService:
                 reference_id=f"grp_add:{group.id}",
             )
 
-        from utils.constants import get_rank_name_by_order
-
-        order3_name = get_rank_name_by_order(3, Rarity.EPIC.value)
         has_owner = exists().where(UserCard.card_id == Card.id)
         epic_card = (
             await session.execute(
                 select(Card)
                 .where(
-                    func.lower(Card.rarity) == order3_name.lower(),
+                    Card.rarity == Rarity.EPIC.value,
                     Card.is_available.is_(True),
                     Card.is_deleted.is_(False),
                     Card.is_event_card.is_(False),

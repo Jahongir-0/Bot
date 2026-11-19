@@ -1,3 +1,4 @@
+import copy
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -225,7 +226,7 @@ class CommunityService:
     @staticmethod
     async def get_vip_config(session: AsyncSession) -> Dict[str, Any]:
         raw = await SettingsService.get_value(session, "vip_config", DEFAULT_VIP_CONFIG)
-        return dict(raw) if isinstance(raw, dict) else dict(DEFAULT_VIP_CONFIG)
+        return copy.deepcopy(raw) if isinstance(raw, dict) else copy.deepcopy(DEFAULT_VIP_CONFIG)
 
     @staticmethod
     def is_vip_active(user: User) -> bool:
@@ -255,6 +256,12 @@ class CommunityService:
         base = ensure_utc(user.vip_until) if (user.vip_until and ensure_utc(user.vip_until) > now) else now
         user.vip_tier = tier_key
         user.vip_until = base + timedelta(days=max(1, int(days)))
+        await session.flush()
+
+    @staticmethod
+    async def revoke_vip(session: AsyncSession, user: User) -> None:
+        user.vip_tier = None
+        user.vip_until = None
         await session.flush()
 
     @staticmethod

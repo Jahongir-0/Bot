@@ -12,15 +12,7 @@ from models.user import User
 from models.user_card import UserCard
 from services.settings_service import SettingsService
 from utils.cache_scope import cache_scope
-from utils.constants import (
-    DEFAULT_RANK_DEFINITIONS,
-    RankingMode,
-    Rarity,
-    get_rank_name_by_order,
-    get_rarity_aliases,
-    get_rarity_meta,
-    get_runtime_ranks,
-)
+from utils.constants import RARITY_REGISTRY, RankingMode, Rarity
 
 CACHE_TTL_SECONDS = 20.0
 _CACHE: Dict[Tuple[Any, ...], Tuple[float, Any]] = {}
@@ -75,7 +67,7 @@ class RankingService:
         return cache_scope(session)
 
     @staticmethod
-    def _score_parts(mode: str, ranks: Optional[List[Dict[str, Any]]] = None):
+    def _score_parts(mode: str):
         """(score ifodasi, outer-join uchun subquery yoki None). Hammasi SQL'da hisoblanadi — Python'ga yuklanmaydi."""
         if mode == RankingMode.TOTAL_CARDS.value:
             return User.total_cards, None
@@ -92,15 +84,10 @@ class RankingService:
             .group_by(UserCard.user_id, Card.rarity)
             .subquery()
         )
-        rank_list = ranks or get_runtime_ranks() or list(DEFAULT_RANK_DEFINITIONS)
-        whens = []
-        for r in rank_list:
-            name = str(r.get("name") or "").strip()
-            if not name:
-                continue
-            rw = int(r.get("rank_weight") or get_rarity_meta(name).rank_weight or 1)
-            whens.append((func.lower(per_rarity.c.rarity) == name.lower(), rw))
-        weight = case(*whens, else_=1) if whens else 1
+        weight = case(
+            *[(per_rarity.c.rarity == name, meta.rank_weight) for name, meta in RARITY_REGISTRY.items()],
+            else_=1,
+        )
         weighted = (
             select(per_rarity.c.uid.label("uid"), func.sum(per_rarity.c.cnt * weight).label("w"))
             .group_by(per_rarity.c.uid)
@@ -117,23 +104,14 @@ class RankingService:
         return stmt.where(User.is_banned.is_(False))
 
     @staticmethod
-    async def _live_ranks(session: AsyncSession) -> List[Dict[str, Any]]:
-        raw = await SettingsService.get_value(session, "rank_definitions", DEFAULT_RANK_DEFINITIONS)
-        items = list(raw) if isinstance(raw, list) and raw else get_runtime_ranks()
-        items.sort(key=lambda x: int(x.get("order", 99)))
-        return items
-
-    @staticmethod
     async def _top(session: AsyncSession, limit: int, group_id: Optional[int]) -> List[RankEntry]:
         mode = await SettingsService.get_ranking_mode(session)
-        ranks = await RankingService._live_ranks(session)
-        rank_sig = tuple((str(r.get("name")), int(r.get("rank_weight", 1))) for r in ranks)
-        key = ("top", RankingService._scope(session), mode, group_id, limit, rank_sig)
+        key = ("top", RankingService._scope(session), mode, group_id, limit)
         cached = _cache_get(key)
         if cached is not None:
             return cached
 
-        score_expr, weighted = RankingService._score_parts(mode, ranks)
+        score_expr, weighted = RankingService._score_parts(mode)
         stmt = RankingService._apply_scope(select(User, score_expr.label("score")), weighted, group_id)
         stmt = stmt.order_by(
             score_expr.desc(), User.unique_cards.desc(), User.total_cards.desc(), User.id.asc()
@@ -142,29 +120,21 @@ class RankingService:
         if not rows:
             return []
 
-        r4_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 4), get_rank_name_by_order(4, Rarity.LEGENDARY.value))
-        r5_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 5), get_rank_name_by_order(5, Rarity.MYTHIC.value))
-        r4_low, r5_low = r4_name.lower(), r5_name.lower()
-        r4_aliases = set(get_rarity_aliases(r4_name) or [r4_low])
-        r5_aliases = set(get_rarity_aliases(r5_name) or [r5_low])
-
         user_ids = [r[0].id for r in rows]
         rarity_rows = (
             await session.execute(
-                select(UserCard.user_id, func.lower(Card.rarity), func.count(UserCard.id))
+                select(UserCard.user_id, Card.rarity, func.count(UserCard.id))
                 .join(Card, Card.id == UserCard.card_id)
                 .where(
                     UserCard.user_id.in_(user_ids),
-                    func.lower(Card.rarity).in_(list(r4_aliases | r5_aliases)),
+                    Card.rarity.in_([Rarity.LEGENDARY.value, Rarity.MYTHIC.value]),
                 )
-                .group_by(UserCard.user_id, func.lower(Card.rarity))
+                .group_by(UserCard.user_id, Card.rarity)
             )
         ).all()
         by_user: Dict[int, Dict[str, int]] = {}
-        for uid, rarity_low, cnt in rarity_rows:
-            r_l = str(rarity_low)
-            canonical_key = r4_low if r_l in r4_aliases else (r5_low if r_l in r5_aliases else r_l)
-            by_user.setdefault(uid, {})[canonical_key] = by_user.get(uid, {}).get(canonical_key, 0) + int(cnt)
+        for uid, rarity, cnt in rarity_rows:
+            by_user.setdefault(uid, {})[rarity] = int(cnt)
 
         entries: List[RankEntry] = []
         for idx, (user, score) in enumerate(rows, start=1):
@@ -176,8 +146,8 @@ class RankingService:
                     score=int(score or 0),
                     total_cards=user.total_cards,
                     unique_cards=user.unique_cards,
-                    legendary_cards=r_map.get(r4_low, 0),
-                    mythic_cards=r_map.get(r5_low, 0),
+                    legendary_cards=r_map.get(Rarity.LEGENDARY.value, 0),
+                    mythic_cards=r_map.get(Rarity.MYTHIC.value, 0),
                 )
             )
         _cache_put(key, entries)
@@ -198,8 +168,7 @@ class RankingService:
         user_id: int,
         group_id: Optional[int],
     ) -> Optional[int]:
-        ranks = await RankingService._live_ranks(session)
-        score_expr, weighted = RankingService._score_parts(mode, ranks)
+        score_expr, weighted = RankingService._score_parts(mode)
 
         my_stmt = select(score_expr).select_from(User).where(User.id == user_id)
         if weighted is not None:
@@ -369,25 +338,16 @@ class RankingService:
             cutoff = utcnow() - timedelta(days=30)
 
         if scope in ("rare", "mythic", "divine"):
-            ranks = await RankingService._live_ranks(session)
-
-            def _expand(names: List[str]) -> List[str]:
-                out = set()
-                for n in names:
-                    out.update(get_rarity_aliases(n) or [n.lower()])
-                return list(out)
-
             rarity_map = {
-                "rare": _expand([str(r["name"]) for r in ranks if int(r.get("order", 0)) >= 2]),
-                "mythic": _expand([str(r["name"]) for r in ranks if int(r.get("order", 0)) == 5] or ["Mythic"]),
-                "divine": _expand([str(r["name"]) for r in ranks if int(r.get("order", 0)) == 6] or ["Divine"]),
+                "rare": ["Rare", "Epic", "Legendary", "Mythic", "Divine"],
+                "mythic": ["Mythic"],
+                "divine": ["Divine"],
             }
-            target_rarities = rarity_map.get(scope, [])
             stmt = (
                 select(User, func.count(UserCard.id).label("val"))
                 .join(UserCard, UserCard.user_id == User.id)
                 .join(Card, Card.id == UserCard.card_id)
-                .where(User.is_banned.is_(False), func.lower(Card.rarity).in_(target_rarities))
+                .where(User.is_banned.is_(False), Card.rarity.in_(rarity_map[scope]))
             )
             if cutoff is not None:
                 stmt = stmt.where(UserCard.created_at >= cutoff)

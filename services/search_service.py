@@ -9,7 +9,6 @@ from models.card import Card
 from models.market import CardListing
 from models.user import User
 from models.user_card import UserCard
-from utils.constants import get_rarity_aliases
 
 
 @dataclass
@@ -26,13 +25,12 @@ def _apply_card_filters(stmt, count_stmt, mode: str, query: str, include_user_ca
         return stmt, count_stmt
 
     pattern = f"%{q}%"
-    rarity_aliases = get_rarity_aliases(q) or [q.lower()]
     if mode == "character":
         cond = Card.character_name.ilike(pattern)
     elif mode == "anime":
         cond = Card.anime_name.ilike(pattern)
     elif mode == "rarity":
-        cond = func.lower(Card.rarity).in_(rarity_aliases)
+        cond = func.lower(Card.rarity) == q.lower()
     elif mode == "card_id":
         if q.isdigit():
             cond = (UserCard.id == int(q)) | (Card.id == int(q)) if include_user_card_id else (Card.id == int(q))
@@ -43,7 +41,7 @@ def _apply_card_filters(stmt, count_stmt, mode: str, query: str, include_user_ca
             Card.character_name.ilike(pattern),
             Card.anime_name.ilike(pattern),
             func.lower(Card.card_code) == q.lower(),
-            func.lower(Card.rarity).in_(rarity_aliases),
+            func.lower(Card.rarity) == q.lower(),
         ]
         if q.isdigit():
             conditions.append(Card.id == int(q))

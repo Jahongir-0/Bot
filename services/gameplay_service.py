@@ -1,6 +1,7 @@
+import copy
 import random
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
@@ -10,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.base import ensure_utc, utcnow
 from models.card import Card
-from models.schedule import Event
 from models.user import User
 from models.user_card import UserCard
 from models.v2_features import (
@@ -24,15 +24,14 @@ from models.v2_features import (
     UserAchievement,
 )
 from services.settings_service import SettingsService
-from services.user_service import InsufficientCoinsError, UserService
+from services.user_service import UserService
 from utils.constants import (
     DEFAULT_DAILY_RANDOM_CARD,
     DEFAULT_GAME_CONFIG,
     DEFAULT_RANK_DEFINITIONS,
     PROFILE_BACKGROUNDS,
     PROFILE_FRAMES,
-    get_rank_name_by_order,
-    sync_runtime_ranks,
+    sync_rank_cache,
 )
 
 
@@ -43,9 +42,42 @@ class GameplayService:
     @staticmethod
     async def get_rank_definitions(session: AsyncSession) -> List[Dict[str, Any]]:
         raw = await SettingsService.get_value(session, "rank_definitions", DEFAULT_RANK_DEFINITIONS)
-        items = list(raw) if isinstance(raw, list) and raw else list(DEFAULT_RANK_DEFINITIONS)
+        items = copy.deepcopy(raw) if isinstance(raw, list) and raw else copy.deepcopy(DEFAULT_RANK_DEFINITIONS)
         items.sort(key=lambda x: int(x.get("order", 99)))
+        used_ids = {int(r["id"]) for r in items if isinstance(r, dict) and str(r.get("id", "")).isdigit() and int(r["id"]) > 0}
+        next_id = max(used_ids, default=0) + 1
+        default_id_map = {str(d["name"]).lower(): int(d["id"]) for d in DEFAULT_RANK_DEFINITIONS}
+        for r in items:
+            if not (str(r.get("id", "")).isdigit() and int(r["id"]) > 0):
+                cand = default_id_map.get(str(r.get("name", "")).lower())
+                if cand and cand not in used_ids:
+                    r["id"] = cand
+                    used_ids.add(cand)
+                else:
+                    while next_id in used_ids:
+                        next_id += 1
+                    r["id"] = next_id
+                    used_ids.add(next_id)
+                    next_id += 1
+            else:
+                r["id"] = int(r["id"])
+        sync_rank_cache(items)
         return items
+
+    @staticmethod
+    async def resolve_rank_definition(session: AsyncSession, rank_ref: Any) -> Optional[Dict[str, Any]]:
+        ranks = await GameplayService.get_rank_definitions(session)
+        if rank_ref is None:
+            return None
+        ref_str = str(rank_ref).strip()
+        if not ref_str:
+            return None
+        if ref_str.isdigit():
+            rid = int(ref_str)
+            by_id = next((r for r in ranks if int(r.get("id", 0)) == rid), None)
+            if by_id is not None:
+                return by_id
+        return next((r for r in ranks if str(r.get("name", "")).strip().lower() == ref_str.lower()), None)
 
     @staticmethod
     async def save_rank_definitions(session: AsyncSession, ranks: List[Dict[str, Any]]) -> None:
@@ -54,9 +86,16 @@ class GameplayService:
         total_prob = sum(int(r.get("drop_probability", 0)) for r in ranks)
         if total_prob != 100:
             raise ValueError(f"Barcha ranklar drop ehtimolligi yig‘indisi 100% bo‘lishi shart (hozir: {total_prob}%).")
+        next_id = max((int(r.get("id") or 0) for r in ranks), default=0) + 1
         for i, r in enumerate(ranks, start=1):
             r["order"] = i
+            if not (str(r.get("id", "")).isdigit() and int(r["id"]) > 0):
+                r["id"] = next_id
+                next_id += 1
+            else:
+                r["id"] = int(r["id"])
         await SettingsService.set_value(session, "rank_definitions", ranks)
+        sync_rank_cache(ranks)
 
         # rarity_config bilan sinxronlash
         rcfg = await SettingsService.get_rarity_config(session)
@@ -66,120 +105,6 @@ class GameplayService:
                 "drops": int(r.get("drop_limit", 1)),
             }
         await SettingsService.set_value(session, "rarity_config", rcfg)
-        sync_runtime_ranks(ranks)
-        from services.ranking_service import RankingService
-
-        RankingService.invalidate_cache()
-
-    @staticmethod
-    async def _propagate_rank_rename(session: AsyncSession, old_name: str, new_name: str) -> None:
-        old_clean = (old_name or "").strip()
-        new_clean = (new_name or "").strip()
-        if not old_clean or not new_clean or old_clean == new_clean:
-            return
-        await session.execute(
-            update(Card)
-            .where(func.lower(Card.rarity) == old_clean.lower())
-            .values(rarity=new_clean)
-        )
-        await session.execute(
-            update(Event)
-            .where(func.lower(Event.boosted_rarity) == old_clean.lower())
-            .values(boosted_rarity=new_clean)
-        )
-        # daily_random_card.allowed_rarities yangilash
-        drc = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
-        if isinstance(drc, dict) and isinstance(drc.get("allowed_rarities"), list):
-            new_allowed = [
-                new_clean if str(x).strip().lower() == old_clean.lower() else x
-                for x in drc["allowed_rarities"]
-            ]
-            drc["allowed_rarities"] = list(dict.fromkeys(new_allowed))
-            await SettingsService.set_value(session, "daily_random_card", drc)
-        # rarity_rewards kalitini ko'chirish
-        r_rew = await SettingsService.get_value(session, "rarity_rewards", {})
-        if isinstance(r_rew, dict):
-            matched_keys = [k for k in list(r_rew.keys()) if str(k).strip().lower() == old_clean.lower()]
-            if matched_keys:
-                val = r_rew.pop(matched_keys[0], 0)
-                for mk in matched_keys[1:]:
-                    r_rew.pop(mk, None)
-                r_rew.setdefault(new_clean, val)
-                await SettingsService.set_value(session, "rarity_rewards", r_rew)
-        # rarity_config eski kalitini tozalash
-        rcfg = await SettingsService.get_rarity_config(session)
-        changed_cfg = False
-        for k in list(rcfg.keys()):
-            if str(k).strip().lower() == old_clean.lower() and k != new_clean:
-                old_entry = rcfg.pop(k)
-                rcfg.setdefault(new_clean, old_entry)
-                changed_cfg = True
-        if changed_cfg:
-            await SettingsService.set_value(session, "rarity_config", rcfg)
-        from services.ranking_service import RankingService
-
-        RankingService.invalidate_cache()
-
-    @staticmethod
-    async def sync_runtime_and_legacy_ranks(session: AsyncSession) -> List[Dict[str, Any]]:
-        """Bot ishga tushganda DB ranklarini xotira bilan sinxronlaydi va eski Common/Rare/Legendary nomlarini yangilaydi."""
-        ranks = await GameplayService.get_rank_definitions(session)
-        current_names_lower = {str(r.get("name", "")).strip().lower() for r in ranks}
-        legacy_upgrade = {
-            "common": ("Basic", 1),
-            "rare": ("Elita", 2),
-            "legendary": ("Legend", 4),
-        }
-        migrated = False
-        defs_changed = False
-        for item in ranks:
-            order_num = int(item.get("order", 0) or 0)
-            cur_name = str(item.get("name", "")).strip()
-            up = legacy_upgrade.get(cur_name.lower())
-            if up is not None:
-                new_name, expected_order = up
-                if order_num == expected_order and new_name.lower() not in current_names_lower:
-                    item["name"] = new_name
-                    current_names_lower.discard(cur_name.lower())
-                    current_names_lower.add(new_name.lower())
-                    defs_changed = True
-                    await GameplayService._propagate_rank_rename(session, cur_name, new_name)
-                    migrated = True
-
-        if defs_changed:
-            await SettingsService.set_value(session, "rank_definitions", ranks)
-
-        sync_runtime_ranks(ranks)
-        default_by_order = {int(d["order"]): str(d["name"]) for d in DEFAULT_RANK_DEFINITIONS}
-        for item in ranks:
-            order_num = int(item.get("order", 0) or 0)
-            cur_name = str(item.get("name", "")).strip()
-            def_name = default_by_order.get(order_num)
-            if (
-                def_name
-                and cur_name
-                and cur_name.lower() != def_name.lower()
-                and def_name.lower() not in current_names_lower
-            ):
-                await GameplayService._propagate_rank_rename(session, def_name, cur_name)
-                migrated = True
-            # Legacy aliaslarni ham har ehtimolga qarshi sinxronlab o'tamiz
-            for old_alias, (canon_name, alias_order) in legacy_upgrade.items():
-                if order_num == alias_order and cur_name.lower() == canon_name.lower():
-                    old_cnt = int(
-                        (
-                            await session.execute(
-                                select(func.count(Card.id)).where(func.lower(Card.rarity) == old_alias)
-                            )
-                        ).scalar_one()
-                        or 0
-                    )
-                    if old_cnt > 0:
-                        await GameplayService._propagate_rank_rename(session, old_alias, cur_name)
-                        migrated = True
-        if migrated:
-            await session.flush()
-        return ranks
 
     @staticmethod
     async def update_rank_field(
@@ -218,8 +143,10 @@ class GameplayService:
         ranks = await GameplayService.get_rank_definitions(session)
         if any(str(r["name"]).lower() == name.strip().lower() for r in ranks):
             raise ValueError("Bu nomdagi rank allaqachon mavjud.")
+        new_id = max((int(r.get("id") or 0) for r in ranks), default=0) + 1
         ranks.append(
             {
+                "id": new_id,
                 "name": name.strip()[:32],
                 "emoji": emoji.strip()[:8] or "⭐",
                 "order": len(ranks) + 1,
@@ -241,10 +168,7 @@ class GameplayService:
         for i, r in enumerate(kept, start=1):
             r["order"] = i
         await SettingsService.set_value(session, "rank_definitions", kept)
-        sync_runtime_ranks(kept)
-        from services.ranking_service import RankingService
-
-        RankingService.invalidate_cache()
+        sync_rank_cache(kept)
         return kept
 
     @staticmethod
@@ -256,7 +180,7 @@ class GameplayService:
         drop_probability: Optional[int] = None,
         drop_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Bitta rank maydonini alohida tahrirlash (100% moslash tugmasi bilan birga)."""
+        """Bitta rank maydonini alohida tahrirlash (ID o'zgarmaydi, mavjud kartalar nomi ham yangilanadi)."""
         ranks = await GameplayService.get_rank_definitions(session)
         target = next((r for r in ranks if str(r["name"]).lower() == rank_name.lower()), None)
         if target is None:
@@ -266,7 +190,11 @@ class GameplayService:
             clean = new_name.strip()[:32]
             if any(r is not target and str(r["name"]).lower() == clean.lower() for r in ranks):
                 raise ValueError("Bu nomdagi rank allaqachon mavjud.")
-            target["name"] = clean
+            if clean != old_name:
+                target["name"] = clean
+                await session.execute(
+                    update(Card).where(func.lower(Card.rarity) == old_name.lower()).values(rarity=clean)
+                )
         if emoji:
             target["emoji"] = emoji.strip()[:8]
         if drop_probability is not None:
@@ -274,6 +202,7 @@ class GameplayService:
         if drop_limit is not None:
             target["drop_limit"] = max(1, int(drop_limit))
         await SettingsService.set_value(session, "rank_definitions", ranks)
+        sync_rank_cache(ranks)
         rcfg = await SettingsService.get_rarity_config(session)
         for r in ranks:
             rcfg[str(r["name"])] = {
@@ -281,12 +210,6 @@ class GameplayService:
                 "drops": int(r.get("drop_limit", 1)),
             }
         await SettingsService.set_value(session, "rarity_config", rcfg)
-        sync_runtime_ranks(ranks)
-        if new_name and new_name.strip() and str(target["name"]) != old_name:
-            await GameplayService._propagate_rank_rename(session, old_name, str(target["name"]))
-        from services.ranking_service import RankingService
-
-        RankingService.invalidate_cache()
         return ranks
 
     @staticmethod
@@ -300,22 +223,24 @@ class GameplayService:
         ranks = await GameplayService.get_rank_definitions(session)
         if any(str(r["name"]).lower() == name.strip().lower() for r in ranks):
             raise ValueError("Bu nomdagi rank allaqachon mavjud.")
+        new_id = max((int(r.get("id") or 0) for r in ranks), default=0) + 1
         ranks.append(
             {
+                "id": new_id,
                 "name": name.strip()[:32],
                 "emoji": emoji.strip()[:8] or "⭐",
                 "order": len(ranks) + 1,
                 "drop_probability": max(0, min(100, int(drop_probability))),
-                "base_value": 0,
+                "base_value": 1000,
                 "drop_limit": max(1, int(drop_limit)),
                 "rank_weight": max(1, len(ranks) * 20),
             }
         )
         await SettingsService.set_value(session, "rank_definitions", ranks)
+        sync_rank_cache(ranks)
         rcfg = await SettingsService.get_rarity_config(session)
-        rcfg[name.strip()[:32]] = {"value": 0, "drops": max(1, int(drop_limit))}
+        rcfg[name.strip()[:32]] = {"value": 1000, "drops": max(1, int(drop_limit))}
         await SettingsService.set_value(session, "rarity_config", rcfg)
-        sync_runtime_ranks(ranks)
         return ranks
 
     @staticmethod
@@ -335,6 +260,7 @@ class GameplayService:
                 r["drop_probability"] = val
         await GameplayService.save_rank_definitions(session, ranks)
         return ranks
+
 
     # ------------------------------------------------------------------
     # Quiz System
@@ -546,38 +472,13 @@ class GameplayService:
         return cfg
 
     @staticmethod
-    async def get_dice_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
-        """(yoqilganmi, bugun nechta o'ynagan, kunlik limit)"""
-        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
-        cfg = await GameplayService.get_game_config(session)
-        tz = ZoneInfo(get_settings().timezone)
-        today = datetime.now(tz).date()
-        used = int(
-            (
-                await session.execute(
-                    select(func.count(GameSession.id)).where(
-                        GameSession.user_id == uid,
-                        GameSession.game_type == "dice",
-                        GameSession.created_date == today,
-                    )
-                )
-            ).scalar_one()
-            or 0
-        )
-        return bool(cfg.get("dice_enabled", True)), used, int(cfg.get("dice_daily_limit", 3))
-
-    @staticmethod
     async def play_dice_game(
         session: AsyncSession,
-        user_or_id: Union[User, int],
+        user: User,
         dice_value: Optional[int] = None,
         guessed_number: Optional[int] = None,
     ) -> Tuple[bool, str, int, int]:
         """Qaytaradi: (ok, msg, roll, reward_coins)."""
-        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
-        user = await session.get(User, uid)
-        if user is None:
-            return False, "Foydalanuvchi topilmadi.", 0, 0
         cfg = await GameplayService.get_game_config(session)
         if not cfg.get("dice_enabled", True):
             return False, "🎮 Mini o‘yinlar vaqtincha o‘chirilgan.", 0, 0
@@ -591,11 +492,7 @@ class GameplayService:
             (
                 await session.execute(
                     select(GameSession)
-                    .where(
-                        GameSession.user_id == uid,
-                        GameSession.game_type == "dice",
-                        GameSession.created_date == today,
-                    )
+                    .where(GameSession.user_id == user.id, GameSession.created_date == today)
                     .order_by(GameSession.id.desc())
                 )
             )
@@ -605,7 +502,7 @@ class GameplayService:
         if len(today_rolls) >= limit:
             return False, f"🎲 Bugungi o‘yin limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0, 0
 
-        if guessed_number is None and today_rolls and cooldown_m > 0:
+        if guessed_number is None and today_rolls:
             last_dt = ensure_utc(today_rolls[0].created_at)
             diff_sec = (utcnow() - last_dt).total_seconds()
             if diff_sec < cooldown_m * 60:
@@ -625,7 +522,7 @@ class GameplayService:
 
         session.add(
             GameSession(
-                user_id=uid,
+                user_id=user.id,
                 game_type="dice",
                 roll_value=roll,
                 reward_coins=reward_coins,
@@ -636,247 +533,25 @@ class GameplayService:
         if reward_coins > 0:
             await UserService.credit_coins(
                 session,
-                uid,
+                user.id,
                 reward_coins,
                 "mini_game_dice",
                 f"Dice roll: {roll}",
-                reference_id=f"dice:{uid}:{today.isoformat()}:{len(today_rolls)+1}",
+                reference_id=f"dice:{user.id}:{today.isoformat()}:{len(today_rolls)+1}",
             )
             user.game_wins = int(user.game_wins or 0) + 1
             user.xp = int(user.xp or 0) + reward_xp
             user.level = max(1, 1 + (user.xp // 250))
-            await GameplayService.add_season_points(session, uid, points=10, xp=reward_xp)
+            await GameplayService.add_season_points(session, user.id, points=10, xp=reward_xp)
         await session.flush()
 
         if guessed_number is not None:
             if won:
-                return True, (
-                    f"🎉 <b>YUTDINGIZ!</b>\n\nSiz <b>{guessed_number}</b> ni tanladingiz va tosh ham <b>{roll}</b> tushdi!\n"
-                    f"🪙 <b>+{reward_coins:,}</b> coin · ⚡ +{reward_xp} XP"
-                ), roll, reward_coins
-            return True, (
-                f"😔 <b>Yutqazdingiz</b>\n\nSiz <b>{guessed_number}</b> ni tanladingiz, tosh esa <b>{roll}</b> tushdi."
-            ), roll, 0
+                return True, f"🎉 TO‘G‘RI TOPDINGIZ! Tosh: <b>{roll}</b>\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
+            return True, f"😔 Afsus! Siz <b>{guessed_number}</b> tanladingiz, tosh esa <b>{roll}</b> tushdi.\nBugun yana urinib ko‘ring!", roll, 0
 
         jackpot_txt = " 🎉 JACKPOT!" if roll == 6 else ""
         return True, f"🎲 Tosh: <b>{roll}</b>{jackpot_txt}\n🪙 +{reward_coins:,} coins · ⚡ +{reward_xp} XP", roll, reward_coins
-
-    # ------------------------------------------------------------------
-    # Mini Games: Coin Flip & Lucky Card
-    # ------------------------------------------------------------------
-    @staticmethod
-    async def get_coinflip_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
-        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
-        cfg = await GameplayService.get_game_config(session)
-        tz = ZoneInfo(get_settings().timezone)
-        today = datetime.now(tz).date()
-        used = int(
-            (
-                await session.execute(
-                    select(func.count(GameSession.id)).where(
-                        GameSession.user_id == uid,
-                        GameSession.game_type == "coinflip",
-                        GameSession.created_date == today,
-                    )
-                )
-            ).scalar_one()
-            or 0
-        )
-        return bool(cfg.get("coinflip_enabled", True)), used, int(cfg.get("coinflip_daily_limit", 5))
-
-    @staticmethod
-    async def play_coin_flip(
-        session: AsyncSession,
-        user_or_id: Union[User, int],
-        choice: str,
-        bet: int,
-    ) -> Tuple[bool, str, bool, int]:
-        """Tanga tashlash (gerb/raqam). Qaytaradi: (ok, msg, won, net_delta)."""
-        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
-        user = await session.get(User, uid)
-        if user is None:
-            return False, "Foydalanuvchi topilmadi.", False, 0
-
-        cfg = await GameplayService.get_game_config(session)
-        if not cfg.get("coinflip_enabled", True):
-            return False, "🪙 Tanga tashlash o‘yini vaqtincha o‘chirilgan.", False, 0
-        choice_norm = (choice or "").strip().lower()
-        if choice_norm not in ("heads", "tails"):
-            return False, "Noto‘g‘ri tanlov.", False, 0
-        bet_amt = int(bet)
-        if bet_amt not in (50, 100, 250, 500):
-            return False, "Garov miqdori 50, 100, 250 yoki 500 coin bo‘lishi kerak.", False, 0
-
-        tz = ZoneInfo(get_settings().timezone)
-        today = datetime.now(tz).date()
-        limit = int(cfg.get("coinflip_daily_limit", 5))
-        used = int(
-            (
-                await session.execute(
-                    select(func.count(GameSession.id)).where(
-                        GameSession.user_id == uid,
-                        GameSession.game_type == "coinflip",
-                        GameSession.created_date == today,
-                    )
-                )
-            ).scalar_one()
-            or 0
-        )
-        if used >= limit:
-            return False, f"🪙 Bugungi Tanga tashlash limiti tugadi ({limit}/{limit}). Ertaga qayting!", False, 0
-
-        try:
-            await UserService.debit_coins(
-                session,
-                uid,
-                bet_amt,
-                "mini_game_coinflip_bet",
-                f"Coin flip bet ({choice_norm})",
-                reference_id=f"cf_bet:{uid}:{today.isoformat()}:{used + 1}",
-            )
-        except InsufficientCoinsError:
-            return False, f"🪙 Coinlaringiz yetarli emas ({bet_amt:,} 🪙 kerak).", False, 0
-
-        result_side = random.choice(["heads", "tails"])
-        won = result_side == choice_norm
-        reward_xp = int(cfg.get("coinflip_xp", 10))
-        payout = bet_amt * 2 if won else 0
-
-        session.add(
-            GameSession(
-                user_id=uid,
-                game_type="coinflip",
-                roll_value=1 if result_side == "heads" else 2,
-                reward_coins=payout,
-                reward_xp=reward_xp if won else 0,
-                created_date=today,
-            )
-        )
-        if won:
-            await UserService.credit_coins(
-                session,
-                uid,
-                payout,
-                "mini_game_coinflip_win",
-                f"Coin flip won ({result_side})",
-                reference_id=f"cf_win:{uid}:{today.isoformat()}:{used + 1}",
-            )
-            user.game_wins = int(user.game_wins or 0) + 1
-            user.xp = int(user.xp or 0) + reward_xp
-            user.level = max(1, 1 + (user.xp // 250))
-            await GameplayService.add_season_points(session, uid, points=10, xp=reward_xp)
-        await session.flush()
-
-        side_lbl = "🦅 Gerb" if result_side == "heads" else "🔢 Raqam"
-        pick_lbl = "🦅 Gerb" if choice_norm == "heads" else "🔢 Raqam"
-        if won:
-            return True, (
-                f"🎉 <b>YUTDINGIZ!</b>\n\nSiz: <b>{pick_lbl}</b> · Tushdi: <b>{side_lbl}</b>\n"
-                f"🪙 Mukofot: <b>+{payout:,}</b> coin (sof foyda: +{bet_amt:,} 🪙) · ⚡ +{reward_xp} XP"
-            ), True, bet_amt
-        return True, (
-            f"😔 <b>Yutqazdingiz</b>\n\nSiz: <b>{pick_lbl}</b> · Tushdi: <b>{side_lbl}</b>\n"
-            f"🪙 Yo‘qotildi: <b>-{bet_amt:,}</b> coin"
-        ), False, -bet_amt
-
-    @staticmethod
-    async def get_lucky_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
-        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
-        cfg = await GameplayService.get_game_config(session)
-        tz = ZoneInfo(get_settings().timezone)
-        today = datetime.now(tz).date()
-        used = int(
-            (
-                await session.execute(
-                    select(func.count(GameSession.id)).where(
-                        GameSession.user_id == uid,
-                        GameSession.game_type == "lucky",
-                        GameSession.created_date == today,
-                    )
-                )
-            ).scalar_one()
-            or 0
-        )
-        return bool(cfg.get("lucky_enabled", True)), used, int(cfg.get("lucky_daily_limit", 3))
-
-    @staticmethod
-    async def play_lucky_card(
-        session: AsyncSession,
-        user_or_id: Union[User, int],
-        picked_slot: int,
-    ) -> Tuple[bool, str, int]:
-        """3 ta yopiq kartadan 1 tasini ochish (bepul kunlik omad o'yini)."""
-        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
-        user = await session.get(User, uid)
-        if user is None:
-            return False, "Foydalanuvchi topilmadi.", 0
-
-        cfg = await GameplayService.get_game_config(session)
-        if not cfg.get("lucky_enabled", True):
-            return False, "🃏 Omadli karta o‘yini vaqtincha o‘chirilgan.", 0
-        if picked_slot not in (1, 2, 3):
-            return False, "1 dan 3 gacha karta tanlang.", 0
-
-        tz = ZoneInfo(get_settings().timezone)
-        today = datetime.now(tz).date()
-        limit = int(cfg.get("lucky_daily_limit", 3))
-        used = int(
-            (
-                await session.execute(
-                    select(func.count(GameSession.id)).where(
-                        GameSession.user_id == uid,
-                        GameSession.game_type == "lucky",
-                        GameSession.created_date == today,
-                    )
-                )
-            ).scalar_one()
-            or 0
-        )
-        if used >= limit:
-            return False, f"🃏 Bugungi Omadli karta limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0
-
-        min_r = max(10, int(cfg.get("lucky_min_reward", 60)))
-        max_r = max(min_r, int(cfg.get("lucky_max_reward", 350)))
-        mid_r = (min_r + max_r) // 2
-        prizes = [min_r, mid_r, max_r]
-        random.shuffle(prizes)
-        reward_coins = prizes[picked_slot - 1]
-        is_jackpot = reward_coins == max_r
-        reward_xp = int(cfg.get("lucky_xp", 10))
-
-        session.add(
-            GameSession(
-                user_id=uid,
-                game_type="lucky",
-                roll_value=picked_slot,
-                reward_coins=reward_coins,
-                reward_xp=reward_xp,
-                created_date=today,
-            )
-        )
-        await UserService.credit_coins(
-            session,
-            uid,
-            reward_coins,
-            "mini_game_lucky",
-            f"Lucky card #{picked_slot}",
-            reference_id=f"lucky:{uid}:{today.isoformat()}:{used + 1}",
-        )
-        if is_jackpot:
-            user.game_wins = int(user.game_wins or 0) + 1
-        user.xp = int(user.xp or 0) + reward_xp
-        user.level = max(1, 1 + (user.xp // 250))
-        await GameplayService.add_season_points(session, uid, points=8, xp=reward_xp)
-        await session.flush()
-
-        cards_reveal = "  ".join(
-            f"[{'🌟' if i + 1 == picked_slot else '▫️'} #{i + 1}: {p}🪙]" for i, p in enumerate(prizes)
-        )
-        title = "🌟 <b>OMADLI JACKPOT!</b>" if is_jackpot else "🃏 <b>KARTA OCHILDI!</b>"
-        return True, (
-            f"{title}\n\n{cards_reveal}\n\n"
-            f"Siz <b>#{picked_slot}</b> kartani ochdingiz: <b>+{reward_coins:,} 🪙</b> · ⚡ +{reward_xp} XP"
-        ), reward_coins
 
     # ------------------------------------------------------------------
     # Daily Random Card (faqat released/faol kartalardan)
@@ -886,15 +561,7 @@ class GameplayService:
         cfg = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
         if not isinstance(cfg, dict) or not cfg.get("enabled", True):
             return None
-        allowed = list(
-            cfg.get("allowed_rarities")
-            or [
-                get_rank_name_by_order(1, "Basic"),
-                get_rank_name_by_order(2, "Elita"),
-                get_rank_name_by_order(3, "Epic"),
-            ]
-        )
-        allowed_lower = [str(a).strip().lower() for a in allowed if str(a).strip()]
+        allowed = list(cfg.get("allowed_rarities") or ["Common", "Rare", "Epic"])
         owned_ids = select(UserCard.card_id).where(UserCard.user_id == user.id)
         card = (
             await session.execute(
@@ -904,7 +571,7 @@ class GameplayService:
                     Card.is_deleted.is_(False),
                     Card.is_event_card.is_(False),
                     Card.dropped_count > 0,  # hech qachon unreleased karta berilmaydi
-                    func.lower(Card.rarity).in_(allowed_lower),
+                    Card.rarity.in_(allowed),
                     Card.id.not_in(owned_ids),
                 )
                 .order_by(func.random())
