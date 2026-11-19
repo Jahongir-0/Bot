@@ -217,7 +217,7 @@ DEFAULT_VIP_CONFIG: Dict[str, object] = {
 DEFAULT_GAME_CONFIG: Dict[str, object] = {
     "dice_enabled": True,
     "dice_daily_limit": 3,
-    "dice_cooldown_minutes": 30,
+    "dice_cooldown_minutes": 0,
     "dice_base_reward": 50,
     "dice_jackpot_reward": 300,
     "dice_xp": 15,
