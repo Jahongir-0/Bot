@@ -120,6 +120,23 @@ def format_drop_claimed_message(card: Card, winner: User, reward_coins: int = 0)
     )
 
 
+_FRAME_STYLE = {
+    # kalit: (yuqori chiziq, pastki chiziq, ramka emojisi)
+    "default": ("┏━━━━━━━━━━━━━━━┓", "┗━━━━━━━━━━━━━━━┛", "▫️"),
+    "fire": ("🔥━━━━━━━━━━━━━━━🔥", "🔥━━━━━━━━━━━━━━━🔥", "🔥"),
+    "royal": ("👑━━━━━━━━━━━━━━━👑", "👑━━━━━━━━━━━━━━━👑", "👑"),
+    "cyber": ("⚡━━━━━━━━━━━━━━━⚡", "⚡━━━━━━━━━━━━━━━⚡", "⚡"),
+    "sakura": ("🌸━━━━━━━━━━━━━━━🌸", "🌸━━━━━━━━━━━━━━━🌸", "🌸"),
+    "diamond": ("💎━━━━━━━━━━━━━━━💎", "💎━━━━━━━━━━━━━━━💎", "💎"),
+}
+
+
+def _level_bar(xp: int, per_level: int = 250) -> str:
+    into = xp % per_level
+    filled = int(into / per_level * 10)
+    return "▰" * filled + "▱" * (10 - filled) + f" {int(into / per_level * 100)}%"
+
+
 def format_profile_message(
     user: User,
     global_rank: int,
@@ -131,52 +148,62 @@ def format_profile_message(
 ) -> str:
     from models.base import ensure_utc, utcnow
 
-    group_rank_str = f"#{group_rank}" if group_rank is not None else "—"
-    frame_label = PROFILE_FRAMES.get(getattr(user, "equipped_frame", None) or "default", "▫️ Oddiy ramka")
+    frame_key = getattr(user, "equipped_frame", None) or "default"
+    top, bottom, frame_emoji = _FRAME_STYLE.get(frame_key, _FRAME_STYLE["default"])
     bg_label = PROFILE_BACKGROUNDS.get(getattr(user, "equipped_bg", None) or "classic", "🌌 Klassik")
     title_str = getattr(user, "equipped_title", None)
     badge_str = getattr(user, "equipped_badge", None) or ""
 
-    vip_line = "▫️ Oddiy"
     vip_tier = getattr(user, "vip_tier", None)
     vip_until = getattr(user, "vip_until", None)
-    if vip_tier and vip_until and ensure_utc(vip_until) > utcnow():
-        vip_line = f"💎 <b>{esc(vip_tier)} VIP</b> ({ensure_utc(vip_until):%d.%m.%Y} gacha)"
+    is_vip = bool(vip_tier and vip_until and ensure_utc(vip_until) > utcnow())
+    if is_vip:
+        top, bottom = "💎✨━━━━━━━━━━━━━💎✨", "💎✨━━━━━━━━━━━━━💎✨"
+        status = f"💎 <b>{esc(vip_tier)} VIP</b> · {ensure_utc(vip_until):%d.%m.%Y} gacha"
+    else:
+        status = "▫️ Oddiy a’zo  <i>(💎 VIP olib ko‘proq imkoniyat oching)</i>"
+
+    name_line = f"{frame_emoji} <b>{esc(user.display_name)}</b> {esc(badge_str)}".rstrip()
+    lines = [top, name_line]
+    if title_str:
+        lines.append(f"🏷 <i>{esc(title_str)}</i>")
+    lines += [bottom, status, f"🆔 <code>{user.telegram_id}</code> · {esc(bg_label)}", ""]
 
     locked = getattr(user, "locked_coins", 0) or 0
-    coins_line = f"🪙 Coins: <b>{fmt_coins(user.coins)}</b>"
+    coins = f"🪙 <b>{fmt_coins(user.coins)}</b> coin"
     if locked > 0:
-        coins_line += f" (🔒 {fmt_coins(locked)} band)"
-
-    lines = [
-        f"👤 <b>PROFILE V2</b> {esc(badge_str)}",
-        f"🖼 {esc(frame_label)} · {esc(bg_label)}",
+        coins += f"  <i>(🔒 {fmt_coins(locked)} band)</i>"
+    lines += [
+        "💰 <b>HAMYON</b>",
+        coins,
+        "",
+        "📈 <b>DARAJA</b>",
+        f"⚡ <b>{user.level}</b>-daraja · {fmt_coins(user.xp)} XP",
+        f"<code>{_level_bar(user.xp)}</code>",
+        "",
+        "🎴 <b>KOLLEKSIYA</b>",
+        f"🎴 Jami: <b>{user.total_cards}</b>  ·  ✨ Noyob: <b>{user.unique_cards}</b>",
     ]
-    if title_str:
-        lines.append(f"🏷 Unvon: <b>{esc(title_str)}</b>")
-    lines.extend(
-        [
-            "━━━━━━━━━━━━━━━",
-            f"🆔 ID: <code>{user.telegram_id}</code>",
-            f"👤 Foydalanuvchi: {esc(user.display_name)}",
-            f"💎 Status: {vip_line}",
-            coins_line,
-            f"⚡ Level: <b>{user.level}</b> ({user.xp} XP)",
-            f"📊 Progress: <code>{xp_progress_bar(user.xp)}</code>",
-            f"🎴 Cards: <b>{user.total_cards}</b> | ✨ Unique: <b>{user.unique_cards}</b>",
-            f"🏆 Global: <b>#{global_rank}</b> | Group: <b>{group_rank_str}</b>",
-            f"🔥 Daily streak: <b>{user.daily_streak} kun</b> | 🏅 Yutuqlar: <b>{achievements_count}</b>",
-            f"🧠 Quiz: <b>{getattr(user, 'quiz_wins', 0)}</b> · 🎲 Games: <b>{getattr(user, 'game_wins', 0)}</b> · 🤝 Trade: <b>{getattr(user, 'trade_count', 0)}</b>",
-        ]
-    )
-    if season_points is not None:
-        lines.append(f"🏆 Mavsum ballari: <b>{season_points}</b>")
     if rarest_card is not None:
         rmeta = get_rarity_meta(rarest_card.rarity)
-        lines.append(f"💎 Eng noyob karta: {rmeta.emoji} <b>{esc(rarest_card.character_name)}</b> ({esc(rarest_card.rarity)})")
+        lines.append(f"💠 Eng noyob: {rmeta.emoji} <b>{esc(rarest_card.character_name)}</b> · {esc(rarest_card.rarity)}")
     if showcase_cards:
-        sc = ", ".join(esc(c.character_name) for c in showcase_cards[:3])
-        lines.append(f"🖼 Showcase: <i>{sc}</i>")
+        lines.append("🖼 Vitrina: " + " · ".join(f"<b>{esc(c.character_name)}</b>" for c in showcase_cards[:3]))
+
+    group_part = f"  ·  👥 Guruh <b>#{group_rank}</b>" if group_rank is not None else ""
+    lines += [
+        "",
+        "🏆 <b>YUTUQLAR</b>",
+        f"🌍 Global <b>#{global_rank}</b>{group_part}",
+        f"🔥 Kunlik seriya: <b>{user.daily_streak}</b> kun  ·  🏅 Nishonlar: <b>{achievements_count}</b>",
+    ]
+    if season_points is not None:
+        lines.append(f"🏆 Mavsum ballari: <b>{season_points}</b>")
+    lines += [
+        "",
+        "🎮 <b>FAOLLIK</b>",
+        f"🧠 Viktorina: <b>{getattr(user, 'quiz_wins', 0)}</b>  ·  🎲 O‘yin: <b>{getattr(user, 'game_wins', 0)}</b>  ·  🤝 Almashuv: <b>{getattr(user, 'trade_count', 0)}</b>",
+    ]
     return "\n".join(lines)
 
 
@@ -187,24 +214,33 @@ def format_collection_summary(
     favorites: List[tuple[str, int]],
 ) -> str:
     lines = [
-        f"👤 <b>KOLLEKSIYA — {esc(user.display_name)}</b>\n",
-        f"🎴 Cards: <b>{user.total_cards}</b>",
-        f"✨ Unique: <b>{user.unique_cards}</b>\n",
+        "🎴 <b>KARTALARIM</b>",
+        "━━━━━━━━━━━━━━━",
+        f"🎴 Jami: <b>{user.total_cards}</b>  ·  ✨ Noyob: <b>{user.unique_cards}</b>",
     ]
-    if favorites:
-        lines.append("❤️ <b>Sevimlilar / Top qahramonlar:</b>")
-        for char_name, qty in favorites[:5]:
-            lines.append(f"• {esc(char_name)} × {qty}")
-        lines.append("")
+    if user.total_cards == 0:
+        lines += [
+            "",
+            "📭 Hali kartangiz yo‘q.",
+            "💡 Guruhda tashlangan karta xabariga <b>REPLY</b> qilib personaj ismini yozing yoki 🎁 kunlik bonusni oling!",
+        ]
+        return "\n".join(lines)
+
+    nonzero = {k: v for k, v in rarity_counts.items() if v}
+    if nonzero:
+        lines += ["", "⭐ <b>Rank bo‘yicha</b>"]
+        for rarity_name, qty in nonzero.items():
+            meta = get_rarity_meta(rarity_name)
+            lines.append(f"{meta.emoji} {esc(rarity_name)}: <b>{qty}</b>")
     if anime_counts:
-        lines.append("📺 <b>Media bo‘yicha:</b>")
-        for anime_name, qty in anime_counts[:8]:
-            lines.append(f"• {esc(anime_name)} — {qty}")
-        lines.append("")
-    lines.append("⭐ <b>Rank bo‘yicha:</b>")
-    for rarity_name, qty in rarity_counts.items():
-        meta = get_rarity_meta(rarity_name)
-        lines.append(f"{meta.emoji} {esc(rarity_name)} — {qty}")
+        lines += ["", "📺 <b>Eng ko‘p (asar bo‘yicha)</b>"]
+        for anime_name, qty in anime_counts[:5]:
+            lines.append(f"• {esc(anime_name)} — <b>{qty}</b>")
+    if favorites:
+        lines += ["", "❤️ <b>Sevimli personajlar</b>"]
+        for char_name, qty in favorites[:3]:
+            lines.append(f"• {esc(char_name)} × {qty}")
+    lines += ["", "👇 Kartalarni ko‘rish usulini tanlang:"]
     return "\n".join(lines)
 
 

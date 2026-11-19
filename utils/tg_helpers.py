@@ -117,7 +117,10 @@ async def edit_or_answer(
             pass
         else:
             await msg.answer(text, reply_markup=reply_markup)
-    await target.answer()
+    try:
+        await target.answer()
+    except TelegramBadRequest:
+        pass  # callback allaqachon javoblangan bo'lishi mumkin
 
 
 async def send_card_visual(
