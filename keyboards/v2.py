@@ -613,15 +613,34 @@ def vip_shop_kb(owner_id: int, vip_cfg: Dict) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def profile_custom_kb(owner_id: int) -> InlineKeyboardMarkup:
+VIP_ONLY_FRAMES = {"royal", "diamond", "cyber"}
+
+
+def profile_style_kb(owner_id: int, frame: str, bg: str, is_vip: bool) -> InlineKeyboardMarkup:
+    """🎨 BEZAK: joriy tanlov ✅, VIP uchun yopiq ramkalar 🔒."""
     b = InlineKeyboardBuilder()
-    for k, lbl in PROFILE_FRAMES.items():
-        b.row(InlineKeyboardButton(text=f"🖼 {lbl}", callback_data=AchCb(owner_id=owner_id, act="equip", code=f"f_{k}").pack()))
+    for i, (k, lbl) in enumerate(PROFILE_FRAMES.items()):
+        locked = k in VIP_ONLY_FRAMES and not is_vip
+        mark = "✅ " if k == frame else ("🔒 " if locked else "")
+        b.add(InlineKeyboardButton(text=f"{mark}{lbl}", callback_data=AchCb(owner_id=owner_id, act="equip", code=f"f_{k}").pack()))
+    b.adjust(2)
+    bg_buttons = []
     for k, lbl in PROFILE_BACKGROUNDS.items():
-        b.row(InlineKeyboardButton(text=f"🌌 {lbl}", callback_data=AchCb(owner_id=owner_id, act="equip", code=f"b_{k}").pack()))
+        mark = "✅ " if k == bg else ""
+        bg_buttons.append(InlineKeyboardButton(text=f"{mark}{lbl}", callback_data=AchCb(owner_id=owner_id, act="equip", code=f"b_{k}").pack()))
+    for i in range(0, len(bg_buttons), 2):
+        b.row(*bg_buttons[i : i + 2])
+    if not is_vip:
+        b.row(InlineKeyboardButton(text="💎 VIP olish — hamma ramkalar ochiladi", callback_data=VipCb(owner_id=owner_id, act="v").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ Profil", callback_data=NavCb(owner_id=owner_id, target="profile").pack()))
+    return b.as_markup()
+
+
+def ach_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="🏅 Yutuqlar", callback_data=AchCb(owner_id=owner_id, act="v").pack()),
         InlineKeyboardButton(text="🏆 Mavsum", callback_data=AchCb(owner_id=owner_id, act="season").pack()),
+        InlineKeyboardButton(text="🎨 Bezak", callback_data=AchCb(owner_id=owner_id, act="frames").pack()),
     )
     b.row(InlineKeyboardButton(text="⬅️ Profil", callback_data=NavCb(owner_id=owner_id, target="profile").pack()))
     return b.as_markup()

@@ -535,73 +535,41 @@ def transfer_confirm_kb(actor_telegram_id: int, transfer_id: int) -> InlineKeybo
     return builder.as_markup()
 
 
+EXTENDED_RANK_SCOPES = ("coins", "xp", "quiz", "games", "trades", "auction", "refs", "rare", "mythic", "divine")
+
+
 def ranking_kb(
     owner_id: int,
     current_scope: str,
     in_group: bool,
     period: str = "all",
 ) -> InlineKeyboardMarkup:
+    """REYTING: 1-qator asosiy reytinglar, keyingi qatorlar maxsus reytinglar, davr faqat kerak joyda."""
     builder = InlineKeyboardBuilder()
-    buttons = [
-        InlineKeyboardButton(
-            text=("• 🌍 GLOBAL •" if current_scope == "global" else "🌍 GLOBAL"),
-            callback_data=RankingCb(owner_id=owner_id, scope="global", period=period).pack(),
-        )
-    ]
+
+    def _btn(scope: str, label: str) -> InlineKeyboardButton:
+        text = f"• {label} •" if current_scope == scope else label
+        return InlineKeyboardButton(text=text, callback_data=RankingCb(owner_id=owner_id, scope=scope, period=period).pack())
+
+    main = [_btn("global", "🌍 Global")]
     if in_group:
-        buttons.append(
-            InlineKeyboardButton(
-                text=("• 🏆 GROUP •" if current_scope == "group" else "🏆 GROUP"),
-                callback_data=RankingCb(owner_id=owner_id, scope="group", period=period).pack(),
-            )
-        )
-    buttons.append(
-        InlineKeyboardButton(
-            text=("• 🏰 GURUHLAR •" if current_scope == "groups" else "🏰 GURUHLAR"),
-            callback_data=RankingCb(owner_id=owner_id, scope="groups", period=period).pack(),
-        )
-    )
-    builder.row(*buttons)
-    extra_scopes = [
-        ("coins", "🪙 Coins"),
-        ("xp", "⚡ XP"),
-        ("quiz", "🧠 Quiz"),
-        ("games", "🎲 Games"),
-        ("trades", "🤝 Trade"),
-        ("refs", "📣 Referal"),
-        ("rare", "💎 Rare+"),
-        ("mythic", "🔴 Mythic"),
-        ("divine", "✨ Divine"),
-    ]
-    for i in range(0, len(extra_scopes), 3):
+        main.append(_btn("group", "👥 Guruh"))
+    main.append(_btn("groups", "🏰 Guruhlar"))
+    builder.row(*main)
+    builder.row(_btn("coins", "🪙 Boylik"), _btn("xp", "⚡ Daraja"), _btn("rare", "💎 Noyob"))
+    builder.row(_btn("quiz", "🧠 Viktorina"), _btn("games", "🎲 O‘yin"), _btn("trades", "🤝 Savdo"))
+    builder.row(_btn("refs", "👥 Do‘stlar"), _btn("mythic", "🔴 Mythic"), _btn("divine", "✨ Divine"))
+    if current_scope in EXTENDED_RANK_SCOPES:
         builder.row(
             *[
                 InlineKeyboardButton(
-                    text=("• " if current_scope == k else "") + lbl,
-                    callback_data=RankingCb(owner_id=owner_id, scope=k, period=period).pack(),
+                    text=("✅ " if period == p else "") + lbl,
+                    callback_data=RankingCb(owner_id=owner_id, scope=current_scope, period=p).pack(),
                 )
-                for k, lbl in extra_scopes[i : i + 3]
+                for p, lbl in (("all", "Hammasi"), ("monthly", "Oy"), ("weekly", "Hafta"))
             ]
         )
-    builder.row(
-        *[
-            InlineKeyboardButton(
-                text=("✅ " if period == p else "") + lbl,
-                callback_data=RankingCb(owner_id=owner_id, scope=current_scope, period=p).pack(),
-            )
-            for p, lbl in (("all", "Barcha vaqt"), ("monthly", "Oylik"), ("weekly", "Haftalik"))
-        ]
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ ORQAGA",
-            callback_data=NavCb(owner_id=owner_id, target="profile").pack(),
-        ),
-        InlineKeyboardButton(
-            text="🏠 BOSH MENU",
-            callback_data=NavCb(owner_id=owner_id, target="home").pack(),
-        ),
-    )
+    builder.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return builder.as_markup()
 
 

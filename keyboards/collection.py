@@ -43,21 +43,21 @@ def collection_summary_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="🗂 BARCHA KARTALAR (V2)",
+            text="🗂 HAMMASI",
             callback_data=CollectionCb(owner_id=owner_id, action="v2_list", filter_val="all", sort_by="newest", page=1).pack(),
         ),
         InlineKeyboardButton(
-            text="📺 MEDIA BO‘LIMLARI",
+            text="📺 ASAR BO‘YICHA",
             callback_data=CollectionCb(owner_id=owner_id, action="anime_list", page=1).pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="⭐ RARITY BO‘YICHA",
+            text="⭐ RANK BO‘YICHA",
             callback_data=CollectionCb(owner_id=owner_id, action="by_rarity").pack(),
         ),
         InlineKeyboardButton(
-            text="📩 KELGAN TAKLIFLAR",
+            text="📩 TAKLIFLAR",
             callback_data=OfferCb(owner_id=owner_id, action="incoming", page=1).pack(),
         ),
     )
@@ -76,14 +76,14 @@ def v2_collection_list_kb(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     tabs = [
-        ("all", "All"),
+        ("all", "Hammasi"),
         ("anime", "Anime"),
         ("manga", "Manga"),
-        ("movie", "Movie"),
-        ("cartoon", "Cartoon"),
+        ("movie", "Kino"),
+        ("cartoon", "Multfilm"),
         ("event", "Event"),
-        ("limited", "Limited"),
-        ("favorites", "❤️ Fav"),
+        ("limited", "Limitli"),
+        ("favorites", "❤️ Sevimli"),
     ]
     for i in range(0, len(tabs), 4):
         builder.row(
@@ -97,7 +97,7 @@ def v2_collection_list_kb(
                 for k, lbl in tabs[i : i + 4]
             ]
         )
-    sorts = [("newest", "🆕"), ("rarest", "💎"), ("alpha", "🔤"), ("media", "📺")]
+    sorts = [("newest", "🆕 Yangi"), ("rarest", "💎 Noyob"), ("alpha", "🔤 A-Z"), ("media", "📺 Asar")]
     builder.row(
         *[
             InlineKeyboardButton(
