@@ -109,9 +109,8 @@ class QuizCb(CallbackData, prefix="qz"):
 
 class GameCb(CallbackData, prefix="gm"):
     owner_id: int
-    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick
+    act: str = "v"  # v, dice
     val: int = 0
-    extra: str = ""
 
 
 class AucCb(CallbackData, prefix="auc"):
@@ -162,9 +161,3 @@ class NotifCb(CallbackData, prefix="ntf"):
     act: str = "v"  # v, read_all, read
     nid: int = 0
     p: int = 1
-
-
-class PackCb(CallbackData, prefix="pck"):
-    owner_id: int
-    act: str = "v"  # v, open
-    tier: str = ""

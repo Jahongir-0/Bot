@@ -1,13 +1,13 @@
-import asyncio
 import logging
 import re
 import traceback
+from pathlib import Path
 from typing import Optional, Union
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User as TgUser
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message, User as TgUser
 
 from config.settings import get_settings
 
@@ -117,10 +117,7 @@ async def edit_or_answer(
             pass
         else:
             await msg.answer(text, reply_markup=reply_markup)
-    try:
-        await target.answer()
-    except TelegramBadRequest:
-        pass  # callback allaqachon javoblangan bo'lishi mumkin
+    await target.answer()
 
 
 async def send_card_visual(
@@ -130,16 +127,44 @@ async def send_card_visual(
     caption: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> Message:
-    if image and (image.startswith("http://") or image.startswith("https://") or len(image) > 20):
-        try:
-            return await bot.send_photo(
-                chat_id=chat_id,
-                photo=image,
-                caption=caption,
-                reply_markup=reply_markup,
-            )
-        except Exception as exc:
-            logger.warning("Failed to send photo (%s), falling back to text card: %s", image[:40], exc)
+    img_str = (image or "").strip()
+    if img_str:
+        if img_str.startswith(("http://", "https://")):
+            try:
+                return await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=img_str,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                )
+            except Exception as exc:
+                logger.warning("Failed to send photo URL (%s), falling back to text card: %s", img_str[:40], exc)
+        else:
+            p = Path(img_str)
+            if not p.is_file():
+                bot_root_rel = Path(__file__).resolve().parent.parent / img_str.lstrip("/")
+                if bot_root_rel.is_file():
+                    p = bot_root_rel
+            if p.is_file():
+                try:
+                    return await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=FSInputFile(p),
+                        caption=caption,
+                        reply_markup=reply_markup,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to send local card photo (%s): %s", p.name, exc)
+            elif "/" not in img_str and "\\" not in img_str and len(img_str) > 20:
+                try:
+                    return await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=img_str,
+                        caption=caption,
+                        reply_markup=reply_markup,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to send file_id photo (%s): %s", img_str[:25], exc)
 
     return await bot.send_message(
         chat_id=chat_id,
@@ -169,34 +194,3 @@ async def send_card_message(bot: Bot, chat_id: int, card, caption: str, reply_ma
     except Exception as exc:
         logger.debug("file_id cache failed: %s", exc)
     return msg
-
-
-_BG_TASKS: set = set()
-
-
-async def safe_delete(bot: Bot, chat_id: int, message_id: Optional[int]) -> bool:
-    """Xabarni o'chiradi. Ruxsat yo'q yoki xabar allaqachon yo'q bo'lsa False qaytaradi (xato bermaydi)."""
-    if not message_id:
-        return False
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-        return True
-    except Exception as exc:
-        logger.debug("delete_message(%s,%s) bo'lmadi: %s", chat_id, message_id, exc)
-        return False
-
-
-def schedule_delete(bot: Bot, chat_id: int, message_ids, delay: float = 6.0) -> None:
-    """Bir necha xabarni `delay` soniyadan keyin o'chiradi (guruh toza turishi uchun)."""
-    ids = [m for m in message_ids if m]
-    if not ids:
-        return
-
-    async def _job() -> None:
-        await asyncio.sleep(delay)
-        for mid in ids:
-            await safe_delete(bot, chat_id, mid)
-
-    task = asyncio.create_task(_job())
-    _BG_TASKS.add(task)
-    task.add_done_callback(_BG_TASKS.discard)
