@@ -159,6 +159,11 @@ def sync_rank_cache(ranks: List[Dict[str, object]]) -> None:
         )
 
 
+def sync_runtime_ranks(ranks: List[Dict[str, object]]) -> None:
+    """Backward-compatible alias for sync_rank_cache."""
+    sync_rank_cache(ranks)
+
+
 def get_rarity_meta(rarity: str) -> RarityMeta:
     if rarity in RARITY_REGISTRY:
         return RARITY_REGISTRY[rarity]
@@ -342,6 +347,11 @@ QUEST_DEFINITIONS: List[Dict[str, object]] = [
     {"id": "ref_1", "title": "🤝 Ilk do‘st", "desc": "1 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 1, "reward": 300},
     {"id": "ref_5", "title": "📣 Jamoa yetakchisi", "desc": "5 ta do‘stni referal orqali taklif qiling", "metric": "referrals", "target": 5, "reward": 1500},
 ]
+
+
+def get_quest_definitions(lang: str = "uz") -> List[Dict[str, object]]:
+    return [dict(q) for q in QUEST_DEFINITIONS]
+
 
 PAGE_SIZE = 20
 MAX_CARD_PRICE = 10_000_000
