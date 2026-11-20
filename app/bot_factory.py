@@ -1,5 +1,6 @@
 import logging
 
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -11,7 +12,7 @@ from config.settings import Settings
 from database.redis_client import LockManager
 from handlers import register_all_routers
 from middlewares import CallbackSecurityMiddleware, GlobalAuthAndBanMiddleware
-from utils.tg_helpers import send_error_alert_to_super_admins
+from utils.tg_helpers import note_flood, send_error_alert_to_super_admins
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,26 @@ def create_dispatcher(lock_manager: LockManager) -> Dispatcher:
 
     @dp.errors()
     async def _global_error_handler(event: ErrorEvent) -> bool:
-        logger.exception("Unhandled update error: %s", event.exception)
+        exc = event.exception
         upd = event.update
+        # Zararsiz, kutilgan xatolar: adminga BOT ERROR yubormaymiz
+        if isinstance(exc, TelegramRetryAfter):
+            cq = upd.callback_query
+            chat = cq.message.chat.id if (cq and cq.message) else (upd.message.chat.id if upd.message else None)
+            note_flood(chat, exc.retry_after)
+            logger.warning("Flood control (chat %s): %s soniya kutish", chat, exc.retry_after)
+            if cq is not None:
+                try:
+                    await cq.answer(f"⏳ Juda tez! {int(exc.retry_after)} soniyadan keyin qayta urining.", show_alert=False)
+                except Exception:
+                    pass
+            return True
+        if isinstance(exc, TelegramBadRequest) and any(
+            t in str(exc).lower() for t in ("query is too old", "message is not modified", "message to edit not found", "message can't be edited")
+        ):
+            logger.info("Zararsiz Telegram xatosi: %s", exc)
+            return True
+        logger.exception("Unhandled update error: %s", event.exception)
         tg_user = None
         chat_id = None
         action = None
