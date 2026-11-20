@@ -18,7 +18,7 @@ from models.user_card import UserCard
 from services.collection_service import CollectionService
 from services.transfer_service import TransferService
 from services.user_service import InsufficientCoinsError, UserService
-from utils.callback_data import GiveCb, TransferCb
+from utils.callback_data import GiveCb, NavCb, TransferCb
 from utils.constants import get_rarity_meta
 from utils.formatting import esc, fmt_coins
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
@@ -31,6 +31,7 @@ CODE_RE = re.compile(r"^crd-\d+$", re.IGNORECASE)
 
 
 class GiveStates(StatesGroup):
+    waiting_recipient = State()
     waiting_name = State()
     choosing = State()
 
@@ -203,6 +204,55 @@ async def cmd_give(message: Message, state: FSMContext, db_user: User) -> None:
         await _show_matches(message, state, db_user, name)
         return
 
+    await state.set_state(GiveStates.waiting_name)
+    await message.reply(
+        f"🎴 <b>{esc(recipient.display_name)}</b> ga qaysi kartani berasiz?\n"
+        "Karta <b>ismini</b> yozing (masalan: <code>Gojo</code>). Bekor qilish: /cancel",
+        reply_markup=ForceReply(selective=True, input_field_placeholder="Karta ismi..."),
+    )
+
+
+@router.callback_query(NavCb.filter(F.target == "give"))
+async def cb_give_start(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
+    """🎁 SOVG'A tugmasi: kimga ekanini so'raydi, keyin karta ismini so'raydi (/give ning tugmali varianti)."""
+    await state.clear()
+    await state.set_state(GiveStates.waiting_recipient)
+    await state.update_data(from_tg=db_user.telegram_id, price=0)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=GiveCb(owner_id=callback.from_user.id, action="cancel", user_card_id=0).pack()))
+    await edit_or_answer(
+        callback,
+        "🎁 <b>SOVG‘A BERISH</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Do‘stingizga kartangizni sovg‘a qiling.\n\n"
+        "1️⃣ Qabul qiluvchining <b>@username</b> yoki <b>ID</b> raqamini yozing\n"
+        "2️⃣ Karta <b>ismini</b> yozing\n"
+        "3️⃣ Ro‘yxatdan kartani tanlang va tasdiqlang\n\n"
+        "<i>Qabul qiluvchi botdan kamida bir marta foydalangan bo‘lishi kerak. "
+        "Pullik sotish uchun: <code>/give @username Gojo 1000</code></i>",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(GiveStates.waiting_recipient, NotCommandFilter())
+async def fsm_give_recipient(message: Message, state: FSMContext, db_user: User) -> None:
+    data = await state.get_data()
+    if data.get("from_tg") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().split()[0] if (message.text or "").strip() else ""
+    if not raw or not (raw.startswith("@") or raw.isdigit()):
+        if is_private_chat(message):
+            await message.answer("⚠️ @username yoki ID raqam yozing (masalan: <code>@doston</code>). Bekor qilish: /cancel")
+        return
+    async with get_session() as session:
+        recipient = await UserService.find_user(session, raw)
+    if recipient is None:
+        await message.answer("❌ Foydalanuvchi topilmadi. U botdan kamida bir marta foydalangan bo‘lishi kerak. Qayta yozing yoki /cancel.")
+        return
+    if recipient.id == db_user.id:
+        await message.answer("❌ O‘zingizga karta bera olmaysiz. Boshqa foydalanuvchini yozing.")
+        return
+    await state.update_data(to_user_id=recipient.id, from_tg=db_user.telegram_id, price=0)
     await state.set_state(GiveStates.waiting_name)
     await message.reply(
         f"🎴 <b>{esc(recipient.display_name)}</b> ga qaysi kartani berasiz?\n"
