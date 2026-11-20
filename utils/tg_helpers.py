@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import re
+import time
 import traceback
 from typing import Optional, Union
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import BaseFilter
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User as TgUser
 
@@ -92,6 +93,22 @@ async def send_error_alert_to_super_admins(
             pass
 
 
+# Telegram guruhda ~20 xabar/daqiqa limit qo'yadi (flood control). Chat bo'yicha "dam olish" vaqtini eslab qolamiz.
+_FLOOD_UNTIL: dict = {}
+
+
+def note_flood(chat_id: Optional[int], seconds: float) -> None:
+    if chat_id is not None:
+        _FLOOD_UNTIL[chat_id] = time.monotonic() + max(1.0, float(seconds))
+
+
+def flood_wait_left(chat_id: Optional[int]) -> int:
+    """Shu chatda yana necha soniya kutish kerak (0 = erkin)."""
+    until = _FLOOD_UNTIL.get(chat_id, 0.0) if chat_id is not None else 0.0
+    left = until - time.monotonic()
+    return int(left) + 1 if left > 0 else 0
+
+
 async def edit_or_answer(
     target: Union[Message, CallbackQuery],
     text: str,
@@ -106,17 +123,37 @@ async def edit_or_answer(
         await target.answer()
         return
 
+    # Chat limitga tushgan bo'lsa, so'rov yubormay, foydalanuvchiga tushunarli xabar beramiz
+    left = flood_wait_left(msg.chat.id)
+    if left:
+        try:
+            await target.answer(f"⏳ Guruh juda band. {left} soniyadan keyin qayta bosing.", show_alert=False)
+        except Exception:
+            pass
+        return
+
     try:
         if msg.photo:
             await msg.delete()
             await msg.answer(text, reply_markup=reply_markup)
         else:
             await msg.edit_text(text, reply_markup=reply_markup)
+    except TelegramRetryAfter as exc:
+        note_flood(msg.chat.id, exc.retry_after)
+        try:
+            await target.answer(f"⏳ Guruh juda band. {int(exc.retry_after)} soniyadan keyin qayta bosing.", show_alert=True)
+        except Exception:
+            pass
+        return
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc).lower():
             pass
         else:
-            await msg.answer(text, reply_markup=reply_markup)
+            try:
+                await msg.answer(text, reply_markup=reply_markup)
+            except TelegramRetryAfter as exc2:
+                note_flood(msg.chat.id, exc2.retry_after)
+                return
     try:
         await target.answer()
     except TelegramBadRequest:
