@@ -24,6 +24,12 @@ class OfferResult:
     card: Optional[Card] = None
     owner: Optional[User] = None
     buyer: Optional[User] = None
+    amount: int = 0
+    is_duplicate: bool = False
+    level_before: int = 0
+    level_after: int = 0
+    maxed: bool = False
+    refund: int = 0
 
 
 class OfferService:
@@ -78,8 +84,6 @@ class OfferService:
             return OfferResult(False, "O‘z kartangizga taklif yubora olmaysiz.")
         if uc.is_locked:
             return OfferResult(False, "Bu karta hozir marketda yoki transfer jarayonida.")
-        if await UserService.owns_card(session, buyer_id, uc.card_id):
-            return OfferResult(False, "Bu kartadan sizda allaqachon bor — bir xil kartadan faqat bitta nusxa olish mumkin.")
 
         # Prevent duplicate pending offer spam from same buyer on same card
         existing = (
@@ -131,6 +135,7 @@ class OfferService:
             card=card,
             owner=owner,
             buyer=buyer,
+            amount=amount,
         )
 
     @staticmethod
@@ -155,8 +160,6 @@ class OfferService:
             uc = await session.get(UserCard, offer.user_card_id)
             if uc is None or uc.user_id != actor_owner_id or uc.is_locked:
                 return OfferResult(False, "Karta hozir boshqa tranzaksiyada band yoki sizga tegishli emas.")
-            if await UserService.owns_card(session, offer.buyer_id, uc.card_id):
-                return OfferResult(False, "Xaridorda bu karta allaqachon bor, taklifni qabul qilib bo‘lmaydi.")
 
             now = utcnow()
             upd = await session.execute(
@@ -170,36 +173,29 @@ class OfferService:
             card = await session.get(Card, offer.card_id)
             buyer = await session.get(User, offer.buyer_id)
             owner = await session.get(User, offer.owner_id)
+            offer_id_val = offer.id
+            offer_amount = int(offer.amount)
+            offer_owner_id = offer.owner_id
+            offer_buyer_id = offer.buyer_id
+            uc_id = uc.id
 
             # Release escrowed coins to seller
             await UserService.credit_coins(
                 session=session,
-                user_id=offer.owner_id,
-                amount=offer.amount,
+                user_id=offer_owner_id,
+                amount=offer_amount,
                 tx_type="offer_accepted_sale",
                 description=f"Accepted offer for {card.character_name}",
-                reference_id=f"offer:{offer.id}",
+                reference_id=f"offer:{offer_id_val}",
             )
 
-            # Transfer card to buyer
-            await session.execute(
-                update(UserCard)
-                .where(UserCard.id == uc.id)
-                .values(
-                    user_id=offer.buyer_id,
-                    is_favorite=False,
-                    acquired_via="offer",
-                    updated_at=now,
-                )
-            )
-
-            # Refund any competing pending offers on the same card
+            # Refund any competing pending offers BEFORE possible deletion of uc (FK CASCADE)
             competing = (
                 await session.execute(
                     select(Offer).where(
-                        Offer.user_card_id == uc.id,
+                        Offer.user_card_id == uc_id,
                         Offer.status == "pending",
-                        Offer.id != offer.id,
+                        Offer.id != offer_id_val,
                     )
                 )
             ).scalars().all()
@@ -215,17 +211,44 @@ class OfferService:
                     reference_id=f"offer:{comp.id}",
                 )
 
-            await UserService.recompute_card_counts(session, offer.owner_id)
-            await UserService.recompute_card_counts(session, offer.buyer_id, add_xp=15)
+            dup = None
+            if await UserService.owns_card(session, offer_buyer_id, uc.card_id):
+                from services.card_level_service import CardLevelService
+
+                dup = await CardLevelService.apply_duplicate(session, offer_buyer_id, card)
+                await session.delete(uc)
+                await session.flush()
+            else:
+                await session.execute(
+                    update(UserCard)
+                    .where(UserCard.id == uc_id)
+                    .values(
+                        user_id=offer_buyer_id,
+                        is_favorite=False,
+                        is_showcased=False,
+                        card_state="OWNED",
+                        acquired_via="offer",
+                        updated_at=now,
+                    )
+                )
+
+            await UserService.recompute_card_counts(session, offer_owner_id)
+            await UserService.recompute_card_counts(session, offer_buyer_id, add_xp=15)
             await session.flush()
 
             return OfferResult(
                 True,
                 "Taklif qabul qilindi! Karta va coinlar o‘tkazildi.",
-                offer=offer,
+                offer=None if dup is not None else offer,
                 card=card,
                 owner=owner,
                 buyer=buyer,
+                amount=offer_amount,
+                is_duplicate=dup is not None,
+                level_before=dup.level_before if dup else 1,
+                level_after=dup.level_after if dup else 1,
+                maxed=bool(dup and dup.maxed),
+                refund=dup.refund if dup else 0,
             )
 
     @staticmethod

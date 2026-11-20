@@ -131,15 +131,19 @@ class AdminService:
         user = await session.get(User, user_id)
         if card is None or user is None:
             return None
+        dup = None
         if await UserService.owns_card(session, user_id, card_id):
-            return None  # bir user bir xil kartadan faqat bitta nusxaga ega bo'ladi
-        session.add(
-            UserCard(
-                user_id=user.id,
-                card_id=card.id,
-                acquired_via="admin_grant",
+            from services.card_level_service import CardLevelService
+
+            dup = await CardLevelService.apply_duplicate(session, user.id, card)
+        else:
+            session.add(
+                UserCard(
+                    user_id=user.id,
+                    card_id=card.id,
+                    acquired_via="admin_grant",
+                )
             )
-        )
         await UserService.recompute_card_counts(session, user.id, add_xp=10)
         await AdminService.log_action(
             session,
@@ -147,7 +151,11 @@ class AdminService:
             "give_card",
             "user",
             str(user.id),
-            {"card_id": card.id, "card_code": card.card_code},
+            {
+                "card_id": card.id,
+                "card_code": card.card_code,
+                "duplicate_level_up": dup.level_after if dup else None,
+            },
         )
         await session.flush()
         return card

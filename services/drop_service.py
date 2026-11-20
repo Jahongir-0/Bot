@@ -415,23 +415,69 @@ class DropService:
 
         mults = await CardLevelService.get_drop_mults(session)
         active_event = await CardService.get_active_event(session)
+
+        # Oxirgi tashlangan animeni olamiz — ketma-ket bir xil animedan tashlamaslik uchun
+        last_anime_row = (
+            await session.execute(
+                select(Card.anime_id, Card.anime_name)
+                .join(ActiveDrop, ActiveDrop.card_id == Card.id)
+                .where(ActiveDrop.group_id == group.id)
+                .order_by(ActiveDrop.id.desc())
+                .limit(1)
+            )
+        ).first()
+        last_anime_key = (
+            (last_anime_row[0] or (last_anime_row[1] or "").strip().casefold())
+            if last_anime_row is not None
+            else None
+        )
+
+        def _card_weight(card: Card) -> float:
+            w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
+            if (
+                active_event is not None
+                and active_event.boosted_rarity
+                and card.rarity.lower() == active_event.boosted_rarity.lower()
+            ):
+                w *= max(1.0, active_event.rarity_weight_multiplier)
+            return max(0.01, w)
+
         for cond in tiers:
             cards = list((await session.execute(select(Card).where(cond))).scalars().all())
             # Tasodifiy dropdan chiqarilgan ranklar (masalan Mythic/Divine) tushmaydi
             cards = [c for c in cards if CardLevelService.rarity_mult(mults, c.rarity) > 0]
             if not cards:
                 continue
-            weights: List[float] = []
-            for card in cards:
-                w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
-                if (
-                    active_event is not None
-                    and active_event.boosted_rarity
-                    and card.rarity.lower() == active_event.boosted_rarity.lower()
-                ):
-                    w *= max(1.0, active_event.rarity_weight_multiplier)
-                weights.append(max(0.01, w))
-            return random.choices(cards, weights=weights, k=1)[0], False
+
+            # DB qo'shilgan tartib (id) ta'sir qilmasligi uchun avval aralashtiramiz
+            random.shuffle(cards)
+
+            # Boshqa animelardan karta bo'lsa, ketma-ket bir xil animedan tashlamaymiz
+            pool = cards
+            if last_anime_key:
+                other_anime_cards = [
+                    c for c in cards
+                    if (c.anime_id or (c.anime_name or "").strip().casefold()) != last_anime_key
+                ]
+                if other_anime_cards:
+                    pool = other_anime_cards
+
+            # Har bir anime bo'yicha tengroq aralashtirish (ko'p kartali anime birinchi tugab ketmasin)
+            by_anime: Dict[str, List[Card]] = {}
+            for card in pool:
+                akey = card.anime_id or (card.anime_name or "").strip().casefold()
+                by_anime.setdefault(akey, []).append(card)
+
+            anime_groups = list(by_anime.values())
+            random.shuffle(anime_groups)
+            anime_weights = [
+                max(0.01, sum(_card_weight(c) for c in grp_cards) / len(grp_cards))
+                for grp_cards in anime_groups
+            ]
+            chosen_group = random.choices(anime_groups, weights=anime_weights, k=1)[0]
+            random.shuffle(chosen_group)
+            card_weights = [_card_weight(c) for c in chosen_group]
+            return random.choices(chosen_group, weights=card_weights, k=1)[0], False
         return None, False
 
     @staticmethod

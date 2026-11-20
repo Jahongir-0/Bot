@@ -167,8 +167,9 @@ class CardService:
             return None
 
         active_event = await CardService.get_active_event(session)
-        weights: List[float] = []
-        for card in cards:
+        random.shuffle(cards)
+
+        def _weight(card: Card) -> float:
             w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
             if (
                 active_event is not None
@@ -176,9 +177,21 @@ class CardService:
                 and card.rarity.lower() == active_event.boosted_rarity.lower()
             ):
                 w *= max(1.0, active_event.rarity_weight_multiplier)
-            weights.append(max(0.01, w))
+            return max(0.01, w)
 
-        return random.choices(cards, weights=weights, k=1)[0]
+        by_anime = {}
+        for card in cards:
+            akey = card.anime_id or (card.anime_name or "").strip().casefold()
+            by_anime.setdefault(akey, []).append(card)
+        anime_groups = list(by_anime.values())
+        random.shuffle(anime_groups)
+        anime_weights = [
+            max(0.01, sum(_weight(c) for c in grp) / len(grp))
+            for grp in anime_groups
+        ]
+        chosen_group = random.choices(anime_groups, weights=anime_weights, k=1)[0]
+        random.shuffle(chosen_group)
+        return random.choices(chosen_group, weights=[_weight(c) for c in chosen_group], k=1)[0]
 
     @staticmethod
     async def get_card_stats(session: AsyncSession, card_id: int) -> Tuple[int, int]:

@@ -22,6 +22,11 @@ class TransferResult:
     card: Optional[Card] = None
     from_user: Optional[User] = None
     to_user: Optional[User] = None
+    is_duplicate: bool = False
+    level_before: int = 0
+    level_after: int = 0
+    maxed: bool = False
+    refund: int = 0
 
 
 class TransferService:
@@ -37,10 +42,6 @@ class TransferService:
             return TransferResult(False, "O‘zingizga o‘zingiz karta bera olmaysiz.")
         if price < 0:
             return TransferResult(False, "Narx manfiy bo‘lishi mumkin emas.")
-
-        uc_pre = await session.get(UserCard, user_card_id)
-        if uc_pre is not None and await UserService.owns_card(session, to_user_id, uc_pre.card_id):
-            return TransferResult(False, "Qabul qiluvchida bu karta allaqachon bor — bir xil kartadan faqat bitta nusxa bo‘ladi.")
 
         lock_mgr = get_lock_manager()
         async with lock_mgr.lock(f"uc:{user_card_id}", ttl_ms=5000) as acquired:
@@ -101,10 +102,6 @@ class TransferService:
             if trf is None or trf.status != "pending":
                 return TransferResult(False, "Transfer topilmadi yoki allaqachon yakunlangan.")
 
-            uc_chk = await session.get(UserCard, trf.user_card_id)
-            if uc_chk is not None and await UserService.owns_card(session, trf.to_user_id, uc_chk.card_id):
-                return TransferResult(False, "Qabul qiluvchida bu karta allaqachon bor.")
-
             # For paid transfers, recipient must confirm (pays coins); for free gifts, sender confirms
             expected_actor = trf.to_user_id if trf.price > 0 else trf.from_user_id
             if actor_user_id != expected_actor:
@@ -156,19 +153,7 @@ class TransferService:
                     reference_id=f"trf:{trf.id}",
                 )
 
-            await session.execute(
-                update(UserCard)
-                .where(UserCard.id == trf.user_card_id)
-                .values(
-                    user_id=trf.to_user_id,
-                    is_locked=False,
-                    is_favorite=False,
-                    acquired_via="transfer",
-                    updated_at=now,
-                )
-            )
-
-            # Refund any open offers on this card instance
+            # Refund any open offers on this card instance BEFORE possible deletion (FK CASCADE)
             pending_offers = (
                 await session.execute(
                     select(Offer).where(Offer.user_card_id == trf.user_card_id, Offer.status == "pending")
@@ -186,6 +171,29 @@ class TransferService:
                     reference_id=f"offer:{off.id}",
                 )
 
+            dup = None
+            if await UserService.owns_card(session, trf.to_user_id, card.id):
+                from services.card_level_service import CardLevelService
+
+                dup = await CardLevelService.apply_duplicate(session, trf.to_user_id, card)
+                if uc is not None:
+                    await session.delete(uc)
+                    await session.flush()
+            else:
+                await session.execute(
+                    update(UserCard)
+                    .where(UserCard.id == trf.user_card_id)
+                    .values(
+                        user_id=trf.to_user_id,
+                        is_locked=False,
+                        is_favorite=False,
+                        is_showcased=False,
+                        card_state="OWNED",
+                        acquired_via="transfer",
+                        updated_at=now,
+                    )
+                )
+
             await UserService.recompute_card_counts(session, trf.from_user_id)
             await UserService.recompute_card_counts(session, trf.to_user_id, add_xp=10)
             await session.flush()
@@ -193,10 +201,15 @@ class TransferService:
             return TransferResult(
                 True,
                 "Karta muvaffaqiyatli topshirildi!",
-                transfer=trf,
+                transfer=None if dup is not None else trf,
                 card=card,
                 from_user=from_user,
                 to_user=to_user,
+                is_duplicate=dup is not None,
+                level_before=dup.level_before if dup else 1,
+                level_after=dup.level_after if dup else 1,
+                maxed=bool(dup and dup.maxed),
+                refund=dup.refund if dup else 0,
             )
 
     @staticmethod

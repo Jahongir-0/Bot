@@ -169,8 +169,6 @@ class AuctionWishlistService:
                 return False, "O‘zingiz qo‘ygan auksionga stavka bera olmaysiz."
             if auc.highest_bidder_id == bidder.id:
                 return False, "Siz hozir allaqachon eng yuqori stavka egasisiz!"
-            if await UserService.owns_card(session, bidder.id, auc.card_id):
-                return False, "Bu kartadan sizda allaqachon bor (bir xil kartadan faqat 1 nusxa)."
 
             min_allowed = auc.start_price if auc.bid_count == 0 else (auc.current_price + auc.min_step)
             if int(amount) < int(min_allowed):
@@ -274,23 +272,58 @@ class AuctionWishlistService:
         if auc.user_card_id:
             uc = await session.get(UserCard, auc.user_card_id)
             if uc:
-                uc.user_id = winner_id
-                uc.is_locked = False
-                uc.card_state = "OWNED"
-                uc.acquired_via = "auction"
+                from models.market import Offer
+
+                now = utcnow()
+                pending_offers = (
+                    await session.execute(
+                        select(Offer).where(Offer.user_card_id == uc.id, Offer.status == "pending")
+                    )
+                ).scalars().all()
+                for off in pending_offers:
+                    off.status = "cancelled"
+                    off.resolved_at = now
+                    await UserService.credit_coins(
+                        session=session,
+                        user_id=off.buyer_id,
+                        amount=off.amount,
+                        tx_type="offer_refund",
+                        description="Card won in auction - offer refunded",
+                        reference_id=f"offer:{off.id}",
+                    )
+                if card is not None and await UserService.owns_card(session, winner_id, auc.card_id):
+                    from services.card_level_service import CardLevelService
+
+                    await CardLevelService.apply_duplicate(session, winner_id, card)
+                    auc.user_card_id = None
+                    await session.delete(uc)
+                    await session.flush()
+                else:
+                    uc.user_id = winner_id
+                    uc.is_locked = False
+                    uc.is_favorite = False
+                    uc.is_showcased = False
+                    uc.card_state = "OWNED"
+                    uc.acquired_via = "auction"
             await UserService.recompute_card_counts(session, winner_id, add_xp=50)
             if auc.seller_user_id:
                 await UserService.recompute_card_counts(session, auc.seller_user_id)
         else:
-            try:
-                async with session.begin_nested():
-                    uc = UserCard(user_id=winner_id, card_id=auc.card_id, acquired_via="auction", card_state="OWNED")
-                    session.add(uc)
-                    await session.flush()
-                    uc.serial_number = 10000 + uc.id
+            if card is not None and await UserService.owns_card(session, winner_id, auc.card_id):
+                from services.card_level_service import CardLevelService
+
+                await CardLevelService.apply_duplicate(session, winner_id, card)
                 await UserService.recompute_card_counts(session, winner_id, add_xp=50)
-            except IntegrityError:
-                pass
+            else:
+                try:
+                    async with session.begin_nested():
+                        uc = UserCard(user_id=winner_id, card_id=auc.card_id, acquired_via="auction", card_state="OWNED")
+                        session.add(uc)
+                        await session.flush()
+                        uc.serial_number = 10000 + uc.id
+                    await UserService.recompute_card_counts(session, winner_id, add_xp=50)
+                except IntegrityError:
+                    pass
             if card:
                 card.card_state = "OWNED"
 
@@ -453,8 +486,6 @@ class AuctionWishlistService:
         uc = await session.get(UserCard, initiator_uc_id)
         if uc is None or uc.user_id != initiator_id or uc.is_locked:
             return False, "Karta topilmadi yoki band.", None
-        if await UserService.owns_card(session, partner_id, uc.card_id):
-            return False, "Qabul qiluvchida bu karta allaqachon bor.", None
         uc.is_locked = True
         uc.card_state = "LOCKED"
         trade = CardTrade(
@@ -484,42 +515,96 @@ class AuctionWishlistService:
             return False, "Tanlangan karta band yoki mavjud emas."
         if uc_init.card_id == uc_part.card_id:
             return False, "Bir xil kartani almashtirib bo‘lmaydi."
-        if await UserService.owns_card(session, trade.initiator_user_id, uc_part.card_id):
-            return False, "Taklif qiluvchida sizning kartangiz allaqachon bor."
-        if await UserService.owns_card(session, trade.partner_user_id, uc_init.card_id):
-            return False, "Sizda bu karta allaqachon bor."
 
-        # Atomik swap
-        uc_init.user_id = trade.partner_user_id
-        uc_init.is_locked = False
-        uc_init.card_state = "OWNED"
-        uc_init.acquired_via = "trade"
+        from models.market import Offer
+        from services.card_level_service import CardLevelService
 
-        uc_part.user_id = trade.initiator_user_id
-        uc_part.is_locked = False
-        uc_part.card_state = "OWNED"
-        uc_part.acquired_via = "trade"
+        init_id = trade.initiator_user_id
+        part_id = trade.partner_user_id
+        init_uc_id = uc_init.id
+        part_uc_id = uc_part.id
+        init_card_id = uc_init.card_id
+        part_card_id = uc_part.card_id
+        card_init = await session.get(Card, init_card_id)
+        card_part = await session.get(Card, part_card_id)
 
-        trade.partner_uc_id = uc_part.id
+        init_already = await UserService.owns_card(session, init_id, part_card_id)
+        part_already = await UserService.owns_card(session, part_id, init_card_id)
+
+        # Pending takliflarni o'chirishdan oldin coinlarni qaytaramiz
+        now = utcnow()
+        pending_offers = (
+            await session.execute(
+                select(Offer).where(
+                    Offer.user_card_id.in_([init_uc_id, part_uc_id]),
+                    Offer.status == "pending",
+                )
+            )
+        ).scalars().all()
+        for off in pending_offers:
+            off.status = "cancelled"
+            off.resolved_at = now
+            await UserService.credit_coins(
+                session=session,
+                user_id=off.buyer_id,
+                amount=off.amount,
+                tx_type="offer_refund",
+                description="Card traded - offer refunded",
+                reference_id=f"offer:{off.id}",
+            )
+
+        trade.partner_uc_id = part_uc_id
         trade.status = "accepted"
+
+        await AuctionWishlistService.record_history(
+            session, init_card_id, "traded", init_uc_id, init_id, part_id
+        )
+        await AuctionWishlistService.record_history(
+            session, part_card_id, "traded", part_uc_id, part_id, init_id
+        )
+
+        # Atomik swap yoki dublikat birlashtirish (+1 daraja)
+        dup_notes = []
+        if part_already and card_init is not None:
+            dup_p = await CardLevelService.apply_duplicate(session, part_id, card_init)
+            await session.delete(uc_init)
+            if dup_p is not None and not dup_p.maxed:
+                dup_notes.append(f"• {card_init.character_name}: {dup_p.level_before} → {dup_p.level_after} daraja")
+        else:
+            uc_init.user_id = part_id
+            uc_init.is_locked = False
+            uc_init.is_favorite = False
+            uc_init.is_showcased = False
+            uc_init.card_state = "OWNED"
+            uc_init.acquired_via = "trade"
+
+        if init_already and card_part is not None:
+            dup_i = await CardLevelService.apply_duplicate(session, init_id, card_part)
+            await session.delete(uc_part)
+            if dup_i is not None and not dup_i.maxed:
+                dup_notes.append(f"• {card_part.character_name}: {dup_i.level_before} → {dup_i.level_after} daraja")
+        else:
+            uc_part.user_id = init_id
+            uc_part.is_locked = False
+            uc_part.is_favorite = False
+            uc_part.is_showcased = False
+            uc_part.card_state = "OWNED"
+            uc_part.acquired_via = "trade"
 
         await session.execute(
             update(User)
-            .where(User.id.in_([trade.initiator_user_id, trade.partner_user_id]))
+            .where(User.id.in_([init_id, part_id]))
             .values(trade_count=User.trade_count + 1)
         )
-        await UserService.recompute_card_counts(session, trade.initiator_user_id, add_xp=25)
-        await UserService.recompute_card_counts(session, trade.partner_user_id, add_xp=25)
-        await GameplayService.add_season_points(session, trade.initiator_user_id, points=20, xp=25, trade_done=True)
-        await GameplayService.add_season_points(session, trade.partner_user_id, points=20, xp=25, trade_done=True)
-        await AuctionWishlistService.record_history(
-            session, uc_init.card_id, "traded", uc_init.id, trade.initiator_user_id, trade.partner_user_id
-        )
-        await AuctionWishlistService.record_history(
-            session, uc_part.card_id, "traded", uc_part.id, trade.partner_user_id, trade.initiator_user_id
-        )
+        await UserService.recompute_card_counts(session, init_id, add_xp=25)
+        await UserService.recompute_card_counts(session, part_id, add_xp=25)
+        await GameplayService.add_season_points(session, init_id, points=20, xp=25, trade_done=True)
+        await GameplayService.add_season_points(session, part_id, points=20, xp=25, trade_done=True)
         await session.flush()
-        return True, "🤝 Almashuv muvaffaqiyatli yakunlandi!"
+        msg = "🤝 Almashuv muvaffaqiyatli yakunlandi!"
+        if dup_notes:
+            msg += "\n🔁 Dublikatlar darajaga qo‘shildi:\n" + "\n".join(dup_notes)
+        return True, msg
 
     @staticmethod
     async def cancel_trade(

@@ -28,6 +28,12 @@ class MarketActionResult:
     listing: Optional[CardListing] = None
     card: Optional[Card] = None
     seller: Optional[User] = None
+    price_paid: int = 0
+    is_duplicate: bool = False
+    level_before: int = 0
+    level_after: int = 0
+    maxed: bool = False
+    refund: int = 0
 
 
 class MarketService:
@@ -130,8 +136,6 @@ class MarketService:
                 return MarketActionResult(False, "Ushbu karta allaqachon sotilgan yoki olib tashlangan.")
             if listing.seller_id == buyer_id:
                 return MarketActionResult(False, "O‘zingizning kartangizni o‘zingiz sotib ololmaysiz!")
-            if await UserService.owns_card(session, buyer_id, listing.card_id):
-                return MarketActionResult(False, "Bu kartadan sizda allaqachon bor — bir xil kartadan faqat bitta nusxa olish mumkin.")
 
             now = utcnow()
             upd = await session.execute(
@@ -148,46 +152,38 @@ class MarketService:
 
             card = await session.get(Card, listing.card_id)
             seller = await session.get(User, listing.seller_id)
+            price_paid = int(listing.price)
+            seller_id = listing.seller_id
+            card_id = listing.card_id
+            uc_id = listing.user_card_id
+            listing_id_val = listing.id
 
             try:
                 await UserService.debit_coins(
                     session=session,
                     user_id=buyer_id,
-                    amount=listing.price,
+                    amount=price_paid,
                     tx_type="market_buy",
                     description=f"Bought {card.character_name} on market",
-                    reference_id=f"listing:{listing.id}",
+                    reference_id=f"listing:{listing_id_val}",
                 )
             except InsufficientCoinsError:
                 raise
 
             await UserService.credit_coins(
                 session=session,
-                user_id=listing.seller_id,
-                amount=listing.price,
+                user_id=seller_id,
+                amount=price_paid,
                 tx_type="market_sell",
                 description=f"Sold {card.character_name} on market",
-                reference_id=f"listing:{listing.id}",
+                reference_id=f"listing:{listing_id_val}",
             )
 
-            # Transfer ownership and unlock card
-            await session.execute(
-                update(UserCard)
-                .where(UserCard.id == listing.user_card_id)
-                .values(
-                    user_id=buyer_id,
-                    is_locked=False,
-                    is_favorite=False,
-                    acquired_via="market",
-                    updated_at=now,
-                )
-            )
-
-            # Refund any pending offers on this user_card
+            # Refund any pending offers on this user_card BEFORE deleting uc (FK CASCADE)
             pending_offers = (
                 await session.execute(
                     select(Offer).where(
-                        Offer.user_card_id == listing.user_card_id,
+                        Offer.user_card_id == uc_id,
                         Offer.status == "pending",
                     )
                 )
@@ -209,16 +205,46 @@ class MarketService:
                 s_stats["sales"] = int(s_stats.get("sales", 0)) + 1
                 seller.stats = s_stats
 
-            await UserService.recompute_card_counts(session, listing.seller_id)
+            dup = None
+            if await UserService.owns_card(session, buyer_id, card_id):
+                from services.card_level_service import CardLevelService
+
+                dup = await CardLevelService.apply_duplicate(session, buyer_id, card)
+                uc = await session.get(UserCard, uc_id)
+                if uc is not None:
+                    await session.delete(uc)
+                    await session.flush()
+            else:
+                await session.execute(
+                    update(UserCard)
+                    .where(UserCard.id == uc_id)
+                    .values(
+                        user_id=buyer_id,
+                        is_locked=False,
+                        is_favorite=False,
+                        is_showcased=False,
+                        card_state="OWNED",
+                        acquired_via="market",
+                        updated_at=now,
+                    )
+                )
+
+            await UserService.recompute_card_counts(session, seller_id)
             await UserService.recompute_card_counts(session, buyer_id, add_xp=15)
             await session.flush()
 
             return MarketActionResult(
                 True,
                 "Karta muvaffaqiyatli sotib olindi!",
-                listing=listing,
+                listing=None if dup is not None else listing,
                 card=card,
                 seller=seller,
+                price_paid=price_paid,
+                is_duplicate=dup is not None,
+                level_before=dup.level_before if dup else 1,
+                level_after=dup.level_after if dup else 1,
+                maxed=bool(dup and dup.maxed),
+                refund=dup.refund if dup else 0,
             )
 
     @staticmethod
