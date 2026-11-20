@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -25,7 +26,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.card import Card
@@ -119,6 +120,7 @@ class _Prepared:
     media_name: str
     rarity: str
     image_bytes: bytes
+    image_hash: str
     base_value: Optional[int]
     drop_limit: Optional[int]
     aliases: List[str]
@@ -279,7 +281,7 @@ async def import_cards_from_zip(
 
     # ---------------- 1-bosqich: HAMMASINI tekshirish (hech narsa yozilmaydi) ----------------
     prepared: List[_Prepared] = []
-    seen_keys: set = set()
+    seen_hashes: set = set()
     for idx, rec in enumerate(records, start=1):
         who = str(_pick(rec, "character_name") or "").strip()
         label = f"#{idx} {who}" if who else f"#{idx}"
@@ -317,12 +319,14 @@ async def import_cards_from_zip(
             report.failed_files.append(f"{label} — rasm buzilgan yoki rasm emas ({exc})")
             continue
 
-        media_name = str(_pick(rec, "media_name")).strip()
-        key = (who.lower(), media_name.lower(), rarity)
-        if key in seen_keys:
+        # Dublikat tekshiruvi: faqat bir xil rasm (SHA-256 hash) bo'lsa takroriy hisoblanadi
+        img_hash = hashlib.sha256(jpeg).hexdigest()
+        if img_hash in seen_hashes:
             report.duplicates += 1
             continue
-        seen_keys.add(key)
+        seen_hashes.add(img_hash)
+
+        media_name = str(_pick(rec, "media_name")).strip()
 
         def _int(v: Any) -> Optional[int]:
             try:
@@ -337,30 +341,32 @@ async def import_cards_from_zip(
         aliases = [str(a).strip() for a in (aliases_raw or []) if str(a).strip()]
         low = {str(k).strip().lower(): v for k, v in rec.items()}
         meta = {k: str(low[k]).strip() for k in OPTIONAL_META if low.get(k) not in (None, "")}
+        meta["image_hash"] = img_hash
 
         prepared.append(
             _Prepared(
                 label=label, character_name=who, media_type=mtype, media_name=media_name, rarity=rarity,
-                image_bytes=jpeg, base_value=_int(low.get("base_value")), drop_limit=_int(low.get("drop_limit")),
-                aliases=aliases, meta=meta,
+                image_bytes=jpeg, image_hash=img_hash, base_value=_int(low.get("base_value")),
+                drop_limit=_int(low.get("drop_limit")), aliases=aliases, meta=meta,
             )
         )
 
     # ---------------- 2-bosqich: yuklash va bazaga yozish ----------------
+    existing_metas = (
+        await session.execute(
+            select(Card.metadata_json).where(Card.is_deleted.is_(False))
+        )
+    ).scalars().all()
+    db_hashes = {
+        m.get("image_hash")
+        for m in existing_metas
+        if isinstance(m, dict) and m.get("image_hash")
+    }
+
     total = len(prepared)
     for n, item in enumerate(prepared, start=1):
         try:
-            dup = (
-                await session.execute(
-                    select(Card.id).where(
-                        func.lower(Card.character_name) == item.character_name.lower(),
-                        func.lower(Card.anime_name) == item.media_name.lower(),
-                        func.lower(Card.rarity) == item.rarity.lower(),
-                        Card.is_deleted.is_(False),
-                    )
-                )
-            ).first()
-            if dup is not None:
+            if item.image_hash in db_hashes:
                 report.duplicates += 1
                 continue
 
@@ -379,6 +385,7 @@ async def import_cards_from_zip(
                     metadata_json=item.meta,
                 )
                 card.image_file_id = file_id
+            db_hashes.add(item.image_hash)
             report.added += 1
             report.added_by_rank[item.rarity] = report.added_by_rank.get(item.rarity, 0) + 1
             report.added_by_media[item.media_type] = report.added_by_media.get(item.media_type, 0) + 1
