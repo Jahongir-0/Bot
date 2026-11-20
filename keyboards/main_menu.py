@@ -34,6 +34,7 @@ def main_menu_kb(owner_id: int, is_admin: bool = False, pack_daily_limit: int = 
         InlineKeyboardButton(text="🤝 ALMASHISH", callback_data=TradeCb(owner_id=owner_id, act="v").pack()),
         _nav(owner_id, "🔍 QIDIRUV", "search"),
     )
+    b.row(_nav(owner_id, "🎁 SOVG‘A BERISH", "give"))
     b.row(_nav(owner_id, "🎮 O‘YINLAR", "grp_play"), _nav(owner_id, "🏆 REYTING", "ranking"))
     b.row(
         _nav(owner_id, "❓ QO‘LLANMA", "help"),
