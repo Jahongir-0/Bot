@@ -192,6 +192,7 @@ class EventService:
             return EventResult(False, OWN_MSG, "owned", event=event, card=card)
 
         now = utcnow()
+        # Hisoblagich faqat bazada, atomik yangilanadi (ORM obyektini qo'lda o'zgartirmaymiz: ikki marta sanash xavfi)
         upd = await session.execute(
             update(LimitedEvent)
             .where(
@@ -201,6 +202,7 @@ class EventService:
                 LimitedEvent.sold_count < LimitedEvent.total_copies,
             )
             .values(sold_count=LimitedEvent.sold_count + 1, updated_at=now)
+            .execution_options(synchronize_session=False)
         )
         if upd.rowcount != 1:
             fresh = await session.get(LimitedEvent, event.id)
@@ -226,6 +228,7 @@ class EventService:
             update(LimitedEvent)
             .where(LimitedEvent.id == event.id, LimitedEvent.sold_count >= LimitedEvent.total_copies)
             .values(status="sold_out", updated_at=now)
+            .execution_options(synchronize_session=False)
         )
         await UserService.recompute_card_counts(session, user_id, add_xp=40)
 
@@ -235,7 +238,12 @@ class EventService:
         )
 
         await session.flush()
-        event.sold_count = int(event.sold_count) + 1
+        # Haqiqiy qiymatni bazadan o'qiymiz (qo'lda +1 qilmaymiz)
+        await session.refresh(event)
+        if int(event.sold_count) > int(event.total_copies):
+            # Hech qachon limitdan oshmasin (himoya)
+            await session.rollback()
+            return EventResult(False, "😔 Event kartalari sotilib bo‘ldi.", "sold_out", event=event, card=card)
         return EventResult(True, "ok", "ok", event=event, card=card)
 
     # ------------------------------------------------------------------
