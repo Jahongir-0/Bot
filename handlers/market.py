@@ -141,8 +141,14 @@ async def cmd_buy(message: Message, db_user: User) -> None:
     if not res.success:
         await message.answer(f"❌ {res.message}")
         return
+    extra = ""
+    if res.is_duplicate:
+        if res.maxed:
+            extra = f"\n👑 Karta maksimal darajada edi — +{fmt_coins(res.refund)} 🪙 qaytarildi!"
+        else:
+            extra = f"\n🔁 Bu karta sizda bor edi — daraja ko‘tarildi: <b>{res.level_before} → {res.level_after}</b>!"
     await message.answer(
-        f"🎉 <b>{esc(res.card.character_name)}</b> muvaffaqiyatli sotib olindi! (-{fmt_coins(res.listing.price)} 🪙)",
+        f"🎉 <b>{esc(res.card.character_name)}</b> muvaffaqiyatli sotib olindi! (-{fmt_coins(res.price_paid)} 🪙){extra}",
         reply_markup=back_home_kb(message.from_user.id, "cards"),
     )
 
@@ -213,11 +219,17 @@ async def cb_buy_listing(callback: CallbackQuery, callback_data: MarketCb, db_us
         return
 
     await callback.answer("🎉 Karta sotib olindi!", show_alert=True)
+    extra = ""
+    if res.is_duplicate:
+        if res.maxed:
+            extra = f"\n👑 Karta maksimal darajada edi — <b>+{fmt_coins(res.refund)} 🪙</b> qaytarildi!"
+        else:
+            extra = f"\n🔁 Bu karta sizda bor edi — daraja ko‘tarildi: <b>{res.level_before} → {res.level_after}</b>!"
     await edit_or_answer(
         callback,
         f"🎉 <b>TABRIKLAYMIZ!</b>\n\n"
         f"🎴 <b>{esc(res.card.character_name)}</b> kartasi sizning kolleksiyangizga o‘tkazildi!\n"
-        f"💰 To‘landi: <b>{fmt_coins(res.listing.price)} 🪙</b>",
+        f"💰 To‘landi: <b>{fmt_coins(res.price_paid)} 🪙</b>{extra}",
         reply_markup=back_home_kb(callback.from_user.id, "market"),
     )
 

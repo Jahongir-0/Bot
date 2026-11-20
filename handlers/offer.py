@@ -155,11 +155,18 @@ async def cb_accept_offer(callback: CallbackQuery, callback_data: OfferCb, db_us
         await callback.answer(f"❌ {res.message}", show_alert=True)
         return
 
+    extra = ""
+    if res.is_duplicate:
+        if res.maxed:
+            extra = f"\n👑 Xaridorda karta maksimal darajada edi — +{fmt_coins(res.refund)} 🪙 qaytarildi."
+        else:
+            extra = f"\n🔁 Xaridorda bu karta bor edi — daraja ko‘tarildi: <b>{res.level_before} → {res.level_after}</b>!"
+
     await edit_or_answer(
         callback,
         f"✅ <b>TAKLIF QABUL QILINDI!</b>\n\n"
         f"🎴 <b>{esc(res.card.character_name)}</b> → {esc(res.buyer.display_name)} ga o‘tdi!\n"
-        f"➕ Sizga <b>{fmt_coins(res.offer.amount)} 🪙</b> qo‘shildi.",
+        f"➕ Sizga <b>{fmt_coins(res.amount)} 🪙</b> qo‘shildi.{extra}",
         reply_markup=back_home_kb(callback.from_user.id, "cards"),
     )
 

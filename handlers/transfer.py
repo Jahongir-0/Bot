@@ -44,7 +44,7 @@ GIVE_USAGE = (
     "3) Pullik: <code>/give @username Gojo 1000</code>\n"
     "4) Guruhda xabarga <b>reply</b> qilib: <code>/give Gojo</code>\n\n"
     "<i>Qabul qiluvchi botdan kamida bir marta foydalangan bo‘lishi kerak. "
-    "Bir xil kartadan faqat bitta nusxa bo‘lishi mumkin.</i>"
+    "Agar unda bu karta allaqachon bo‘lsa, nusxa birlashib uning kartasiga +1 daraja qo‘shiladi.</i>"
 )
 
 
@@ -115,12 +115,10 @@ async def _show_matches(target: Message, state: FSMContext, db_user: User, query
     notes = []
     for uc, card in matches:
         meta = get_rarity_meta(card.rarity)
-        label = f"{meta.emoji} {meta.name} · {card.character_name} ({card.card_code})"[:60]
+        tag = " (+1 lvl)" if card.id in recipient_has else ""
+        label = f"{meta.emoji} {meta.name} · {card.character_name} ({card.card_code}){tag}"[:60]
         if uc.is_locked:
             notes.append(f"🔒 {esc(card.character_name)} ({esc(meta.name)}) — marketda/almashuvda band")
-            continue
-        if card.id in recipient_has:
-            notes.append(f"🚫 {esc(card.character_name)} ({esc(meta.name)}) — qabul qiluvchida allaqachon bor")
             continue
         builder.row(
             InlineKeyboardButton(
@@ -346,10 +344,17 @@ async def cb_transfer_confirm(callback: CallbackQuery, callback_data: TransferCb
         await callback.answer(f"❌ {res.message}", show_alert=True)
         return
 
+    extra = ""
+    if res.is_duplicate:
+        if res.maxed:
+            extra = f"\n👑 Qabul qiluvchida karta maksimal darajada — +{fmt_coins(res.refund)} 🪙 qaytarildi!"
+        else:
+            extra = f"\n🔁 Qabul qiluvchida bu karta bor edi — daraja ko‘tarildi: <b>{res.level_before} → {res.level_after}</b>!"
+
     await edit_or_answer(
         callback,
         f"✅ <b>TRANSFER YAKUNLANDI!</b>\n\n"
-        f"🎴 <b>{esc(res.card.character_name)}</b> → {esc(res.to_user.display_name)} ga o‘tkazildi!",
+        f"🎴 <b>{esc(res.card.character_name)}</b> → {esc(res.to_user.display_name)} ga o‘tkazildi!{extra}",
         reply_markup=back_home_kb(callback.from_user.id),
     )
 
