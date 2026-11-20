@@ -73,22 +73,20 @@ async def test_schedule_uses_member_count(db_session):
 
 # ---------------------------------------------------------------- nusxa qoidalari
 @pytest.mark.asyncio
-async def test_user_cannot_claim_a_card_they_already_own(db_session):
+async def test_user_duplicate_drop_claim_levels_up_card(db_session):
     a = await _user(db_session, 8101)
-    b = await _user(db_session, 8102)
     grp = await _group(db_session, -100811, a)
     card = (await db_session.execute(select(Card).where(Card.drop_limit >= 2).limit(1))).scalar_one()
-    db_session.add(UserCard(user_id=a.id, card_id=card.id, acquired_via="drop"))
+    uc = UserCard(user_id=a.id, card_id=card.id, acquired_via="drop")
+    db_session.add(uc)
     await db_session.flush()
 
     drop = await DropService.create_active_drop(db_session, grp, card, force=True)
     await db_session.commit()
 
     res = await DropService.claim_drop(db_session, drop.id, a.id)
-    assert not res.success and res.reason == "already_owned"
-
-    res2 = await DropService.claim_drop(db_session, drop.id, b.id)  # drop boshqalar uchun ochiq qoladi
-    assert res2.success
+    assert res.success and res.is_duplicate
+    assert res.level_before == 1 and res.level_after == 2
 
 
 @pytest.mark.asyncio
@@ -129,17 +127,23 @@ async def test_no_eligible_card_returns_none(db_session):
 
 
 @pytest.mark.asyncio
-async def test_transfer_to_user_who_already_has_card_is_blocked(db_session):
+async def test_transfer_to_user_who_already_has_card_merges_and_levels_up(db_session):
     a = await _user(db_session, 8401)
     b = await _user(db_session, 8402)
     card = (await db_session.execute(select(Card).limit(1))).scalar_one()
     uc_a = UserCard(user_id=a.id, card_id=card.id, acquired_via="drop")
-    db_session.add_all([uc_a, UserCard(user_id=b.id, card_id=card.id, acquired_via="drop")])
+    uc_b = UserCard(user_id=b.id, card_id=card.id, acquired_via="drop")
+    db_session.add_all([uc_a, uc_b])
     await db_session.flush()
     res = await TransferService.create_pending_transfer(
         db_session, from_user_id=a.id, to_user_id=b.id, user_card_id=uc_a.id, price=0
     )
-    assert not res.success
+    assert res.success and res.transfer is not None
+    done = await TransferService.confirm_transfer(db_session, res.transfer.id, actor_user_id=a.id)
+    assert done.success and done.is_duplicate and done.level_after == 2
+    assert await db_session.get(UserCard, uc_a.id) is None
+    await db_session.refresh(uc_b)
+    assert uc_b.level == 2
 
 
 @pytest.mark.asyncio
