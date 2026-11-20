@@ -498,6 +498,9 @@ def admin_ranks_list_kb(owner_id: int, ranks: List[dict], total_prob: int) -> In
         InlineKeyboardButton(text="➕ Yangi rank qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="ranks", act="add").pack()),
     )
     b.row(
+        InlineKeyboardButton(text="🎯 Drop va daraja sozlamalari", callback_data=AdmV2Cb(owner_id=owner_id, sec="crules", act="v").pack()),
+    )
+    b.row(
         InlineKeyboardButton(text="⬅️ Admin Panel", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )

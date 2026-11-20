@@ -33,6 +33,11 @@ class ClaimResult:
     winner: Optional[User] = None
     reward_coins: int = 0
     drop: Optional[ActiveDrop] = None
+    is_duplicate: bool = False
+    level_before: int = 0
+    level_after: int = 0
+    maxed: bool = False
+    refund: int = 0
 
 
 class DropService:
@@ -406,21 +411,26 @@ class DropService:
             and_(base, Card.id.not_in(same_group_day)),
         ]
 
+        from services.card_level_service import CardLevelService
+
+        mults = await CardLevelService.get_drop_mults(session)
         active_event = await CardService.get_active_event(session)
         for cond in tiers:
             cards = list((await session.execute(select(Card).where(cond))).scalars().all())
+            # Tasodifiy dropdan chiqarilgan ranklar (masalan Mythic/Divine) tushmaydi
+            cards = [c for c in cards if CardLevelService.rarity_mult(mults, c.rarity) > 0]
             if not cards:
                 continue
             weights: List[float] = []
             for card in cards:
-                w = float(card.drop_weight)
+                w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
                 if (
                     active_event is not None
                     and active_event.boosted_rarity
                     and card.rarity.lower() == active_event.boosted_rarity.lower()
                 ):
                     w *= max(1.0, active_event.rarity_weight_multiplier)
-                weights.append(max(0.1, w))
+                weights.append(max(0.01, w))
             return random.choices(cards, weights=weights, k=1)[0], False
         return None, False
 
@@ -446,8 +456,7 @@ class DropService:
             if card is None or winner is None:
                 return ClaimResult(success=False, reason="not_found")
 
-            if await UserService.owns_card(session, winner.id, card.id):
-                return ClaimResult(success=False, reason="already_owned", card=card)
+            already = await UserService.owns_card(session, winner.id, card.id)
 
             now = utcnow()
             upd = await session.execute(
@@ -463,20 +472,29 @@ class DropService:
             if upd.rowcount != 1:
                 return ClaimResult(success=False, reason="already_claimed")
 
-            try:
-                uc = UserCard(
-                    user_id=winner.id,
-                    card_id=card.id,
-                    acquired_via="drop",
-                    acquired_group_id=drop.group_id,
-                    card_state="OWNED",
-                )
-                session.add(uc)
-                await session.flush()
-                uc.serial_number = 10000 + uc.id
-            except IntegrityError:
-                await session.rollback()
-                return ClaimResult(success=False, reason="already_owned", card=card)
+            dup = None
+            if already:
+                # Karta allaqachon bor: yangi nusxa o'rniga mavjud kartaning darajasi ko'tariladi
+                from services.card_level_service import CardLevelService
+
+                dup = await CardLevelService.apply_duplicate(session, winner.id, card)
+            if dup is not None:
+                uc = await session.get(UserCard, dup.user_card_id)
+            else:
+                try:
+                    uc = UserCard(
+                        user_id=winner.id,
+                        card_id=card.id,
+                        acquired_via="drop",
+                        acquired_group_id=drop.group_id,
+                        card_state="OWNED",
+                    )
+                    session.add(uc)
+                    await session.flush()
+                    uc.serial_number = 10000 + uc.id
+                except IntegrityError:
+                    await session.rollback()
+                    return ClaimResult(success=False, reason="already_owned", card=card)
 
             if int(drop.reward_coins or 0) > 0:
                 await UserService.credit_coins(
@@ -513,5 +531,10 @@ class DropService:
                 winner=winner,
                 reward_coins=drop.reward_coins,
                 drop=drop,
+                is_duplicate=dup is not None,
+                level_before=dup.level_before if dup else 1,
+                level_after=dup.level_after if dup else 1,
+                maxed=bool(dup and dup.maxed),
+                refund=dup.refund if dup else 0,
             )
 

@@ -1,6 +1,7 @@
 from aiogram import Dispatcher
 
 from admin.handlers import router as admin_router
+from admin.card_rules import router as admin_card_rules_router
 from admin.quick_add import router as admin_quick_add_router
 from admin.v2_handlers import router as admin_v2_router
 from handlers.collection import router as collection_router
@@ -24,6 +25,7 @@ from handlers.v2_features import router as v2_features_router
 def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(admin_router)
     dp.include_router(admin_quick_add_router)
+    dp.include_router(admin_card_rules_router)
     dp.include_router(admin_v2_router)
     dp.include_router(premium_emoji_router)
     dp.include_router(start_router)

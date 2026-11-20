@@ -4,8 +4,10 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import LabeledPrice, InlineKeyboardButton, CallbackQuery, Message
 
+from config.settings import get_settings
 from database.session import get_session
 from keyboards.collection import (
     anime_characters_kb,
@@ -21,12 +23,14 @@ from keyboards.main_menu import back_home_kb
 from models.card import Card
 from models.user import User
 from models.user_card import UserCard
+from services.card_level_service import CardLevelService
 from services.collection_service import CollectionService
 from services.gameplay_service import GameplayService
 from services.market_service import MarketService
 from utils.callback_data import CollectionCb, NavCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
-from utils.formatting import esc, event_tag, fmt_coins, format_card_about, format_card_block, format_collection_summary
+from utils.constants import get_rank_name_by_order, get_rarity_meta
+from utils.formatting import level_frame, esc, event_tag, fmt_coins, format_card_about, format_card_block, format_collection_summary
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
 
 router = Router(name="collection")
@@ -280,15 +284,37 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         unlocked_copy = await CollectionService.get_unlocked_copy(session, db_user.id, card.id)
         qty = await CollectionService.count_copies(session, db_user.id, card.id)
         reps = await CollectionService.get_card_group_reps(session, card.id)
+        lvl_cfg = await CardLevelService.get_config(session)
 
     char_rep_id = reps[1] if reps else card.id
     target_uc_id = unlocked_copy.id if unlocked_copy else uc.id
     is_locked = unlocked_copy is None
+    level = int(getattr(uc, "level", 1) or 1)
+    max_level = int(lvl_cfg["max_level"])
+    power = CardLevelService.power(card.rarity, level, lvl_cfg)
+    if level >= max_level:
+        level_label = ""
+        level_extra = "👑 <b>Maksimal daraja!</b>"
+    else:
+        cost = CardLevelService.upgrade_cost(card.base_value, level, lvl_cfg)
+        level_label = f"⬆️ DARAJANI KO‘TARISH · 🪙 {cost:,}"
+        level_extra = f"➡️ Keyingi daraja: <b>{cost:,}</b> 🪙 yoki shu kartani yana olish"
+    frame = level_frame(level)
+    frame_top = f"{frame[0]}\n" if frame else ""
+    frame_note = f"{frame[2]}\n" if frame else ""
+    frame_bottom = f"{frame[1]}\n" if frame else ""
     text = (
-        f"{format_card_block(card, serial_number=getattr(uc, 'serial_number', None), state_label=getattr(uc, 'card_state', 'OWNED'))}\n\n"
-        f"📦 <b>Sizdagi nusxalar soni:</b> {qty} ta\n"
-        f"🆔 <b>Nusxa ID:</b> <code>{target_uc_id}</code>\n"
-        f"📌 <b>Holati:</b> {'🔒 Marketda/Transferda band' if is_locked else '🟢 Sotish/Transferga tayyor'}"
+        f"{frame_top}"
+        f"{format_card_block(card, serial_number=getattr(uc, 'serial_number', None), state_label=getattr(uc, 'card_state', 'OWNED'))}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{frame_note}"
+        f"⭐ <b>Daraja:</b> {level}/{max_level} · {CardLevelService.title_text(level)}\n"
+        f"💪 <b>Kuch:</b> {power:,}\n"
+        f"{level_extra}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🆔 Nusxa ID: <code>{target_uc_id}</code>\n"
+        f"📌 {'🔒 Marketda/Transferda band' if is_locked else '🟢 Sotish/Transferga tayyor'}\n"
+        f"{frame_bottom}".rstrip()
     )
     kb = card_detail_kb(
         owner_id=callback.from_user.id,
@@ -298,6 +324,7 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         char_rep_id=char_rep_id,
         card_id=card.id,
         is_showcased=bool(getattr(uc, "is_showcased", False)),
+        level_label=level_label,
     )
     if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
         try:
@@ -308,6 +335,181 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         except Exception:
             pass
     await edit_or_answer(callback, text, reply_markup=kb)
+
+
+async def _render_merge(callback: CallbackQuery, db_user: User) -> None:
+    owner = callback.from_user.id
+    async with get_session() as session:
+        cfg = await CardLevelService.get_config(session)
+        options = CardLevelService.merge_options(cfg)
+        rows = []
+        for order, cost in options:
+            have = await CardLevelService.count_spare(session, db_user.id, order)
+            rows.append((order, cost, have))
+    lines = [
+        "🔮 <b>BIRLASHTIRISH</b>",
+        "━━━━━━━━━━━━━━━",
+        "Bir xil rankdagi ortiqcha kartalaringizni topshirib, <b>keyingi rankdagi</b> kartani oling.",
+        "<i>Band, sevimli va vitrinadagi kartalar olinmaydi. Eng past darajalilar birinchi ketadi.</i>",
+        "",
+    ]
+    b = InlineKeyboardBuilder()
+    if not rows:
+        lines.append("📭 Birlashtirish hozircha o‘chirilgan.")
+    for order, cost, have in rows:
+        from_name = get_rank_name_by_order(order)
+        to_name = get_rank_name_by_order(order + 1)
+        fm, tm = get_rarity_meta(from_name), get_rarity_meta(to_name)
+        mark = "✅" if have >= cost else "🔒"
+        lines.append(f"{mark} {fm.emoji} <b>{esc(from_name)}</b> × {cost}  →  {tm.emoji} <b>{esc(to_name)}</b>  (sizda: {have})")
+        b.row(
+            InlineKeyboardButton(
+                text=f"{fm.emoji} {from_name} × {cost} → {tm.emoji} {to_name}"[:60],
+                callback_data=CollectionCb(owner_id=owner, action="merge_do", item_id=order).pack(),
+            )
+        )
+    b.row(InlineKeyboardButton(text="⬅️ Kartalarim", callback_data=NavCb(owner_id=owner, target="cards").pack()))
+    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(CollectionCb.filter(F.action == "merge"))
+async def cb_merge_home(callback: CallbackQuery, db_user: User) -> None:
+    await _render_merge(callback, db_user)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "merge_do"))
+async def cb_merge_do(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    async with get_session() as session:
+        ok, msg, reward = await CardLevelService.merge(session, db_user.id, int(callback_data.item_id))
+        if ok:
+            await session.commit()
+        else:
+            await session.rollback()
+    if not ok:
+        await callback.answer(msg[:190], show_alert=True)
+        return
+    meta = get_rarity_meta(reward.rarity)
+    await callback.answer("🎉 Birlashtirildi!")
+    text = (
+        "🔮 <b>BIRLASHTIRISH MUVAFFAQIYATLI!</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"🎴 <b>{esc(reward.character_name)}</b>\n"
+        f"📺 {esc(reward.anime_name)} · {meta.emoji} {esc(meta.name)}\n\n"
+        "✨ Karta kolleksiyangizga qo‘shildi! (+50 XP)"
+    )
+    kb = back_home_kb(callback.from_user.id, "cards")
+    if callback.message and reward.image and (reward.image.startswith("http") or len(reward.image) > 20):
+        try:
+            await callback.message.delete()
+            await callback.message.answer_photo(photo=reward.image, caption=text, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await edit_or_answer(callback, text, reply_markup=kb)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "lvl_ask"))
+async def cb_level_ask(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    async with get_session() as session:
+        uc = await session.get(UserCard, callback_data.item_id)
+        if uc is None or uc.user_id != db_user.id:
+            await callback.answer("Karta topilmadi.", show_alert=True)
+            return
+        card = await session.get(Card, uc.card_id)
+        cfg = await CardLevelService.get_config(session)
+        fresh = await session.get(User, db_user.id)
+    level = int(uc.level or 1)
+    if level >= int(cfg["max_level"]):
+        await callback.answer("👑 Karta allaqachon eng yuqori darajada.", show_alert=True)
+        return
+    cost = CardLevelService.upgrade_cost(card.base_value, level, cfg)
+    new_power = CardLevelService.power(card.rarity, level + 1, cfg)
+    text = (
+        "⬆️ <b>DARAJANI KO‘TARISH</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"🎴 <b>{esc(card.character_name)}</b>\n"
+        f"⭐ Daraja: {level} → <b>{level + 1}</b> · {CardLevelService.title_text(level + 1)}\n"
+        f"💪 Kuch: {CardLevelService.power(card.rarity, level, cfg):,} → <b>{new_power:,}</b>\n\n"
+        f"💰 Narxi: <b>{cost:,}</b> 🪙\n"
+        f"👛 Hisobingiz: <b>{int(fresh.coins):,}</b> 🪙"
+    )
+    b = InlineKeyboardBuilder()
+    stars_ok = get_settings().enable_telegram_stars and (level + 1) <= min(int(cfg["stars_max_level"]), int(cfg["max_level"]))
+    b.row(
+        InlineKeyboardButton(
+            text="✅ Coin bilan ko‘tarish",
+            callback_data=CollectionCb(owner_id=callback.from_user.id, action="lvl_do", filter_val="d", page=1, item_id=uc.id).pack(),
+        ),
+        InlineKeyboardButton(
+            text="❌ Bekor",
+            callback_data=CollectionCb(owner_id=callback.from_user.id, action="card_detail", filter_val="d", page=1, item_id=uc.id).pack(),
+        ),
+    )
+    if stars_ok:
+        stars_cost = CardLevelService.stars_price(level, cfg)
+        b.row(
+            InlineKeyboardButton(
+                text=f"⭐ Stars bilan ko‘tarish ({stars_cost} ⭐)",
+                callback_data=CollectionCb(owner_id=callback.from_user.id, action="lvl_stars", filter_val="d", page=1, item_id=uc.id).pack(),
+            )
+        )
+        text += f"\n⭐ Stars bilan: <b>{stars_cost}</b> ⭐"
+    try:
+        if callback.message and callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
+            await callback.answer()
+            return
+    except Exception:
+        pass
+    await edit_or_answer(callback, text, reply_markup=b.as_markup())
+
+
+@router.callback_query(CollectionCb.filter(F.action == "lvl_stars"))
+async def cb_level_stars(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    if not get_settings().enable_telegram_stars:
+        await callback.answer("Telegram Stars vaqtincha o‘chirilgan.", show_alert=True)
+        return
+    async with get_session() as session:
+        uc = await session.get(UserCard, callback_data.item_id)
+        if uc is None or uc.user_id != db_user.id:
+            await callback.answer("Karta topilmadi.", show_alert=True)
+            return
+        card = await session.get(Card, uc.card_id)
+        cfg = await CardLevelService.get_config(session)
+    level = int(uc.level or 1)
+    target = level + 1
+    if target > min(int(cfg["stars_max_level"]), int(cfg["max_level"])):
+        await callback.answer("Bu darajaga Stars bilan ko‘tarib bo‘lmaydi. Coin yoki dublikat bilan ko‘taring.", show_alert=True)
+        return
+    price = CardLevelService.stars_price(level, cfg)
+    try:
+        await callback.bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title=f"⬆️ {card.character_name}"[:32],
+            description=f"Karta darajasi {level} → {target} ({CardLevelService.title_text(target)})"[:255],
+            payload=f"lvl:{uc.id}:{target}:{callback.from_user.id}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label=f"Daraja {target}", amount=price)],
+        )
+        await callback.answer("⭐ To‘lov oynasi shaxsiy chatga yuborildi.")
+    except Exception:
+        await callback.answer("Avval botga shaxsiy chatda /start bosing.", show_alert=True)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "lvl_do"))
+async def cb_level_do(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    async with get_session() as session:
+        res = await CardLevelService.upgrade_with_coins(session, db_user.id, callback_data.item_id)
+        if res.success:
+            await session.commit()
+        else:
+            await session.rollback()
+    if not res.success:
+        await callback.answer(res.message, show_alert=True)
+        return
+    await callback.answer(f"🎉 Daraja {res.new_level} ga ko‘tarildi! {CardLevelService.title_text(res.new_level)}", show_alert=True)
+    await cb_card_detail(callback, CollectionCb(owner_id=callback.from_user.id, action="card_detail", filter_val="d", page=1, item_id=callback_data.item_id), db_user)
 
 
 @router.callback_query(CollectionCb.filter(F.action == "toggle_fav"))

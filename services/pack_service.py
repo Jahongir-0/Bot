@@ -73,6 +73,17 @@ class PackService:
 
         price = int(cfg["price"])
         weights = dict(cfg["weights"])
+        # Tasodifiy dropdan chiqarilgan ranklar paketlarda ham tushmaydi (yuqori ranklarga ehtimol kamayadi)
+        from services.card_level_service import CardLevelService
+
+        _mults = await CardLevelService.get_drop_mults(session)
+        _scaled = {
+            r: max(1, int(int(w) * 100 * CardLevelService.rarity_mult(_mults, r)))
+            for r, w in weights.items()
+            if CardLevelService.rarity_mult(_mults, r) > 0
+        }
+        if _scaled:
+            weights = _scaled
         user = await session.get(User, user_id)
         if user is None:
             return PackOpenResult(success=False, message="Foydalanuvchi topilmadi.")
@@ -175,27 +186,29 @@ class PackService:
 
             already_owned = await UserService.owns_card(session, user_id, card.id)
             if already_owned:
-                cashback = max(50, price // 2)
-                await UserService.credit_coins(
-                    session,
-                    user_id,
-                    cashback,
-                    "pack_duplicate_cashback",
-                    f"Duplicate card in {cfg['name']}: {card.character_name}",
-                )
+                dup = await CardLevelService.apply_duplicate(session, user_id, card)
                 user.xp = int(user.xp or 0) + 10
                 user.level = max(1, 1 + (user.xp // 250))
                 await session.flush()
+                if dup is not None and not dup.maxed:
+                    msg = (
+                        f"🔁 <b>Dublikat karta tushdi!</b>\n"
+                        f"<b>{card.character_name}</b> sizda bor edi — <b>daraja ko‘tarildi:</b> "
+                        f"{dup.level_before} → <b>{dup.level_after}</b> · {CardLevelService.title_text(dup.level_after)}\n"
+                        f"⚡ +10 XP"
+                    )
+                    return PackOpenResult(success=True, message=msg, card=card, is_duplicate=True, price_paid=price)
+                refund = dup.refund if dup is not None else 0
                 return PackOpenResult(
                     success=True,
                     message=(
-                        f"♻️ <b>Dublikat karta tushdi!</b>\n"
-                        f"Sizda <b>{card.character_name}</b> allaqachon borligi uchun "
-                        f"<b>+{cashback:,} 🪙</b> keshbek va ⚡ +10 XP qaytarildi!"
+                        f"🔁 <b>Dublikat karta tushdi!</b>\n"
+                        f"<b>{card.character_name}</b> allaqachon eng yuqori darajada — "
+                        f"<b>+{refund:,} 🪙</b> qaytarildi · ⚡ +10 XP"
                     ),
                     card=card,
                     is_duplicate=True,
-                    cashback_coins=cashback,
+                    cashback_coins=refund,
                     price_paid=price,
                 )
 

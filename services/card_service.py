@@ -159,20 +159,24 @@ class CardService:
             )
         )
         cards = list(res.scalars().all())
+        from services.card_level_service import CardLevelService
+
+        mults = await CardLevelService.get_drop_mults(session)
+        cards = [c for c in cards if CardLevelService.rarity_mult(mults, c.rarity) > 0]
         if not cards:
             return None
 
         active_event = await CardService.get_active_event(session)
         weights: List[float] = []
         for card in cards:
-            w = float(card.drop_weight)
+            w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
             if (
                 active_event is not None
                 and active_event.boosted_rarity
                 and card.rarity.lower() == active_event.boosted_rarity.lower()
             ):
                 w *= max(1.0, active_event.rarity_weight_multiplier)
-            weights.append(max(0.1, w))
+            weights.append(max(0.01, w))
 
         return random.choices(cards, weights=weights, k=1)[0]
 

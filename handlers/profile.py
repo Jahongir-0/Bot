@@ -12,6 +12,7 @@ from models.group import Group
 from models.user import User
 from models.user_card import UserCard
 from models.v2_features import SeasonProgress, UserAchievement
+from services.card_level_service import CardLevelService
 from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from utils.callback_data import NavCb
@@ -72,6 +73,9 @@ async def _render_own_profile(db_user: User, db_group: Optional[Group]) -> str:
             ).scalar_one_or_none()
             s_points = int(sp or 0)
 
+    async with get_session() as _ps:
+        t_power = await CardLevelService.total_power(_ps, fresh_user.id)
+
     return format_profile_message(
         fresh_user,
         global_rank=global_rank,
@@ -80,6 +84,7 @@ async def _render_own_profile(db_user: User, db_group: Optional[Group]) -> str:
         showcase_cards=showcase,
         achievements_count=ach_cnt,
         season_points=s_points,
+        total_power=t_power,
     )
 
 

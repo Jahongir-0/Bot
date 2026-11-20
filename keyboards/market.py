@@ -558,6 +558,7 @@ def ranking_kb(
     builder.row(*main)
     builder.row(_btn("coins", "🪙 Boylik"), _btn("xp", "⚡ Daraja"), _btn("rare", "⭐ Yuqori rank"))
     builder.row(_btn("quiz", "🧠 Viktorina"), _btn("games", "🎲 O‘yin"), _btn("trades", "🤝 Savdo"))
+    builder.row(_btn("power", "💪 Eng kuchli kolleksiya"))
     r5_name = get_rank_name_by_order(5, "Mythic")
     r6_name = get_rank_name_by_order(6, "Divine")
     m5 = get_rarity_meta(r5_name)

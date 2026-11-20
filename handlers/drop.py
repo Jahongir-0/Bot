@@ -36,6 +36,33 @@ async def _announce_drop_claimed(msg: Message, result) -> None:
         logger.debug("Could not edit drop message after claim: %s", exc)
 
 
+def _claim_success_text(result) -> str:
+    """Karta olinganda guruhga chiqadigan natija xabari (yangi karta yoki dublikat → daraja)."""
+    from services.card_level_service import CardLevelService
+
+    meta = get_rarity_meta(result.card.rarity)
+    head = f"✅ <b>{esc(result.winner.display_name)}</b>, to‘g‘ri topdingiz!\n"
+    card_line = (
+        f"🎴 <b>{esc(result.card.character_name)}</b>\n"
+        f"📺 {esc(result.card.anime_name)} · {meta.emoji} {esc(meta.name)}\n"
+    )
+    if result.is_duplicate:
+        if result.maxed:
+            tail = (
+                f"👑 Karta allaqachon eng yuqori darajada!\n"
+                f"🪙 <b>+{result.refund:,}</b> coin qaytarildi · ✨ <b>+20 XP</b>"
+            )
+        else:
+            tail = (
+                f"🔁 Bu karta sizda bor edi — <b>daraja ko‘tarildi!</b>\n"
+                f"⬆️ {result.level_before} → <b>{result.level_after}</b> · {CardLevelService.title_text(result.level_after)}\n"
+                f"✨ <b>+20 XP</b>"
+            )
+    else:
+        tail = "✨ <b>+20 XP</b> berildi, karta kolleksiyangizga qo‘shildi!"
+    return head + card_line + tail
+
+
 @router.callback_query(DropCb.filter(F.action == "claim"))
 async def cb_claim_drop(callback: CallbackQuery, callback_data: DropCb, db_user: User) -> None:
     """Eski tugmali droplar uchun backward compatibility."""
@@ -66,7 +93,11 @@ async def cb_claim_drop(callback: CallbackQuery, callback_data: DropCb, db_user:
         await callback.message.reply(
             f"🎉 {esc(result.winner.display_name)} — <b>{esc(result.card.character_name)}</b> kartasini oldi!"
         )
-    await callback.answer(f"🎉 {result.card.character_name} kolleksiyangizga qo‘shildi!", show_alert=True)
+    await callback.answer(
+        f"🔁 {result.card.character_name}: daraja {result.level_before} → {result.level_after}!" if result.is_duplicate
+        else f"🎉 {result.card.character_name} kolleksiyangizga qo‘shildi!",
+        show_alert=True,
+    )
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message, F.text)
@@ -133,13 +164,7 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
         return
 
     # ---- muvaffaqiyat: karta rasmi va javobni o'chirib, faqat natijani qoldiramiz ----
-    meta = get_rarity_meta(result.card.rarity)
-    success_text = (
-        f"✅ <b>{esc(result.winner.display_name)}</b>, to‘g‘ri topdingiz!\n"
-        f"🎴 <b>{esc(result.card.character_name)}</b>\n"
-        f"📺 {esc(result.card.anime_name)} · {meta.emoji} {esc(meta.name)}\n"
-        f"✨ <b>+20 XP</b> berildi, karta kolleksiyangizga qo‘shildi!"
-    )
+    success_text = _claim_success_text(result)
     card_deleted = await safe_delete(bot, chat_id, replied.message_id)
     if not card_deleted:
         # Botda "xabarlarni o'chirish" ruxsati bo'lmasa: karta xabarini yopib qo'yamiz

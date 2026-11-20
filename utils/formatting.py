@@ -20,6 +20,24 @@ def header(title: str) -> str:
     return f"{title}\n{LINE}"
 
 
+def level_badge(level: int) -> str:
+    """5-darajadan ⭐, 10-darajadan 👑 belgisi (karta nomi yonida)."""
+    level = int(level or 1)
+    return "👑" if level >= 10 else ("⭐" if level >= 5 else "")
+
+
+def level_frame(level: int):
+    """(yuqori chiziq, pastki chiziq, nishon matni) yoki None. 5-daraja: yulduzli, 10-daraja: afsona ramkasi."""
+    level = int(level or 1)
+    if level >= 10:
+        line = "👑✨━━━━━━━━━━━━✨👑"
+        return line, line, "👑 <b>AFSONA KARTA</b> — eng yuqori daraja"
+    if level >= 5:
+        line = "⭐━━━━━━━━━━━━━━⭐"
+        return line, line, "⭐ <b>YULDUZLI KARTA</b> — 5-daraja belgisi"
+    return None
+
+
 def fmt_coins(amount: int) -> str:
     return f"{int(amount):,}"
 
@@ -167,6 +185,7 @@ def format_profile_message(
     showcase_cards: Optional[List[Card]] = None,
     achievements_count: int = 0,
     season_points: Optional[int] = None,
+    total_power: Optional[int] = None,
 ) -> str:
     from models.base import ensure_utc, utcnow
 
@@ -206,6 +225,8 @@ def format_profile_message(
         "🎴 <b>KOLLEKSIYA</b>",
         f"🎴 Jami: <b>{user.total_cards}</b>  ·  ✨ Noyob: <b>{user.unique_cards}</b>",
     ]
+    if total_power is not None:
+        lines.append(f"💪 Umumiy kuch: <b>{fmt_coins(total_power)}</b>")
     if rarest_card is not None:
         rmeta = get_rarity_meta(rarest_card.rarity)
         lines.append(f"💠 Eng noyob: {rmeta.emoji} <b>{esc(rarest_card.character_name)}</b> · {esc(rmeta.name)}")

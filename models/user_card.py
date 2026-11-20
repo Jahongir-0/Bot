@@ -28,3 +28,4 @@ class UserCard(Base, TimestampMixin):
     serial_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     is_showcased: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     card_state: Mapped[str] = mapped_column(String(24), nullable=False, default="OWNED")
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")

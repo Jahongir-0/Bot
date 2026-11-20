@@ -9,7 +9,7 @@ from models.user_card import UserCard
 from services.collection_service import AnimeSection, CardVariant, CharacterSection, CharacterStack
 from utils.callback_data import CollectionCb, NavCb, OfferCb, WishCb
 from utils.constants import get_rarity_meta, list_rarities
-from utils.formatting import event_tag
+from utils.formatting import level_badge, event_tag
 
 # Callback data 64 baytdan oshmasligi va ':' belgisini o'z ichiga olmasligi shart,
 # shuning uchun filtrlar faqat qisqa raqam/lotin matn ko'rinishida uzatiladi.
@@ -60,6 +60,12 @@ def collection_summary_kb(owner_id: int) -> InlineKeyboardMarkup:
             text="📩 TAKLIFLAR",
             callback_data=OfferCb(owner_id=owner_id, action="incoming", page=1).pack(),
         ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔮 BIRLASHTIRISH",
+            callback_data=CollectionCb(owner_id=owner_id, action="merge").pack(),
+        )
     )
     _footer(builder, owner_id, NavCb(owner_id=owner_id, target="profile").pack())
     return builder.as_markup()
@@ -114,9 +120,10 @@ def v2_collection_list_kb(
         fav = "❤️ " if uc.is_favorite else ""
         sc = "🖼 " if getattr(uc, "is_showcased", False) else ""
         ser = f"#{uc.serial_number}" if getattr(uc, "serial_number", None) else ""
+        lv = level_badge(getattr(uc, "level", 1))
         builder.row(
             InlineKeyboardButton(
-                text=f"{fav}{sc}{event_tag(card)}{meta.emoji} {card.character_name[:22]} {ser}"[:60],
+                text=f"{fav}{sc}{lv}{event_tag(card)}{meta.emoji} {card.character_name[:22]} {ser}"[:60],
                 callback_data=CollectionCb(
                     owner_id=owner_id, action="card_detail", filter_val=filter_tab, sort_by=sort_by, page=page, item_id=uc.id
                 ).pack(),
@@ -312,8 +319,18 @@ def card_detail_kb(
     char_rep_id: int,
     card_id: int = 0,
     is_showcased: bool = False,
+    level_label: str = "",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if level_label:
+        builder.row(
+            InlineKeyboardButton(
+                text=level_label,
+                callback_data=CollectionCb(
+                    owner_id=owner_id, action="lvl_ask", filter_val="d", page=1, item_id=user_card_id
+                ).pack(),
+            )
+        )
     fav_text = "💔 Sevimlidan olish" if is_favorite else "❤️ Sevimliga qo‘shish"
     show_text = "🖼 Vitrinadan olish" if is_showcased else "🖼 Vitrinaga qo‘yish"
     builder.row(

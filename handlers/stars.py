@@ -9,7 +9,9 @@ from database.session import get_session
 from keyboards.main_menu import back_home_kb
 from keyboards.market import stars_shop_kb
 from models.user import User
+from models.user_card import UserCard
 from services.community_service import CommunityService
+from services.card_level_service import CardLevelService
 from services.event_service import EventService, is_event_payload
 from services.payment_service import PaymentService
 from services.settings_service import SettingsService
@@ -118,6 +120,17 @@ async def on_pre_checkout(pre_checkout_query: PreCheckoutQuery, db_user: User) -
         await pre_checkout_query.answer(ok=ok_evt, error_message=None if ok_evt else reason[:200])
         return
 
+    if pre_checkout_query.invoice_payload.startswith("lvl:"):
+        parts = pre_checkout_query.invoice_payload.split(":")
+        ok_lvl, why = False, "To‘lov ma’lumotlari tasdiqlanmadi."
+        if len(parts) == 4 and parts[3] == str(pre_checkout_query.from_user.id) and pre_checkout_query.currency == "XTR":
+            async with get_session() as session:
+                ok_lvl, why = await CardLevelService.validate_stars_upgrade(
+                    session, db_user.id, int(parts[1]), int(parts[2]), int(pre_checkout_query.total_amount)
+                )
+        await pre_checkout_query.answer(ok=ok_lvl, error_message=None if ok_lvl else why[:200])
+        return
+
     if pre_checkout_query.invoice_payload.startswith("vip:"):
         parts = pre_checkout_query.invoice_payload.split(":")
         ok_vip = False
@@ -164,6 +177,10 @@ async def on_successful_payment(message: Message, db_user: User) -> None:
 
     if sp.invoice_payload.startswith("vip:"):
         await _handle_vip_payment(message, db_user)
+        return
+
+    if sp.invoice_payload.startswith("lvl:"):
+        await _handle_level_payment(message, db_user)
         return
 
     already_processed = False
@@ -278,6 +295,41 @@ async def _handle_event_payment(message: Message, db_user: User) -> None:
         await message.answer(
             f"⚠️ {res.message}\nAdmin bilan bog‘laning. Chek ID: <code>{sp.telegram_payment_charge_id}</code>"
         )
+
+
+async def _handle_level_payment(message: Message, db_user: User) -> None:
+    sp = message.successful_payment
+    parts = sp.invoice_payload.split(":")
+    new_level = None
+    ok = len(parts) == 4 and parts[3] == str(message.from_user.id) and sp.currency == "XTR"
+    if ok:
+        async with get_session() as session:
+            valid, _why = await CardLevelService.validate_stars_upgrade(
+                session, db_user.id, int(parts[1]), int(parts[2]), int(sp.total_amount)
+            )
+            if valid:
+                new_level = await CardLevelService.apply_stars_upgrade(session, db_user.id, int(parts[1]), int(parts[2]))
+                await session.commit()
+            else:
+                await session.rollback()
+    if new_level:
+        await message.answer(
+            f"🎉 To‘lov qabul qilindi! Karta darajasi <b>{new_level}</b> ga ko‘tarildi — "
+            f"{CardLevelService.title_text(new_level)}"
+        )
+        return
+    # Daraja allaqachon ko'tarilgan bo'lsa (takroriy xabar) hech narsa qilmaymiz; aks holda Stars qaytariladi
+    async with get_session() as session:
+        uc = await session.get(UserCard, int(parts[1])) if len(parts) == 4 and parts[1].isdigit() else None
+    if uc is not None and len(parts) == 4 and int(uc.level or 1) >= int(parts[2]):
+        logger.info("Takroriy daraja to'lovi xabari e'tiborsiz qoldirildi (charge %s)", sp.telegram_payment_charge_id)
+        return
+    try:
+        await message.bot.refund_star_payment(user_id=message.from_user.id, telegram_payment_charge_id=sp.telegram_payment_charge_id)
+        await message.answer("⚠️ Darajani ko‘tarib bo‘lmadi. Sarflangan Stars avtomatik qaytarildi.")
+    except Exception as exc:
+        logger.exception("Level Stars refund failed: %s", exc)
+        await message.answer(f"⚠️ Daraja ko‘tarilmadi. Admin bilan bog‘laning. Chek ID: <code>{sp.telegram_payment_charge_id}</code>")
 
 
 async def _handle_vip_payment(message: Message, db_user: User) -> None:

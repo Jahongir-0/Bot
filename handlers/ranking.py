@@ -84,6 +84,22 @@ async def _show_ranking(
         await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
         return
 
+    # ---------- eng kuchli kolleksiya ----------
+    if scope == "power":
+        from services.card_level_service import CardLevelService
+
+        async with get_session() as session:
+            rows = await CardLevelService.top_power(session, limit=10)
+        lines = ["💪 <b>ENG KUCHLI KOLLEKSIYA</b>", f"{LINE}\n<i>Kartalarning rank va darajasi bo‘yicha umumiy kuch</i>\n"]
+        if not rows:
+            lines.append("📭 Hozircha ma’lumot yo‘q.")
+        else:
+            for idx, (u, val) in enumerate(rows, start=1):
+                me = " 👈" if db_user is not None and u.id == db_user.id else ""
+                lines.append(f"{_prefix(idx)} {esc(u.display_name)} — <b>{fmt_coins(val)}</b> 💪{me}")
+        await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
+        return
+
     # ---------- maxsus reytinglar ----------
     if scope in titles:
         hdr, unit = titles[scope]

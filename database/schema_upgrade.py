@@ -66,6 +66,7 @@ def _col_defs(dialect: str):
             ("serial_number", "INTEGER"),
             ("is_showcased", f"BOOLEAN NOT NULL DEFAULT {bool_false}"),
             ("card_state", "VARCHAR(24) NOT NULL DEFAULT 'OWNED'"),
+            ("level", "INTEGER NOT NULL DEFAULT 1"),
         ],
         "admin_actions": [
             ("old_value", f"JSON NOT NULL DEFAULT {json_empty_obj}"),
