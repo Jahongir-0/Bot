@@ -1327,7 +1327,7 @@ async def cb_admin_give_card_exec(callback: CallbackQuery, callback_data: AdminC
                 pass
         await callback.answer(f"✅ {card.character_name} berildi!", show_alert=True)
     else:
-        await callback.answer("❌ Berilmadi: karta topilmadi yoki userda allaqachon bor.", show_alert=True)
+        await callback.answer("❌ Berilmadi: karta yoki foydalanuvchi topilmadi.", show_alert=True)
     await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
 
 
