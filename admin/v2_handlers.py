@@ -67,7 +67,7 @@ from utils.callback_data import AdmV2Cb, AdminCb
 from utils.constants import ADMIN_PERMISSION_SECTIONS, MEDIA_TYPES, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, fmt_coins, format_card_about, format_card_block, format_drop_message
 from utils.image_check import validate_image_url
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_super_admin, send_card_message, send_card_visual
+from utils.tg_helpers import safe_delete, NotCommandFilter, edit_or_answer, is_super_admin, send_card_message, send_card_visual
 
 logger = logging.getLogger(__name__)
 
@@ -469,18 +469,33 @@ async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, adm
         if card is None:
             await callback.answer("Karta topilmadi.", show_alert=True)
             return
-        owners_list, drops_sent = await AdminService.get_card_ownership_and_drops(session, card.id)
-        latest_uc = (
-            await session.execute(select(UserCard).where(UserCard.card_id == card.id).order_by(UserCard.id.desc()).limit(1))
-        ).scalar_one_or_none()
+        # Qo'shimcha ma'lumotlar: biri xato bersa ham karta ekrani baribir ochiladi
+        owners_list, drops_sent, latest_uc = [], 0, None
+        try:
+            owners_list, drops_sent = await AdminService.get_card_ownership_and_drops(session, card.id)
+        except Exception:
+            logger.exception("card_det: egalari/tashlanishlar o'qilmadi (card %s)", card.id)
+            await session.rollback()
+        try:
+            latest_uc = (
+                await session.execute(select(UserCard).where(UserCard.card_id == card.id).order_by(UserCard.id.desc()).limit(1))
+            ).scalar_one_or_none()
+        except Exception:
+            logger.exception("card_det: oxirgi egasi o'qilmadi (card %s)", card.id)
+            await session.rollback()
     owner_preview = ", ".join(f"{n} (×{q})" for n, q in owners_list[:4]) if owners_list else "Yo‘q"
-    claimed_dt = latest_uc.acquired_at.strftime("%Y-%m-%d %H:%M") if latest_uc and latest_uc.acquired_at else "—"
-    text = (
-        f"{format_card_block(card, show_status=True, owner_name=owner_preview)}\n"
-        f"📤 <b>Tashlangan:</b> {drops_sent} marta\n"
-        f"🗓 <b>Oxirgi olingan sana:</b> <code>{claimed_dt}</code>\n"
-        f"🆔 <b>Card DB ID:</b> <code>{card.id}</code>"
-    )
+    acquired = getattr(latest_uc, "acquired_at", None) if latest_uc is not None else None
+    claimed_dt = acquired.strftime("%Y-%m-%d %H:%M") if acquired else "—"
+    try:
+        text = (
+            f"{format_card_block(card, show_status=True, owner_name=owner_preview)}\n"
+            f"📤 <b>Tashlangan:</b> {drops_sent} marta\n"
+            f"🗓 <b>Oxirgi olingan sana:</b> <code>{claimed_dt}</code>\n"
+            f"🆔 <b>Card DB ID:</b> <code>{card.id}</code>"
+        )
+    except Exception:
+        logger.exception("card_det: matn tuzilmadi (card %s)", card.id)
+        text = f"🎴 <b>{esc(card.character_name)}</b>\n📺 {esc(card.anime_name)}\n🆔 Card DB ID: <code>{card.id}</code>"
     kb = admin_v2_card_detail_kb(
         callback.from_user.id,
         card,
@@ -490,12 +505,12 @@ async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, adm
     )
     if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
         try:
-            await callback.message.delete()
             await send_card_message(callback.bot, callback.message.chat.id, card, text, kb)
+            await safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
             await callback.answer()
             return
         except Exception:
-            pass
+            logger.exception("card_det: rasm yuborilmadi (card %s)", card.id)
     await edit_or_answer(callback, text, reply_markup=kb)
 
 
