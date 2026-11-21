@@ -99,6 +99,10 @@ def _col_defs(dialect: str):
             ("from_chat_id", "BIGINT"),
             ("forward_message_id", "BIGINT"),
         ],
+        "ad_campaigns": [
+            ("clicks_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("expires_at", dt),
+        ],
     }
 
 
