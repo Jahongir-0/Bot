@@ -32,6 +32,7 @@ def _col_defs(dialect: str):
             ("metadata_json", f"JSON NOT NULL DEFAULT {json_empty_obj}"),
             ("battle_stats", f"JSON NOT NULL DEFAULT {json_empty_obj}"),
             ("season_id", "INTEGER"),
+            ("preset_level", "INTEGER NOT NULL DEFAULT 1"),
         ],
         "groups": [
             ("member_count", "INTEGER"),
@@ -80,6 +81,10 @@ def _col_defs(dialect: str):
         "limited_events": [
             ("reward_coins", "INTEGER NOT NULL DEFAULT 0"),
             ("target_scope", "VARCHAR(24) NOT NULL DEFAULT 'all'"),
+            ("card_level", "INTEGER NOT NULL DEFAULT 1"),
+        ],
+        "auctions": [
+            ("card_level", "INTEGER NOT NULL DEFAULT 1"),
         ],
         "forced_channels": [
             ("channel_type", "VARCHAR(24) NOT NULL DEFAULT 'telegram'"),
