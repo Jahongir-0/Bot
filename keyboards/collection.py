@@ -320,6 +320,7 @@ def card_detail_kb(
     card_id: int = 0,
     is_showcased: bool = False,
     level_label: str = "",
+    unlock_label: str = "",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if level_label:
@@ -363,6 +364,15 @@ def card_detail_kb(
             )
         )
     builder.row(*row2)
+    if is_locked and unlock_label:
+        builder.row(
+            InlineKeyboardButton(
+                text=unlock_label,
+                callback_data=CollectionCb(
+                    owner_id=owner_id, action="unlock", filter_val="d", page=1, item_id=user_card_id
+                ).pack(),
+            )
+        )
     if not is_locked:
         builder.row(
             InlineKeyboardButton(
