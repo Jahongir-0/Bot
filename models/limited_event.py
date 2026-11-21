@@ -30,6 +30,8 @@ class LimitedEvent(Base, TimestampMixin):
     finalized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reward_coins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     target_scope: Mapped[str] = mapped_column(String(24), nullable=False, default="all")
+    card_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
 
     @property
     def remaining(self) -> int:

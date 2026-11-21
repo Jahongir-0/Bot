@@ -154,6 +154,8 @@ class Auction(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # active|ended|cancelled|no_bids
     finalized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     channel_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    card_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
 
 
 class AuctionBid(Base, TimestampMixin):

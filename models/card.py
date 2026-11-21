@@ -48,3 +48,5 @@ class Card(Base, TimestampMixin):
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     battle_stats: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     season_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    preset_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
