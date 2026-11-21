@@ -12,7 +12,7 @@ from services.pack_service import PackService
 from utils.callback_data import NavCb, PackCb
 from utils.constants import get_pack_configs, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import LINE, esc, fmt_coins, format_card_block, header
-from utils.tg_helpers import edit_or_answer, safe_delete, send_card_message
+from utils.tg_helpers import append_private_ad, edit_or_answer, safe_delete, send_card_message
 
 router = Router(name="pack")
 _PACK_LOCKS: dict[int, asyncio.Lock] = {}
@@ -62,9 +62,15 @@ async def _show_packs(target, owner_id: int, db_user: User) -> None:
         fresh = await session.get(User, db_user.id) or db_user
         enabled, used_today, daily_limit = await PackService.get_daily_pack_status(session, db_user.id)
     can_open = enabled and daily_limit > 0 and used_today < daily_limit
+    text = _packs_text(fresh, enabled, used_today, daily_limit)
+    is_pm = (isinstance(target, Message) and target.chat.type == "private") or (
+        isinstance(target, CallbackQuery) and target.message is not None and target.message.chat.type == "private"
+    )
+    if is_pm:
+        text = await append_private_ad(text, target.bot, fresh)
     await edit_or_answer(
         target,
-        _packs_text(fresh, enabled, used_today, daily_limit),
+        text,
         reply_markup=packs_menu_kb(owner_id, can_open=can_open),
     )
 

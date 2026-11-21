@@ -32,7 +32,7 @@ from utils.callback_data import CollectionCb, NavCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.constants import get_rank_name_by_order, get_rarity_meta
 from utils.formatting import level_frame, esc, event_tag, fmt_coins, format_card_about, format_card_block, format_collection_summary
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat
+from utils.tg_helpers import NotCommandFilter, append_private_ad, edit_or_answer, is_private_chat
 
 router = Router(name="collection")
 
@@ -62,6 +62,11 @@ async def _show_summary(target, owner_id: int, db_user: User) -> None:
             session, db_user.id
         )
     text = format_collection_summary(fresh, anime_counts, rarity_counts, favorites)
+    is_pm = (isinstance(target, Message) and target.chat.type == "private") or (
+        isinstance(target, CallbackQuery) and target.message is not None and target.message.chat.type == "private"
+    )
+    if is_pm:
+        text = await append_private_ad(text, target.bot, fresh)
     await edit_or_answer(target, text, reply_markup=collection_summary_kb(owner_id))
 
 

@@ -9,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database.session import get_session
 from keyboards.main_menu import GROUP_MENUS, back_home_kb, group_menu_kb, main_menu_kb
 from models.user import User
+from services.community_service import CommunityService
 from services.drop_service import DropService
 from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
@@ -17,7 +18,7 @@ from services.user_service import UserService
 from utils.callback_data import NavCb
 from utils.constants import get_rank_name_by_order, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, fmt_coins, format_card_block, header
-from utils.tg_helpers import edit_or_answer, is_admin_user, send_card_message
+from utils.tg_helpers import append_private_ad, edit_or_answer, is_admin_user, send_card_message
 
 router = Router(name="start")
 
@@ -153,9 +154,26 @@ async def cmd_start(
                     pass
             else:
                 await session.rollback()
+        elif args.startswith("ad_") and args[3:].isdigit():
+            clicked_ad = await CommunityService.record_ad_click(session, int(args[3:]))
+            if clicked_ad is not None:
+                await session.commit()
+                if clicked_ad.button_url:
+                    ad_kb = InlineKeyboardBuilder()
+                    ad_kb.row(
+                        InlineKeyboardButton(
+                            text=f"🔗 {clicked_ad.button_text or 'Havolaga o‘tish'}",
+                            url=clicked_ad.button_url,
+                        )
+                    )
+                    await message.answer(
+                        f"📢 <b>REKLAMA HAVOLASI</b>\n\n{esc(clicked_ad.text)}\n\n👇 Kirish uchun tugmani bosing:",
+                        reply_markup=ad_kb.as_markup(),
+                    )
 
     is_admin = is_bot_admin or is_admin_user(message.from_user)
     text = f"{ref_notice}{_home_text(fresh_user, welcome_txt)}"
+    text = await append_private_ad(text, message.bot, fresh_user)
     await message.answer(
         text,
         reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
@@ -206,9 +224,10 @@ async def cb_home(
         if fresh is not None:
             fresh_user = fresh
     is_admin = is_bot_admin or is_admin_user(callback.from_user)
+    home_txt = await append_private_ad(_home_text(fresh_user, welcome_txt), callback.bot, fresh_user)
     await edit_or_answer(
         callback,
-        _home_text(fresh_user, welcome_txt),
+        home_txt,
         reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
     )
 

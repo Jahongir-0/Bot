@@ -17,7 +17,7 @@ from services.gameplay_service import GameplayService
 from services.ranking_service import RankingService
 from utils.callback_data import NavCb
 from utils.formatting import format_profile_message
-from utils.tg_helpers import edit_or_answer
+from utils.tg_helpers import append_private_ad, edit_or_answer
 
 router = Router(name="profile")
 
@@ -91,6 +91,8 @@ async def _render_own_profile(db_user: User, db_group: Optional[Group]) -> str:
 @router.message(Command("me", "profil", "profilim"))
 async def cmd_profile(message: Message, db_user: User, db_group: Optional[Group] = None) -> None:
     text = await _render_own_profile(db_user, db_group)
+    if message.chat.type == "private":
+        text = await append_private_ad(text, message.bot, db_user)
     await message.answer(text, reply_markup=profile_kb(message.from_user.id))
 
 
@@ -101,4 +103,6 @@ async def cb_profile(
     db_group: Optional[Group] = None,
 ) -> None:
     text = await _render_own_profile(db_user, db_group)
+    if callback.message and callback.message.chat.type == "private":
+        text = await append_private_ad(text, callback.bot, db_user)
     await edit_or_answer(callback, text, reply_markup=profile_kb(callback.from_user.id))

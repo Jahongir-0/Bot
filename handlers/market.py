@@ -19,7 +19,7 @@ from utils.callback_data import MarketCb, NavCb
 from utils.constants import PAGE_SIZE
 from utils.constants import get_rarity_meta
 from utils.formatting import LINE, header, esc, fmt_coins, format_card_block
-from utils.tg_helpers import edit_or_answer
+from utils.tg_helpers import append_private_ad, edit_or_answer
 
 logger = logging.getLogger(__name__)
 router = Router(name="market")
@@ -47,6 +47,12 @@ async def _show_market(target, owner_id: int, db_user: User, page: int = 1, my_o
             lines.append(f"      💰 {fmt_coins(item.listing.price)} 🪙{seller}")
         lines.append("\n👇 Kartani tanlang:")
         text = "\n".join(lines)
+
+    is_pm = (isinstance(target, Message) and target.chat.type == "private") or (
+        isinstance(target, CallbackQuery) and target.message is not None and target.message.chat.type == "private"
+    )
+    if is_pm:
+        text = await append_private_ad(text, target.bot, db_user)
 
     await edit_or_answer(
         target,

@@ -49,7 +49,7 @@ from services.user_service import UserService
 from utils.callback_data import AchCb, AucCb, GameCb, NavCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
 from utils.formatting import header, esc, fmt_coins, format_card_block
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_admin_user, send_card_message
+from utils.tg_helpers import NotCommandFilter, append_private_ad, edit_or_answer, is_admin_user, send_card_message
 
 logger = logging.getLogger(__name__)
 LINE_SEP = "━━━━━━━━━━━━━━━"
@@ -313,8 +313,11 @@ def _games_kb_from_state(owner_id: int, st: dict) -> InlineKeyboardMarkup:
 @router.message(Command("game", "games"))
 async def cmd_game(message: Message, db_user: User) -> None:
     st = await _game_state(db_user.id)
+    text = _game_menu_text(st)
+    if message.chat.type == "private":
+        text = await append_private_ad(text, message.bot, db_user)
     await message.answer(
-        _game_menu_text(st),
+        text,
         reply_markup=_games_kb_from_state(message.from_user.id, st),
     )
 
@@ -322,9 +325,12 @@ async def cmd_game(message: Message, db_user: User) -> None:
 @router.callback_query(GameCb.filter(F.act == "v"))
 async def cb_games_menu(callback: CallbackQuery, db_user: User) -> None:
     st = await _game_state(db_user.id)
+    text = _game_menu_text(st)
+    if callback.message and callback.message.chat.type == "private":
+        text = await append_private_ad(text, callback.bot, db_user)
     await edit_or_answer(
         callback,
-        _game_menu_text(st),
+        text,
         reply_markup=_games_kb_from_state(callback.from_user.id, st),
     )
     await callback.answer()
