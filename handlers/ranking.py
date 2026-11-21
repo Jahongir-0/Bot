@@ -145,7 +145,9 @@ async def _show_ranking(
                 f"{r4_meta.emoji} {e.legendary_cards} · {r5_meta.emoji} {e.mythic_cards}"
             )
     mine = my_group if scope == "group" else my_global
-    if mine is not None:
+    if mine == 0:
+        lines.append("\n📍 Siz: 🛡 <b>Admin (reytingdan tashqari)</b>")
+    elif mine is not None:
         lines.append(f"\n📍 Sizning o‘riningiz: <b>#{mine}</b>")
     await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
 

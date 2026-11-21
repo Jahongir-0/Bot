@@ -89,12 +89,16 @@ async def _create_transfer_and_text(db_user: User, recipient_id: int, user_card_
 
 async def _show_matches(target: Message, state: FSMContext, db_user: User, query: str) -> None:
     """Jo'natuvchidagi shu ismdagi kartalar ro'yxati (rarity bilan) — o'zi tanlaydi."""
+    await state.update_data(last_query=query)
     data = await state.get_data()
     to_user_id = int(data["to_user_id"])
     async with get_session() as session:
+        if await CollectionService.reconcile_user_card_locks(session, db_user.id):
+            await session.commit()
         recipient = await session.get(User, to_user_id)
         matches = await CollectionService.find_cards_by_name(session, db_user.id, query, limit=8)
         recipient_has = set()
+        lock_infos = {}
         if matches:
             rows = await session.execute(
                 select(UserCard.card_id).where(
@@ -103,6 +107,9 @@ async def _show_matches(target: Message, state: FSMContext, db_user: User, query
                 )
             )
             recipient_has = {r[0] for r in rows.all()}
+            for uc, _c in matches:
+                if uc.is_locked:
+                    lock_infos[uc.id] = await CollectionService.get_card_lock_info(session, uc.id)
 
     if not matches:
         await target.answer(
@@ -118,7 +125,15 @@ async def _show_matches(target: Message, state: FSMContext, db_user: User, query
         tag = " (+1 lvl)" if card.id in recipient_has else ""
         label = f"{meta.emoji} {meta.name} · {card.character_name} ({card.card_code}){tag}"[:60]
         if uc.is_locked:
-            notes.append(f"🔒 {esc(card.character_name)} ({esc(meta.name)}) — marketda/almashuvda band")
+            lock_kind, _eid, lock_lbl = lock_infos.get(uc.id, ("none", 0, "band"))
+            notes.append(f"{lock_lbl}: {esc(card.character_name)} ({esc(meta.name)})")
+            if lock_kind == "transfer":
+                builder.row(
+                    InlineKeyboardButton(
+                        text=f"🔓 Transferni yechish · {card.character_name}"[:60],
+                        callback_data=GiveCb(owner_id=db_user.telegram_id, action="unlock", user_card_id=uc.id).pack(),
+                    )
+                )
             continue
         builder.row(
             InlineKeyboardButton(
@@ -278,6 +293,28 @@ async def cb_give_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await edit_or_answer(callback, "❌ Karta berish bekor qilindi.", reply_markup=back_home_kb(callback.from_user.id))
 
 
+@router.callback_query(GiveCb.filter(F.action == "unlock"))
+async def cb_give_unlock(callback: CallbackQuery, callback_data: GiveCb, state: FSMContext, db_user: User) -> None:
+    data = await state.get_data()
+    if data.get("from_tg") != callback.from_user.id:
+        await callback.answer("Muddat tugagan. /give ni qaytadan yozing.", show_alert=True)
+        return
+    async with get_session() as session:
+        res = await TransferService.cancel_or_unlock_for_user(session, db_user.id, callback_data.user_card_id)
+        if res.success:
+            await session.commit()
+        else:
+            await session.rollback()
+    await callback.answer(res.message[:190], show_alert=True)
+    last_q = str(data.get("last_query") or "").strip()
+    if res.success and last_q and callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await _show_matches(callback.message, state, db_user, last_q)
+
+
 @router.callback_query(GiveCb.filter(F.action == "pick"))
 async def cb_give_pick(callback: CallbackQuery, callback_data: GiveCb, state: FSMContext, db_user: User) -> None:
     data = await state.get_data()
@@ -286,18 +323,28 @@ async def cb_give_pick(callback: CallbackQuery, callback_data: GiveCb, state: FS
         await callback.answer("Muddat tugagan. /give ni qaytadan yozing.", show_alert=True)
         return
 
+    price = int(data.get("price", 0))
     res, text, kb = await _create_transfer_and_text(
-        db_user, int(to_user_id), callback_data.user_card_id, int(data.get("price", 0))
+        db_user, int(to_user_id), callback_data.user_card_id, price
     )
     if not res.success:
         await callback.answer(res.message, show_alert=True)
         return
     await state.clear()
     await edit_or_answer(callback, text, reply_markup=kb)
+    if price > 0 and res.to_user and callback.bot:
+        chat_id = callback.message.chat.id if callback.message else None
+        if chat_id != res.to_user.telegram_id:
+            try:
+                await callback.bot.send_message(res.to_user.telegram_id, text, reply_markup=kb)
+            except Exception:
+                pass
 
 
 async def _legacy_give(message: Message, db_user: User, recipient: User, card_ref: str, price: int) -> None:
     async with get_session() as session:
+        if await CollectionService.reconcile_user_card_locks(session, db_user.id):
+            await session.commit()
         uc = None
         if card_ref.isdigit():
             cand = await session.get(UserCard, int(card_ref))
@@ -315,6 +362,11 @@ async def _legacy_give(message: Message, db_user: User, recipient: User, card_re
         return
     res, text, kb = await _create_transfer_and_text(db_user, recipient.id, uc.id, price)
     await message.answer(text, reply_markup=kb)
+    if res.success and price > 0 and res.to_user and message.bot and message.chat.id != res.to_user.telegram_id:
+        try:
+            await message.bot.send_message(res.to_user.telegram_id, text, reply_markup=kb)
+        except Exception:
+            pass
 
 
 @router.callback_query(TransferCb.filter(F.action == "confirm"))

@@ -1058,6 +1058,7 @@ async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb, db_us
         uc_level = 1
         if det is not None:
             auc_tmp = det[0]
+            uc_level = max(1, int(getattr(auc_tmp, "card_level", 1) or 1))
             if auc_tmp.seller_user_id:
                 s_user = await session.get(User, auc_tmp.seller_user_id)
                 if s_user:

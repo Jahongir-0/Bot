@@ -282,6 +282,8 @@ async def cb_char_list(callback: CallbackQuery, callback_data: CollectionCb, db_
 @router.callback_query(CollectionCb.filter(F.action == "card_detail"))
 async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
     async with get_session() as session:
+        if await CollectionService.reconcile_user_card_locks(session, db_user.id):
+            await session.commit()
         uc = await session.get(UserCard, callback_data.item_id)
         if uc is None or uc.user_id != db_user.id:
             await callback.answer("Karta topilmadi.", show_alert=True)
@@ -292,10 +294,21 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         reps = await CollectionService.get_card_group_reps(session, card.id)
         lvl_cfg = await CardLevelService.get_config(session)
         rcfg = await SettingsService.get_rarity_config(session)
+        is_locked = unlocked_copy is None
+        target_uc_id = unlocked_copy.id if unlocked_copy else uc.id
+        lock_kind, _lock_eid, lock_label = (
+            await CollectionService.get_card_lock_info(session, target_uc_id)
+            if is_locked
+            else ("none", 0, "🟢 Sotish/Transferga tayyor")
+        )
 
     char_rep_id = reps[1] if reps else card.id
-    target_uc_id = unlocked_copy.id if unlocked_copy else uc.id
-    is_locked = unlocked_copy is None
+    unlock_label = ""
+    if is_locked:
+        if lock_kind == "transfer":
+            unlock_label = "🔓 Transferni bekor qilish"
+        elif lock_kind == "trade":
+            unlock_label = "🔓 Almashuvni bekor qilish"
     level = int(getattr(uc, "level", 1) or 1)
     max_level = int(lvl_cfg["max_level"])
     power = CardLevelService.power(card.rarity, level, lvl_cfg)
@@ -321,7 +334,7 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         f"{level_extra}\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🆔 Nusxa ID: <code>{target_uc_id}</code>\n"
-        f"📌 {'🔒 Marketda/Transferda band' if is_locked else '🟢 Sotish/Transferga tayyor'}\n"
+        f"📌 {lock_label}\n"
         f"{frame_bottom}".rstrip()
     )
     kb = card_detail_kb(
@@ -333,6 +346,7 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         card_id=card.id,
         is_showcased=bool(getattr(uc, "is_showcased", False)),
         level_label=level_label,
+        unlock_label=unlock_label,
     )
     if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
         try:
@@ -343,6 +357,20 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         except Exception:
             pass
     await edit_or_answer(callback, text, reply_markup=kb)
+
+
+@router.callback_query(CollectionCb.filter(F.action == "unlock"))
+async def cb_card_unlock(callback: CallbackQuery, callback_data: CollectionCb, db_user: User) -> None:
+    async with get_session() as session:
+        ok, msg = await CollectionService.unlock_user_card_action(session, db_user.id, callback_data.item_id)
+        await session.commit()
+    await callback.answer(msg[:190], show_alert=True)
+    if ok:
+        await cb_card_detail(
+            callback,
+            CollectionCb(owner_id=callback.from_user.id, action="card_detail", filter_val="d", page=1, item_id=callback_data.item_id),
+            db_user,
+        )
 
 
 async def _render_merge(callback: CallbackQuery, db_user: User) -> None:
@@ -573,6 +601,8 @@ async def cb_list_prompt(
     db_user: User,
 ) -> None:
     async with get_session() as session:
+        if await CollectionService.reconcile_user_card_locks(session, db_user.id):
+            await session.commit()
         uc = await session.get(UserCard, callback_data.item_id)
         if uc is None or uc.user_id != db_user.id or uc.is_locked:
             await callback.answer("Bu kartani hozir sotuvga qo‘yib bo‘lmaydi.", show_alert=True)
