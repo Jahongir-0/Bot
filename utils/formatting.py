@@ -240,11 +240,15 @@ def format_profile_message(
     if showcase_cards:
         lines.append("🖼 Vitrina: " + " · ".join(f"<b>{esc(c.character_name)}</b>" for c in showcase_cards[:3]))
 
-    group_part = f"  ·  👥 Guruh <b>#{group_rank}</b>" if group_rank is not None else ""
+    if global_rank == 0:
+        rank_line = "🛡 Admin (reytingdan tashqari)"
+    else:
+        group_part = f"  ·  👥 Guruh <b>#{group_rank}</b>" if group_rank is not None else ""
+        rank_line = f"🌍 Global <b>#{global_rank}</b>{group_part}"
     lines += [
         "",
         "🏆 <b>YUTUQLAR</b>",
-        f"🌍 Global <b>#{global_rank}</b>{group_part}",
+        rank_line,
         f"🔥 Kunlik seriya: <b>{user.daily_streak}</b> kun  ·  🏅 Nishonlar: <b>{achievements_count}</b>",
     ]
     if season_points is not None:
@@ -337,15 +341,17 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
     else:
         title = "🎯 <b>YANGI LIMITLI EVENT BOSHLANDI!</b> 🎯"
 
+    ev_lvl = max(1, int(getattr(event, "card_level", 1) or 1))
     lines = [
         title,
         "━━━━━━━━━━━━━━━",
         f"🎴 <b>{esc(card.character_name)}</b>",
         f"📺 {esc(card.anime_name)}",
         f"⭐ Rank: {meta.emoji} <b>{esc(meta.name)}</b>",
-        "",
-        f"📦 Cheklangan nusxa: <b>{event.total_copies} ta</b>",
     ]
+    if ev_lvl > 1:
+        lines.append(f"⚡ Boshlang‘ich daraja: <b>Lvl {ev_lvl}</b>")
+    lines.extend(["", f"📦 Cheklangan nusxa: <b>{event.total_copies} ta</b>"])
     if state == "active":
         lines.extend(
             [
