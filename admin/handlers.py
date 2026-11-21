@@ -69,7 +69,7 @@ from utils.formatting import (
     format_group_settings,
 )
 from utils.image_check import ERR_FORMAT, validate_image_url
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, send_card_message, send_card_visual
+from utils.tg_helpers import NotCommandFilter, edit_or_answer, get_bot_username, send_card_message, send_card_visual
 
 logger = logging.getLogger(__name__)
 
@@ -211,10 +211,14 @@ async def cmd_admin_instant_drop(message: Message, db_group: Optional[Group] = N
         if group is None or card is None or drop is None:
             await message.answer("❌ Hozircha tashlash uchun mos karta mavjud emas.")
             return
+        bot_username = await get_bot_username(message.bot)
         active_event = await CardService.get_active_event(session)
+        ad_footer = await CommunityService.get_rendered_ad(
+            session, bot_username=bot_username, user=None, placement="group"
+        )
         await session.commit()
 
-    caption = format_drop_message(card, active_event=active_event)
+    caption = format_drop_message(card, active_event=active_event, ad_footer=ad_footer)
     sent_msg = await send_card_message(message.bot, group.telegram_chat_id, card, caption, reply_markup=None)
     async with get_session() as session:
         d_row = await session.get(ActiveDrop, drop.id)
@@ -318,13 +322,17 @@ async def cb_admin_card_drop_to_group(callback: CallbackQuery, callback_data: Ad
             await callback.answer("🎯 Event kartasi guruhga tashlanmaydi.", show_alert=True)
             return
         drop = await DropService.create_active_drop(session, group, card, force=True)
+        bot_username = await get_bot_username(callback.bot)
         active_event = await CardService.get_active_event(session)
+        ad_footer = await CommunityService.get_rendered_ad(
+            session, bot_username=bot_username, user=None, placement="group"
+        )
         await AdminService.log_action(
             session, callback.from_user.id, "manual_card_drop", "group", str(group.id), {"card_id": card.id, "card_code": card.card_code}
         )
         await session.commit()
 
-    caption = format_drop_message(card, active_event=active_event)
+    caption = format_drop_message(card, active_event=active_event, ad_footer=ad_footer)
     try:
         sent_msg = await send_card_visual(
             bot=callback.bot, chat_id=group.telegram_chat_id, image=card.image, caption=caption, reply_markup=None
@@ -924,9 +932,13 @@ async def cb_admin_group_control(callback: CallbackQuery, callback_data: AdminCb
             if card is None or drop is None:
                 await callback.answer("Mos karta yo‘q!", show_alert=True)
                 return
+            bot_username = await get_bot_username(callback.bot)
             active_event = await CardService.get_active_event(session)
+            ad_footer = await CommunityService.get_rendered_ad(
+                session, bot_username=bot_username, user=None, placement="group"
+            )
             await session.commit()
-            caption = format_drop_message(card, active_event=active_event)
+            caption = format_drop_message(card, active_event=active_event, ad_footer=ad_footer)
             try:
                 msg = await send_card_visual(
                     bot=callback.bot, chat_id=group.telegram_chat_id, image=card.image, caption=caption, reply_markup=None
