@@ -237,3 +237,41 @@ def schedule_delete(bot: Bot, chat_id: int, message_ids, delay: float = 6.0) -> 
     task = asyncio.create_task(_job())
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
+
+
+_BOT_USERNAMES: dict[int, str] = {}
+
+
+async def get_bot_username(bot: Optional[Bot]) -> Optional[str]:
+    if bot is None:
+        return None
+    cached = _BOT_USERNAMES.get(bot.id)
+    if cached:
+        return cached
+    try:
+        me = await bot.get_me()
+        if me and me.username:
+            _BOT_USERNAMES[bot.id] = me.username
+            return me.username
+    except Exception:
+        pass
+    return None
+
+
+async def append_private_ad(text: str, bot: Optional[Bot], db_user=None) -> str:
+    """User panel xabarining eng pastiga faol 'private'/'all' reklamani bezarar qo'shadi."""
+    try:
+        from database.session import get_session
+        from services.community_service import CommunityService
+
+        bot_username = await get_bot_username(bot)
+        async with get_session() as session:
+            footer = await CommunityService.get_rendered_ad(
+                session, bot_username=bot_username, user=db_user, placement="private"
+            )
+            if footer:
+                await session.commit()
+                return f"{text}\n\n━━━━━━━━━━━━━━━\n{footer}"
+    except Exception as exc:
+        logger.debug("append_private_ad skipped: %s", exc)
+    return text

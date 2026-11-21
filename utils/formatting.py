@@ -132,7 +132,9 @@ def event_tag(card: Card) -> str:
     return "🎯 [EVENT] " if getattr(card, "is_event_card", False) else ""
 
 
-def format_drop_message(card: Card, active_event: Optional[Event] = None) -> str:
+def format_drop_message(
+    card: Card, active_event: Optional[Event] = None, ad_footer: Optional[str] = None
+) -> str:
     """V2 yashirin drop dizayni: personaj ismi yashiriladi, reply orqali topiladi."""
     meta = get_rarity_meta(card.rarity)
     mtype = getattr(card, "media_type", "Anime") or "Anime"
@@ -147,7 +149,12 @@ def format_drop_message(card: Card, active_event: Optional[Event] = None) -> str
     if active_event is not None:
         lines.append(f"🔥 <i>Event: {esc(active_event.name)}</i>")
     lines.extend([LINE, "✍️ Personaj ismini ushbu xabarga <b>REPLY</b> qilib yozing!"])
-    return "\n".join(lines)
+    base = "\n".join(lines)
+    if ad_footer:
+        candidate = f"{base}\n\n{ad_footer}"
+        if len(candidate) <= 1020:
+            return candidate
+    return base
 
 
 def format_drop_claimed_message(card: Card, winner: User, reward_coins: int = 0) -> str:
