@@ -26,7 +26,7 @@ from services.security_backup_service import SecurityBackupService
 from services.settings_service import SettingsService
 from services.transfer_service import TransferService
 from utils.formatting import esc, format_drop_message
-from utils.tg_helpers import send_card_message
+from utils.tg_helpers import get_bot_username, send_card_message
 
 logger = logging.getLogger(__name__)
 
@@ -230,12 +230,16 @@ async def _dispatch_slot(bot: Bot, schedule_id: int) -> None:
             logger.info("No eligible card for group %s; slot %s skipped.", group.telegram_chat_id, schedule_id)
             return
 
+        bot_username = await get_bot_username(bot)
         active_event = await CardService.get_active_event(session)
+        ad_footer = await CommunityService.get_rendered_ad(
+            session, bot_username=bot_username, user=None, placement="group"
+        )
         await session.commit()
         chat_id = group.telegram_chat_id
         group_pk = group.id
 
-    caption = format_drop_message(card, active_event=active_event)
+    caption = format_drop_message(card, active_event=active_event, ad_footer=ad_footer)
     try:
         msg = await send_card_message(bot, chat_id, card, caption, reply_markup=None)
     except TelegramRetryAfter as exc:
@@ -270,6 +274,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
             finalized_auc = await AuctionWishlistService.finalize_expired_auctions(session)
             finalized_seasons = await GameplayService.finalize_expired_seasons(session)
             expired_bans = await SecurityBackupService.expire_temp_bans(session)
+            expired_ads = await CommunityService.expire_due_ads(session)
             expired_ch = await session.execute(
                 update(ForcedChannel)
                 .where(
@@ -286,7 +291,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                 q.status = "active"
                 q.is_active = True
                 q.is_dispatched = True
-            if finalized_auc or finalized_seasons or expired_bans or expired_ch.rowcount or due_msgs or due_quizzes:
+            if finalized_auc or finalized_seasons or expired_bans or expired_ads or expired_ch.rowcount or due_msgs or due_quizzes:
                 await session.commit()
 
         # Rejalashtirilgan xabarlarni yuborish
