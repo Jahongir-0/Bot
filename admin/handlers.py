@@ -1087,8 +1087,13 @@ async def _notify_user_ban_status(bot, tg_id: int, banned: bool, reason: str = "
 async def cb_admin_quick_ban(callback: CallbackQuery, callback_data: AdminCb) -> None:
     ban = callback_data.action == "quick_ban"
     async with get_session() as session:
-        u = await AdminService.set_global_ban(session, callback.from_user.id, callback_data.target_id, ban=ban)
-        await session.commit()
+        try:
+            u = await AdminService.set_global_ban(session, callback.from_user.id, callback_data.target_id, ban=ban)
+            await session.commit()
+        except PermissionError as exc:
+            await session.rollback()
+            await callback.answer(f"⛔ {exc}", show_alert=True)
+            return
     if u:
         await _notify_user_ban_status(callback.bot, u.telegram_id, ban, reason="Admin qarori")
     await callback.answer("🚫 Ban qo‘yildi!" if ban else "🔓 Bandan chiqarildi!", show_alert=True)
@@ -1330,14 +1335,19 @@ async def cb_admin_give_card_exec(callback: CallbackQuery, callback_data: AdminC
     async with get_session() as session:
         card = await AdminService.give_card_to_user(session, callback.from_user.id, callback_data.target_id, card_id)
         u = await session.get(User, callback_data.target_id) if card else None
+        granted_lvl = max(1, int(getattr(card, "preset_level", 1) or 1)) if card else 1
         await session.commit()
     if card:
+        lvl_note = f" (Lvl {granted_lvl})" if granted_lvl > 1 else ""
         if u:
             try:
-                await callback.bot.send_message(u.telegram_id, f"🎁 Admin sizga <b>{esc(card.character_name)}</b> ({esc(get_rarity_meta(card.rarity).name)}) kartasini sovg‘a qildi!")
+                await callback.bot.send_message(
+                    u.telegram_id,
+                    f"🎁 Admin sizga <b>{esc(card.character_name)}</b>{lvl_note} ({esc(get_rarity_meta(card.rarity).name)}) kartasini sovg‘a qildi!",
+                )
             except Exception:
                 pass
-        await callback.answer(f"✅ {card.character_name} berildi!", show_alert=True)
+        await callback.answer(f"✅ {card.character_name}{lvl_note} berildi!", show_alert=True)
     else:
         await callback.answer("❌ Berilmadi: karta yoki foydalanuvchi topilmadi.", show_alert=True)
     await _render_admin_user(callback, callback.from_user.id, callback_data.target_id)
@@ -1430,6 +1440,12 @@ async def fsm_admin_user_dm(message: Message, state: FSMContext) -> None:
 async def cb_admin_ban_toggle(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
     act = callback_data.action
     uid = callback_data.target_id
+    if act in ("temp_menu", "temp_hrs"):
+        async with get_session() as session:
+            u_chk = await session.get(User, uid)
+            if u_chk is not None and await AdminService.is_protected_admin_user(session, u_chk):
+                await callback.answer("⛔ Bu admin! Uni ban qilib bo‘lmaydi.", show_alert=True)
+                return
     if act == "temp_menu":
         b = InlineKeyboardBuilder()
         for lbl, hrs in [("⏱ 1 soat", 1), ("⏱ 6 soat", 6), ("⏱ 24 soat", 24), ("📅 3 kun", 72), ("📅 7 kun", 168), ("📅 30 kun", 720)]:
@@ -1445,8 +1461,13 @@ async def cb_admin_ban_toggle(callback: CallbackQuery, callback_data: AdminCb, s
 
     ban = act == "ban"
     async with get_session() as session:
-        u = await AdminService.set_global_ban(session, callback.from_user.id, uid, ban=ban)
-        await session.commit()
+        try:
+            u = await AdminService.set_global_ban(session, callback.from_user.id, uid, ban=ban)
+            await session.commit()
+        except PermissionError as exc:
+            await session.rollback()
+            await callback.answer(f"⛔ {exc}", show_alert=True)
+            return
     if u:
         await _notify_user_ban_status(callback.bot, u.telegram_id, ban, reason="Admin qarori")
     await callback.answer("🚫 Global ban qo‘yildi!" if ban else "🔓 Ban olib tashlandi!", show_alert=True)
@@ -1467,8 +1488,14 @@ async def fsm_user_temp_ban_reason(message: Message, state: FSMContext) -> None:
         if u is None:
             await message.answer("❌ User topilmadi.")
             return
-        await SecurityBackupService.ban_user(session, message.from_user.id, u, reason, hours=hrs)
-        await session.commit()
+        try:
+            await SecurityBackupService.ban_user(session, message.from_user.id, u, reason, hours=hrs)
+            await session.commit()
+        except ValueError as exc:
+            await session.rollback()
+            await message.answer(f"⛔ {exc}")
+            await _render_admin_user(message, message.from_user.id, uid)
+            return
     await _notify_user_ban_status(message.bot, u.telegram_id, True, reason=reason, hours=hrs)
     await message.answer(f"✅ User <b>{hrs} soatga</b> bloklandi!")
     await _render_admin_user(message, message.from_user.id, uid)

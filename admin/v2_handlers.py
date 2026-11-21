@@ -22,6 +22,7 @@ from config.settings import get_settings
 from database.session import get_session
 from keyboards.v2 import (
     ADMIN_HUB_CATEGORIES,
+    admin_card_give_users_kb,
     admin_rank_detail_kb,
     admin_ranks_list_kb,
     admin_rbac_menu_kb,
@@ -56,9 +57,11 @@ from models.v2_features import (
 )
 from services.admin_service import AdminService
 from services.auction_wishlist_service import AuctionWishlistService
+from services.card_level_service import CardLevelService
 from services.card_service import CardService
 from services.community_service import CommunityService
 from services.drop_service import DropService
+from services.event_service import EventService
 from services.gameplay_service import GameplayService
 from services.security_backup_service import MAX_ZIP_BYTES, SecurityBackupService
 from services.settings_service import SettingsService
@@ -81,6 +84,7 @@ class AdminV2States(StatesGroup):
     waiting_zip_cards = State()
     waiting_card_search = State()
     waiting_card_edit_val = State()
+    waiting_card_give_user_search = State()
 
     # Admins RBAC
     waiting_admin_search = State()
@@ -460,6 +464,49 @@ async def cb_v2_delete_one_confirm(callback: CallbackQuery, callback_data: AdmV2
     )
 
 
+async def _build_v2_card_detail_text(session, card: Card) -> str:
+    owners_list, drops_sent, latest_uc = [], 0, None
+    try:
+        owners_list, drops_sent = await AdminService.get_card_ownership_and_drops(session, card.id)
+    except Exception:
+        logger.exception("card_det: egalari/tashlanishlar o'qilmadi (card %s)", card.id)
+        await session.rollback()
+    try:
+        latest_uc = (
+            await session.execute(select(UserCard).where(UserCard.card_id == card.id).order_by(UserCard.id.desc()).limit(1))
+        ).scalar_one_or_none()
+    except Exception:
+        logger.exception("card_det: oxirgi egasi o'qilmadi (card %s)", card.id)
+        await session.rollback()
+    max_lvl = 10
+    try:
+        cfg = await CardLevelService.get_config(session)
+        max_lvl = max(1, int(cfg.get("max_level", 10)))
+    except Exception:
+        pass
+
+    owner_preview = ", ".join(f"{n} (×{q})" for n, q in owners_list[:4]) if owners_list else "Yo‘q"
+    acquired = getattr(latest_uc, "acquired_at", None) if latest_uc is not None else None
+    claimed_dt = acquired.strftime("%Y-%m-%d %H:%M") if acquired else "—"
+    preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
+    preset_line = (
+        f"\n⭐ <b>Boshlang‘ich daraja:</b> Lvl {preset_lvl}/{max_lvl} (Auksion / Event / Sovg‘a)"
+        if card.dropped_count == 0 and not card.is_event_card and not card.is_deleted
+        else ""
+    )
+    try:
+        return (
+            f"{format_card_block(card, show_status=True, owner_name=owner_preview)}\n"
+            f"📤 <b>Tashlangan:</b> {drops_sent} marta\n"
+            f"🗓 <b>Oxirgi olingan sana:</b> <code>{claimed_dt}</code>"
+            f"{preset_line}\n"
+            f"🆔 <b>Card DB ID:</b> <code>{card.id}</code>"
+        )
+    except Exception:
+        logger.exception("card_det: matn tuzilmadi (card %s)", card.id)
+        return f"🎴 <b>{esc(card.character_name)}</b>\n📺 {esc(card.anime_name)}{preset_line}\n🆔 Card DB ID: <code>{card.id}</code>"
+
+
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "card_det")))
 async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
@@ -469,33 +516,7 @@ async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, adm
         if card is None:
             await callback.answer("Karta topilmadi.", show_alert=True)
             return
-        # Qo'shimcha ma'lumotlar: biri xato bersa ham karta ekrani baribir ochiladi
-        owners_list, drops_sent, latest_uc = [], 0, None
-        try:
-            owners_list, drops_sent = await AdminService.get_card_ownership_and_drops(session, card.id)
-        except Exception:
-            logger.exception("card_det: egalari/tashlanishlar o'qilmadi (card %s)", card.id)
-            await session.rollback()
-        try:
-            latest_uc = (
-                await session.execute(select(UserCard).where(UserCard.card_id == card.id).order_by(UserCard.id.desc()).limit(1))
-            ).scalar_one_or_none()
-        except Exception:
-            logger.exception("card_det: oxirgi egasi o'qilmadi (card %s)", card.id)
-            await session.rollback()
-    owner_preview = ", ".join(f"{n} (×{q})" for n, q in owners_list[:4]) if owners_list else "Yo‘q"
-    acquired = getattr(latest_uc, "acquired_at", None) if latest_uc is not None else None
-    claimed_dt = acquired.strftime("%Y-%m-%d %H:%M") if acquired else "—"
-    try:
-        text = (
-            f"{format_card_block(card, show_status=True, owner_name=owner_preview)}\n"
-            f"📤 <b>Tashlangan:</b> {drops_sent} marta\n"
-            f"🗓 <b>Oxirgi olingan sana:</b> <code>{claimed_dt}</code>\n"
-            f"🆔 <b>Card DB ID:</b> <code>{card.id}</code>"
-        )
-    except Exception:
-        logger.exception("card_det: matn tuzilmadi (card %s)", card.id)
-        text = f"🎴 <b>{esc(card.character_name)}</b>\n📺 {esc(card.anime_name)}\n🆔 Card DB ID: <code>{card.id}</code>"
+        text = await _build_v2_card_detail_text(session, card)
     kb = admin_v2_card_detail_kb(
         callback.from_user.id,
         card,
@@ -511,6 +532,240 @@ async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, adm
             return
         except Exception:
             logger.exception("card_det: rasm yuborilmadi (card %s)", card.id)
+    await edit_or_answer(callback, text, reply_markup=kb)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "lvl_info")))
+async def cb_v2_card_lvl_info(callback: CallbackQuery, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    await callback.answer(
+        "⭐ Hali guruhga tashlanmagan kartaning boshlang‘ich darajasi: Auksion, Event yoki Userga berishda shu Lvl bilan beriladi.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"lvl_inc", "lvl_dec"}))))
+async def cb_v2_card_preset_level(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    delta = 1 if callback_data.act == "lvl_inc" else -1
+    async with get_session() as session:
+        card = await session.get(Card, callback_data.tid)
+        if card is None:
+            await callback.answer("Karta topilmadi.", show_alert=True)
+            return
+        if card.dropped_count != 0 or card.is_event_card or card.is_deleted:
+            await callback.answer("⚠️ Faqat hali guruhga tashlanmagan kartada o‘zgartirish mumkin.", show_alert=True)
+            return
+        cfg = await CardLevelService.get_config(session)
+        max_lvl = max(1, int(cfg.get("max_level", 10)))
+        cur_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
+        new_lvl = max(1, min(max_lvl, cur_lvl + delta))
+        if new_lvl == cur_lvl:
+            limit_msg = f"🔝 Maksimal daraja (Lvl {max_lvl})!" if delta > 0 else "🔻 Minimal daraja (Lvl 1)!"
+            await callback.answer(limit_msg, show_alert=False)
+            return
+        card.preset_level = new_lvl
+        await CommunityService.log_audit(
+            session, callback.from_user.id, "set_card_preset_level", "card", str(card.id),
+            old_value={"preset_level": cur_lvl}, new_value={"preset_level": new_lvl},
+        )
+        await session.commit()
+        text = await _build_v2_card_detail_text(session, card)
+    kb = admin_v2_card_detail_kb(
+        callback.from_user.id,
+        card,
+        tab=callback_data.ext or "all",
+        page=callback_data.p,
+        is_super=is_super_admin(callback.from_user),
+    )
+    if callback.message and callback.message.photo:
+        try:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+            await callback.answer(f"⭐ Boshlang‘ich daraja: Lvl {new_lvl}")
+            return
+        except Exception:
+            pass
+    await edit_or_answer(callback, text, reply_markup=kb)
+    try:
+        await callback.answer(f"⭐ Boshlang‘ich daraja: Lvl {new_lvl}")
+    except Exception:
+        pass
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "evt_go")))
+async def cb_v2_card_to_event(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
+    if not has_admin_perm(callback.from_user, admin_perms, "events"):
+        await callback.answer("⛔ Event bo‘limiga ruxsatingiz yo‘q.", show_alert=True)
+        return
+    async with get_session() as session:
+        card = (
+            await session.execute(
+                select(Card).where(Card.id == callback_data.tid, *EventService._candidate_conditions())
+            )
+        ).scalar_one_or_none()
+    if card is None:
+        await callback.answer("⚠️ Bu karta eventga mos emas (allaqachon tashlangan, o‘chirilgan yoki kimdadir bor).", show_alert=True)
+        return
+    from admin.handlers import AdminStates
+
+    preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
+    await state.set_state(AdminStates.evt_copies)
+    await state.update_data(
+        card_id=card.id,
+        card_name=card.character_name,
+        anime_name=card.anime_name,
+        rarity=card.rarity,
+        preset_level=preset_lvl,
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor qilish", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="card_det", tid=card.id).pack())]]
+    )
+    await edit_or_answer(
+        callback,
+        f"🎯 <b>YANGI EVENT</b>\n\n"
+        f"🎴 Karta: <b>{esc(card.character_name)}</b>\n"
+        f"⭐ Boshlang‘ich daraja: <b>Lvl {preset_lvl}</b>\n\n"
+        f"📦 Necha nusxa sotiladi? Sonni kiriting:",
+        reply_markup=cancel_kb,
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "give_u")))
+async def cb_v2_card_give_users_list(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    back_tab = callback_data.ext or "all"
+    page = max(1, callback_data.p)
+    async with get_session() as session:
+        card = await session.get(Card, callback_data.tid)
+        if card is None or card.is_deleted:
+            await callback.answer("Karta topilmadi.", show_alert=True)
+            return
+        users, total = await AdminService.get_users_for_card_grant(
+            session, callback.from_user.id, page=page, page_size=12
+        )
+    preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
+    kb = admin_card_give_users_kb(
+        callback.from_user.id,
+        card.id,
+        users,
+        page=page,
+        total=total,
+        current_admin_tg_id=callback.from_user.id,
+        back_tab=back_tab,
+        page_size=12,
+    )
+    txt = (
+        f"🎁 <b>KARTANI USERGA BERISH</b>\n\n"
+        f"🎴 Karta: <b>{esc(card.character_name)}</b> (Lvl {preset_lvl})\n"
+        f"👥 Faol userlar: <b>{total}</b> ta — kimga beramiz?"
+    )
+    await edit_or_answer(callback, txt, reply_markup=kb)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "give_us")))
+async def cb_v2_card_give_user_search(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    await state.set_state(AdminV2States.waiting_card_give_user_search)
+    await state.update_data(
+        owner_tg_id=callback.from_user.id,
+        give_card_id=callback_data.tid,
+        back_tab=callback_data.ext or "all",
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="give_u", tid=callback_data.tid, ext=callback_data.ext or "all", p=1).pack())]]
+    )
+    await edit_or_answer(
+        callback,
+        "🔍 <b>USER QIDIRISH</b>\n\nTelegram ID, ism yoki <code>@username</code> yozing:\n<i>Bekor: /cancel</i>",
+        reply_markup=cancel_kb,
+    )
+
+
+@router.message(AdminV2States.waiting_card_give_user_search, NotCommandFilter())
+async def fsm_v2_card_give_user_search(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    q = (message.text or "").strip()
+    card_id = int(data.get("give_card_id") or 0)
+    back_tab = str(data.get("back_tab") or "all")
+    await state.clear()
+    async with get_session() as session:
+        card = await session.get(Card, card_id)
+        users, total = await AdminService.get_users_for_card_grant(
+            session, message.from_user.id, page=1, page_size=12, query=q
+        )
+    if card is None:
+        await message.answer("❌ Karta topilmadi.")
+        return
+    preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
+    kb = admin_card_give_users_kb(
+        message.from_user.id,
+        card.id,
+        users,
+        page=1,
+        total=total,
+        current_admin_tg_id=message.from_user.id,
+        back_tab=back_tab,
+        page_size=12,
+        query=q,
+    )
+    if not users:
+        await message.answer(f"📭 <code>{esc(q)}</code> bo‘yicha foydalanuvchi topilmadi.", reply_markup=kb)
+        return
+    await message.answer(
+        f"🔍 <b>Qidiruv natijasi ({total} ta)</b>\n🎴 Karta: <b>{esc(card.character_name)}</b> (Lvl {preset_lvl}):",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "give_go")))
+async def cb_v2_card_give_exec(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    target_uid = int(callback_data.ext) if (callback_data.ext or "").isdigit() else 0
+    if target_uid <= 0:
+        await callback.answer("❌ Noto‘g‘ri foydalanuvchi.", show_alert=True)
+        return
+    async with get_session() as session:
+        card = await AdminService.give_card_to_user(session, callback.from_user.id, target_uid, callback_data.tid)
+        u = await session.get(User, target_uid) if card else None
+        if card is None or u is None:
+            await session.rollback()
+            await callback.answer("❌ Karta yoki foydalanuvchi topilmadi.", show_alert=True)
+            return
+        preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
+        await session.commit()
+        text = await _build_v2_card_detail_text(session, card)
+
+    lvl_note = f" (Lvl {preset_lvl})" if preset_lvl > 1 else ""
+    if u.telegram_id != callback.from_user.id:
+        try:
+            await callback.bot.send_message(
+                u.telegram_id,
+                f"🎁 Admin sizga <b>{esc(card.character_name)}</b>{lvl_note} ({esc(get_rarity_meta(card.rarity).name)}) kartasini sovg‘a qildi!",
+            )
+        except Exception:
+            pass
+    await callback.answer(f"✅ {card.character_name}{lvl_note} → {u.display_name} ga berildi!", show_alert=True)
+    kb = admin_v2_card_detail_kb(
+        callback.from_user.id,
+        card,
+        tab="all",
+        page=1,
+        is_super=is_super_admin(callback.from_user),
+    )
+    if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
+        try:
+            await send_card_message(callback.bot, callback.message.chat.id, card, text, kb)
+            await safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
+            return
+        except Exception:
+            pass
     await edit_or_answer(callback, text, reply_markup=kb)
 
 
@@ -3238,12 +3493,21 @@ async def cb_v2_security(callback: CallbackQuery, callback_data: AdmV2Cb, state:
 
 @router.message(AdminV2States.waiting_sec_target, NotCommandFilter())
 async def fsm_v2_sec_target(message: Message, state: FSMContext) -> None:
-    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
         return
     raw = (message.text or "").strip()
     if not raw:
         await message.answer("⚠️ ID yoki @username yozing.")
         return
+    if data.get("sec_kind", "user") != "group":
+        async with get_session() as session:
+            u = await UserService.find_user(session, raw)
+            if u is not None and await AdminService.is_protected_admin_user(session, u):
+                await state.clear()
+                await message.answer("⛔ Bu admin! Uni ban qilib bo‘lmaydi.")
+                await _show_security_home(message, message.from_user.id)
+                return
     await state.update_data(sec_target=raw)
     await state.set_state(None)
     b = InlineKeyboardBuilder()
@@ -3278,7 +3542,13 @@ async def fsm_v2_sec_reason(message: Message, state: FSMContext) -> None:
             if u is None:
                 await message.answer("❌ Foydalanuvchi topilmadi.")
                 return
-            await SecurityBackupService.ban_user(session, message.from_user.id, u, reason, hours=hours)
+            try:
+                await SecurityBackupService.ban_user(session, message.from_user.id, u, reason, hours=hours)
+            except ValueError as exc:
+                await session.rollback()
+                await message.answer(f"⛔ {exc}")
+                await _show_security_home(message, message.from_user.id)
+                return
             try:
                 dur = f"{hours} soatga" if hours else "umrbod"
                 await message.bot.send_message(u.telegram_id, f"🚫 <b>Siz botdan {dur} bloklandingiz!</b>\n📌 Sabab: {esc(reason)}")
