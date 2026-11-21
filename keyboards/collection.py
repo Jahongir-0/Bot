@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from models.card import Card
 from models.user_card import UserCard
 from services.collection_service import AnimeSection, CardVariant, CharacterSection, CharacterStack
-from utils.callback_data import CollectionCb, NavCb, OfferCb, WishCb
+from utils.callback_data import AucCb, CollectionCb, NavCb, OfferCb, WishCb
 from utils.constants import get_rarity_meta, list_rarities
 from utils.formatting import level_badge, event_tag
 
@@ -366,9 +366,23 @@ def card_detail_kb(
     if not is_locked:
         builder.row(
             InlineKeyboardButton(
-                text="🛒 MARKETGA QO‘YISH",
+                text="🛒 MARKETGA",
                 callback_data=CollectionCb(
                     owner_id=owner_id, action="list_prompt", filter_val="d", page=1, item_id=user_card_id
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🤖 BOTGA SOTISH",
+                callback_data=CollectionCb(
+                    owner_id=owner_id, action="bot_sell_ask", filter_val="d", page=1, item_id=user_card_id
+                ).pack(),
+            ),
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="🔨 AUKSIONGA QO‘YISH",
+                callback_data=AucCb(
+                    owner_id=owner_id, act="uc_new", aid=user_card_id
                 ).pack(),
             )
         )

@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from models.card import Card
 from models.market import Offer
 from models.user import User
-from services.market_service import ListingView
+from services.market_service import BotSellQuote, ListingView
 from services.search_service import GlobalCardSearchItem
 from utils.callback_data import MarketCb, NavCb, OfferCb, RankingCb, SearchCb, StarsCb, TransferCb, WishCb
 from utils.constants import get_rank_name_by_order, get_rarity_meta, list_rarities
@@ -67,7 +67,11 @@ def market_list_kb(
         InlineKeyboardButton(
             text=toggle_text,
             callback_data=MarketCb(owner_id=owner_id, action=toggle_action, page=1).pack(),
-        )
+        ),
+        InlineKeyboardButton(
+            text="🤖 BOTGA SOTISH",
+            callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=1).pack(),
+        ),
     )
     builder.row(
         InlineKeyboardButton(
@@ -78,6 +82,93 @@ def market_list_kb(
             text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
+    )
+    return builder.as_markup()
+
+
+def bot_sell_list_kb(
+    owner_id: int,
+    quotes: List[BotSellQuote],
+    page: int,
+    total: int,
+    page_size: int = 8,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for q in quotes:
+        meta = get_rarity_meta(q.card.rarity)
+        fav = "❤️ " if q.is_favorite else ""
+        lv_txt = f" L{q.level}" if q.level > 1 else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{fav}{meta.emoji} {q.card.character_name[:20]}{lv_txt} — {q.total_price:,} 🪙"[:60],
+                callback_data=MarketCb(
+                    owner_id=owner_id,
+                    action="bot_ask",
+                    listing_id=q.user_card_id,
+                    page=page,
+                ).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size))
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=page - 1).pack(),
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=page).pack(),
+            )
+        )
+        if page < total_pages:
+            nav.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=page + 1).pack(),
+                )
+            )
+        builder.row(*nav)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ BOZORGA",
+            callback_data=MarketCb(owner_id=owner_id, action="list", page=1).pack(),
+        ),
+        InlineKeyboardButton(
+            text="🏠 BOSH MENU",
+            callback_data=NavCb(owner_id=owner_id, target="home").pack(),
+        ),
+    )
+    return builder.as_markup()
+
+
+def bot_sell_confirm_kb(
+    owner_id: int,
+    user_card_id: int,
+    total_price: int,
+    page: int = 1,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=f"✅ SOTISH (+{total_price:,} 🪙)",
+            callback_data=MarketCb(
+                owner_id=owner_id,
+                action="bot_do",
+                listing_id=user_card_id,
+                page=page,
+            ).pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ BEKOR QILISH",
+            callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=page).pack(),
+        )
     )
     return builder.as_markup()
 
