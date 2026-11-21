@@ -22,13 +22,19 @@ from keyboards.v2 import (
     dice_pick_kb,
     games_menu_kb,
     lucky_pick_kb,
+    mines_bet_kb,
+    mines_board_kb,
     notifications_kb,
     ach_kb,
     profile_style_kb,
     quiz_list_kb,
     quiz_question_kb,
+    slots_bet_kb,
     support_menu_kb,
+    user_auction_dur_kb,
+    user_auction_pick_card_kb,
     vip_shop_kb,
+    wheel_menu_kb,
     wishlist_kb,
 )
 from models.base import ensure_utc
@@ -41,7 +47,7 @@ from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
 from services.user_service import UserService
 from utils.callback_data import AchCb, AucCb, GameCb, NavCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
-from utils.constants import PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
+from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
 from utils.formatting import header, esc, fmt_coins, format_card_block
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_admin_user, send_card_message
 
@@ -52,6 +58,7 @@ router = Router(name="v2_features")
 
 class V2UserStates(StatesGroup):
     waiting_auction_bid = State()
+    waiting_user_auc_price = State()
     waiting_support_subject = State()
     waiting_support_body = State()
     waiting_support_reply = State()
@@ -193,6 +200,7 @@ async def msg_reply_quiz_answer(message: Message, db_user: User) -> None:
 # ------------------------------------------------------------------
 _PLAYING: set = set()
 _GAME_USER_LOCKS: dict[int, asyncio.Lock] = {}
+_MINES_ACTIVE: dict[int, dict] = {}
 
 
 def _user_game_lock(user_id: int) -> asyncio.Lock:
@@ -203,49 +211,66 @@ def _user_game_lock(user_id: int) -> asyncio.Lock:
     return lock
 
 
-def _game_menu_text(
-    cfg: dict,
-    dice_en: bool,
-    dice_used: int,
-    flip_en: bool,
-    flip_used: int,
-    lucky_en: bool,
-    lucky_used: int,
-    coins: int = 0,
-) -> str:
-    d_limit = int(cfg.get("dice_daily_limit", 3))
-    f_limit = int(cfg.get("coinflip_daily_limit", 5))
-    l_limit = int(cfg.get("lucky_daily_limit", 3))
-    d_left = max(0, d_limit - dice_used)
-    f_left = max(0, f_limit - flip_used)
-    l_left = max(0, l_limit - lucky_used)
+def _game_menu_text(st: dict) -> str:
+    cfg = st["cfg"]
+    coins = st["coins"]
+
+    def _row_status(en: bool, used: int, lim: int) -> str:
+        if not en:
+            return "🔴 O‘chirilgan"
+        left = max(0, lim - used)
+        return f"🎟 Bugun qoldi: <b>{left}/{lim}</b>"
+
+    s_en, s_used, s_lim = st["slots_enabled"], st["slots_used"], st["slots_limit"]
+    m_en, m_used, m_lim = st["mines_enabled"], st["mines_used"], st["mines_limit"]
+    w_en, w_used, w_lim, w_cost = st["wheel_enabled"], st["wheel_used"], st["wheel_limit"], st["wheel_cost"]
+    d_en, d_used, d_lim = st["dice_enabled"], st["dice_used"], st["dice_limit"]
+    f_en, f_used, f_lim = st["flip_enabled"], st["flip_used"], st["flip_limit"]
+    l_en, l_used, l_lim = st["lucky_enabled"], st["lucky_used"], st["lucky_limit"]
+
+    wheel_fee = f"{w_cost:,} 🪙 chipta" if w_cost > 0 else "Bepul"
     lines = [
         "🎮 <b>MINI O‘YINLAR MARKAZI</b>",
-        "━━━━━━━━━━━━━━━",
+        LINE_SEP,
         f"🪙 Balansingiz: <b>{fmt_coins(coins)}</b> coin\n",
+        "🎰 <b>Slot 777</b> — 777 tushsa 10x, 3 bir xil 4x, juft 1.5x!",
+        f"   {_row_status(s_en, s_used, s_lim)}\n",
+        "💣 <b>Xazina ovi (Mines)</b> — 6 sandiqda 4 oltin, 2 bomba (4.0x gacha)",
+        f"   {_row_status(m_en, m_used, m_lim)}\n",
+        f"🎡 <b>Omad g‘ildiragi</b> — {wheel_fee}, Jackpot 500 🪙 + XP",
+        f"   {_row_status(w_en, w_used, w_lim)}\n",
         f"🎲 <b>Tosh o‘yini</b> — 1..6 sonni toping (+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙)",
-        f"   {'🔴 O‘chirilgan' if not dice_en else f'🎟 Bugun qoldi: <b>{d_left}/{d_limit}</b>'}\n",
+        f"   {_row_status(d_en, d_used, d_lim)}\n",
         "🪙 <b>Tanga tashlash</b> — gerb yoki raqam (2x yutuq)",
-        f"   {'🔴 O‘chirilgan' if not flip_en else f'🎟 Bugun qoldi: <b>{f_left}/{f_limit}</b>'}\n",
+        f"   {_row_status(f_en, f_used, f_lim)}\n",
         f"🃏 <b>Omadli karta</b> — bepul omad ({cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙)",
-        f"   {'🔴 O‘chirilgan' if not lucky_en else f'🎟 Bugun qoldi: <b>{l_left}/{l_limit}</b>'}",
+        f"   {_row_status(l_en, l_used, l_lim)}",
     ]
-    if not (
-        (dice_en and d_left > 0)
-        or (flip_en and f_left > 0)
-        or (lucky_en and l_left > 0)
-    ):
+    any_left = any(
+        [
+            s_en and s_used < s_lim,
+            m_en and m_used < m_lim,
+            w_en and w_used < w_lim,
+            d_en and d_used < d_lim,
+            f_en and f_used < f_lim,
+            l_en and l_used < l_lim,
+        ]
+    )
+    if not any_left:
         lines.append("\n⏳ <i>Bugungi barcha mini-o‘yin urinishlaringiz tugadi. Ertaga qayting!</i>")
     return "\n".join(lines)
 
 
-async def _game_state(user_id: int):
+async def _game_state(user_id: int) -> dict:
     async with get_session() as session:
         user = await session.get(User, user_id)
         cfg = await GameplayService.get_game_config(session)
         d_en, d_used, d_lim = await GameplayService.get_dice_status(session, user_id)
         f_en, f_used, f_lim = await GameplayService.get_coinflip_status(session, user_id)
         l_en, l_used, l_lim = await GameplayService.get_lucky_status(session, user_id)
+        s_en, s_used, s_lim = await GameplayService.get_slots_status(session, user_id)
+        m_en, m_used, m_lim = await GameplayService.get_mines_status(session, user_id)
+        w_en, w_used, w_lim, w_cost = await GameplayService.get_wheel_status(session, user_id)
         coins = int(user.coins or 0) if user is not None else 0
     return {
         "cfg": cfg,
@@ -259,29 +284,38 @@ async def _game_state(user_id: int):
         "lucky_enabled": l_en,
         "lucky_used": l_used,
         "lucky_limit": l_lim,
+        "slots_enabled": s_en,
+        "slots_used": s_used,
+        "slots_limit": s_lim,
+        "mines_enabled": m_en,
+        "mines_used": m_used,
+        "mines_limit": m_lim,
+        "wheel_enabled": w_en,
+        "wheel_used": w_used,
+        "wheel_limit": w_lim,
+        "wheel_cost": w_cost,
     }
+
+
+def _games_kb_from_state(owner_id: int, st: dict) -> InlineKeyboardMarkup:
+    has_active_mines = owner_id in _MINES_ACTIVE and not _MINES_ACTIVE[owner_id].get("finished")
+    return games_menu_kb(
+        owner_id,
+        can_dice=st["dice_enabled"] and st["dice_used"] < st["dice_limit"],
+        can_flip=st["flip_enabled"] and st["flip_used"] < st["flip_limit"],
+        can_lucky=st["lucky_enabled"] and st["lucky_used"] < st["lucky_limit"],
+        can_slots=st["slots_enabled"] and st["slots_used"] < st["slots_limit"],
+        can_mines=(st["mines_enabled"] and (st["mines_used"] < st["mines_limit"] or has_active_mines)),
+        can_wheel=st["wheel_enabled"] and st["wheel_used"] < st["wheel_limit"],
+    )
 
 
 @router.message(Command("game", "games"))
 async def cmd_game(message: Message, db_user: User) -> None:
     st = await _game_state(db_user.id)
     await message.answer(
-        _game_menu_text(
-            st["cfg"],
-            st["dice_enabled"],
-            st["dice_used"],
-            st["flip_enabled"],
-            st["flip_used"],
-            st["lucky_enabled"],
-            st["lucky_used"],
-            coins=st["coins"],
-        ),
-        reply_markup=games_menu_kb(
-            message.from_user.id,
-            can_dice=st["dice_enabled"] and st["dice_used"] < st["dice_limit"],
-            can_flip=st["flip_enabled"] and st["flip_used"] < st["flip_limit"],
-            can_lucky=st["lucky_enabled"] and st["lucky_used"] < st["lucky_limit"],
-        ),
+        _game_menu_text(st),
+        reply_markup=_games_kb_from_state(message.from_user.id, st),
     )
 
 
@@ -290,22 +324,8 @@ async def cb_games_menu(callback: CallbackQuery, db_user: User) -> None:
     st = await _game_state(db_user.id)
     await edit_or_answer(
         callback,
-        _game_menu_text(
-            st["cfg"],
-            st["dice_enabled"],
-            st["dice_used"],
-            st["flip_enabled"],
-            st["flip_used"],
-            st["lucky_enabled"],
-            st["lucky_used"],
-            coins=st["coins"],
-        ),
-        reply_markup=games_menu_kb(
-            callback.from_user.id,
-            can_dice=st["dice_enabled"] and st["dice_used"] < st["dice_limit"],
-            can_flip=st["flip_enabled"] and st["flip_used"] < st["flip_limit"],
-            can_lucky=st["lucky_enabled"] and st["lucky_used"] < st["lucky_limit"],
-        ),
+        _game_menu_text(st),
+        reply_markup=_games_kb_from_state(callback.from_user.id, st),
     )
     await callback.answer()
 
@@ -511,26 +531,371 @@ async def cb_game_lucky_pick(callback: CallbackQuery, callback_data: GameCb, db_
     await callback.answer()
 
 
+@router.callback_query(GameCb.filter(F.act == "slots"))
+async def cb_game_slots_menu(callback: CallbackQuery, db_user: User) -> None:
+    st = await _game_state(db_user.id)
+    if not st["slots_enabled"]:
+        await callback.answer("🔴 Slot mashinasi hozircha o‘chirilgan.", show_alert=True)
+        return
+    if st["slots_used"] >= st["slots_limit"]:
+        await callback.answer(f"🎟 Bugungi Slot urinishlari tugadi ({st['slots_limit']}/{st['slots_limit']}).", show_alert=True)
+        return
+    left = max(0, st["slots_limit"] - st["slots_used"])
+    await edit_or_answer(
+        callback,
+        (
+            f"🎰 <b>SLOT 777</b>\n{LINE_SEP}\n"
+            "Barabanni aylantiring va yutuq oling:\n"
+            "💎 <b>777</b> → <b>10x</b>\n"
+            "🔥 <b>3 ta bir xil</b> → <b>4x</b>\n"
+            "✨ <b>2 ta yonma-yon</b> → <b>1.5x</b>\n\n"
+            f"💰 Balans: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Bugun qoldi: <b>{left}/{st['slots_limit']}</b>\n\n"
+            "👇 Garov miqdorini tanlang:"
+        ),
+        reply_markup=slots_bet_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "slots_go"))
+async def cb_game_slots_go(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    bet = int(callback_data.val)
+    if uid in _PLAYING:
+        await callback.answer("⏳ Baraban aylanmoqda, biroz kuting...")
+        return
+    _PLAYING.add(uid)
+    try:
+        st = await _game_state(uid)
+        if not st["slots_enabled"]:
+            await callback.answer("🔴 Slot mashinasi o‘chirilgan.", show_alert=True)
+            return
+        if st["slots_used"] >= st["slots_limit"]:
+            await callback.answer(f"🎟 Bugungi urinishlar tugadi ({st['slots_limit']}/{st['slots_limit']}).", show_alert=True)
+            return
+        if st["coins"] < bet:
+            await callback.answer(f"🪙 Coinlaringiz yetarli emas ({bet:,} 🪙 kerak).", show_alert=True)
+            return
+        await callback.answer()
+        chat_id = callback.message.chat.id
+        try:
+            await callback.message.edit_text(f"🎰 Garov: <b>{bet:,} 🪙</b>\nBaraban aylanmoqda...", reply_markup=None)
+        except Exception:
+            pass
+
+        dice_msg = await callback.bot.send_dice(chat_id, emoji="🎰")
+        value = int(dice_msg.dice.value)
+        await asyncio.sleep(2.4)
+
+        used_now = st["slots_used"]
+        limit_now = st["slots_limit"]
+        new_coins = st["coins"]
+        async with _user_game_lock(uid):
+            async with get_session() as session:
+                ok, msg, _payout, _net = await GameplayService.play_slots_game(
+                    session, uid, dice_value=value, bet=bet
+                )
+                if ok:
+                    new_coins = int(
+                        (await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0
+                    )
+                    await session.commit()
+                    _en, used_now, limit_now = await GameplayService.get_slots_status(session, uid)
+                else:
+                    await session.rollback()
+        left = max(0, limit_now - used_now)
+        b = InlineKeyboardBuilder()
+        if left > 0:
+            b.row(InlineKeyboardButton(text="🎰 Yana aylantirish", callback_data=GameCb(owner_id=callback.from_user.id, act="slots").pack()))
+        b.row(
+            InlineKeyboardButton(text="🎮 O‘yinlar", callback_data=GameCb(owner_id=callback.from_user.id, act="v").pack()),
+            InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=callback.from_user.id, target="home").pack()),
+        )
+        txt = msg + (
+            f"\n{LINE_SEP}\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qoldi: <b>{left}/{limit_now}</b>"
+            if ok
+            else ""
+        )
+        await callback.bot.send_message(chat_id, txt, reply_markup=b.as_markup())
+    except Exception:
+        logger.exception("Slot o'yinida xato")
+        await callback.bot.send_message(callback.message.chat.id, "⚠️ O‘yinda xatolik bo‘ldi. Qayta urinib ko‘ring.")
+    finally:
+        _PLAYING.discard(uid)
+
+
+@router.callback_query(GameCb.filter(F.act == "mines"))
+async def cb_game_mines_menu(callback: CallbackQuery, db_user: User) -> None:
+    uid = db_user.id
+    gstate = _MINES_ACTIVE.get(uid)
+    if gstate and not gstate.get("finished"):
+        hits = int(gstate.get("safe_hits", 0))
+        bet = int(gstate.get("bet", 0))
+        mult = GameplayService.MINES_MULTIPLIERS[min(hits, len(GameplayService.MINES_MULTIPLIERS) - 1)]
+        cash_amt = int(round(bet * mult)) if hits > 0 else 0
+        await edit_or_answer(
+            callback,
+            (
+                f"💣 <b>XAZINA OVI — DAVOM ETISH</b>\n{LINE_SEP}\n"
+                f"💰 Garov: <b>{bet:,} 🪙</b> · Topildi: <b>{hits}/4</b>\n"
+                f"📈 Joriy yutuq: <b>{cash_amt:,} 🪙</b>\n\n"
+                "👇 Yopiq sandiqlardan birini oching:"
+            ),
+            reply_markup=mines_board_kb(callback.from_user.id, gstate["opened"], gstate["bombs"], False, cashout_amt=cash_amt),
+        )
+        await callback.answer()
+        return
+
+    st = await _game_state(uid)
+    if not st["mines_enabled"]:
+        await callback.answer("🔴 Xazina ovi hozircha o‘chirilgan.", show_alert=True)
+        return
+    if st["mines_used"] >= st["mines_limit"]:
+        await callback.answer(f"🎟 Bugungi urinishlar tugadi ({st['mines_limit']}/{st['mines_limit']}).", show_alert=True)
+        return
+    left = max(0, st["mines_limit"] - st["mines_used"])
+    await edit_or_answer(
+        callback,
+        (
+            f"💣 <b>XAZINA OVI (MINES)</b>\n{LINE_SEP}\n"
+            "6 ta sandiq ichida <b>4 ta oltin</b> 💎 va <b>2 ta bomba</b> 💣 bor!\n"
+            "Har bir oltin yutuqni oshiradi: <b>1.35x → 1.85x → 2.60x → 4.00x</b>\n"
+            "Istalgan payt <b>«💰 OLIB CHIQISH»</b> tugmasini bosib yutuqni saqlashingiz mumkin.\n\n"
+            f"💰 Balans: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Bugun qoldi: <b>{left}/{st['mines_limit']}</b>\n\n"
+            "👇 Garovni tanlang:"
+        ),
+        reply_markup=mines_bet_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "mines_go"))
+async def cb_game_mines_go(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    async with _user_game_lock(uid):
+        prev = _MINES_ACTIVE.get(uid)
+        if prev and not prev.get("finished"):
+            await callback.answer("⚠️ Avval tugallanmagan Xazina ovi o‘yinini yakunlang!", show_alert=True)
+            return
+        async with get_session() as session:
+            ok, msg, state_obj = await GameplayService.start_mines_game(session, uid, callback_data.val)
+            if ok and state_obj is not None:
+                await session.commit()
+                _MINES_ACTIVE[uid] = state_obj
+            else:
+                await session.rollback()
+    if not ok or state_obj is None:
+        await callback.answer(msg[:190], show_alert=True)
+        return
+    await edit_or_answer(
+        callback,
+        (
+            f"💣 <b>XAZINA OVI BOSHLANDI!</b>\n{LINE_SEP}\n"
+            f"💰 Garov: <b>{state_obj['bet']:,} 🪙</b>\n"
+            "💎 4 ta oltin · 💣 2 ta bomba\n\n"
+            "👇 Sandiq tanlang:"
+        ),
+        reply_markup=mines_board_kb(callback.from_user.id, [], state_obj["bombs"], False, cashout_amt=0),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "mines_open"))
+async def cb_game_mines_open(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    async with _user_game_lock(uid):
+        gstate = _MINES_ACTIVE.get(uid)
+        if not gstate or gstate.get("finished"):
+            await callback.answer("Bu o‘yin yakunlangan. Yangi o‘yin boshlang!", show_alert=True)
+            return
+        new_coins = 0
+        used_now = 0
+        limit_now = 5
+        async with get_session() as session:
+            outcome, payout, msg = await GameplayService.step_mines_game(session, uid, gstate, callback_data.val)
+            if outcome != "invalid":
+                new_coins = int(
+                    (await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0
+                )
+                await session.commit()
+                _en, used_now, limit_now = await GameplayService.get_mines_status(session, uid)
+            else:
+                await session.rollback()
+    if outcome == "invalid":
+        await callback.answer(msg[:190], show_alert=True)
+        return
+    finished = bool(gstate.get("finished"))
+    if finished:
+        _MINES_ACTIVE.pop(uid, None)
+    left = max(0, limit_now - used_now)
+    footer = f"\n{LINE_SEP}\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qoldi: <b>{left}/{limit_now}</b>" if finished else ""
+    await edit_or_answer(
+        callback,
+        msg + footer,
+        reply_markup=mines_board_kb(
+            callback.from_user.id,
+            gstate["opened"],
+            gstate["bombs"],
+            finished,
+            cashout_amt=(payout if outcome == "safe" else 0),
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "mines_cash"))
+async def cb_game_mines_cash(callback: CallbackQuery, db_user: User) -> None:
+    uid = db_user.id
+    async with _user_game_lock(uid):
+        gstate = _MINES_ACTIVE.get(uid)
+        if not gstate or gstate.get("finished"):
+            await callback.answer("Faol o‘yin topilmadi.", show_alert=True)
+            return
+        new_coins = 0
+        used_now = 0
+        limit_now = 5
+        async with get_session() as session:
+            outcome, _payout, msg = await GameplayService.cashout_mines_game(session, uid, gstate)
+            if outcome != "invalid":
+                new_coins = int(
+                    (await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0
+                )
+                await session.commit()
+                _en, used_now, limit_now = await GameplayService.get_mines_status(session, uid)
+            else:
+                await session.rollback()
+    if outcome == "invalid":
+        await callback.answer(msg[:190], show_alert=True)
+        return
+    _MINES_ACTIVE.pop(uid, None)
+    left = max(0, limit_now - used_now)
+    await edit_or_answer(
+        callback,
+        f"{msg}\n{LINE_SEP}\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qoldi: <b>{left}/{limit_now}</b>",
+        reply_markup=mines_board_kb(callback.from_user.id, gstate["opened"], gstate["bombs"], True, cashout_amt=0),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "mines_noop"))
+async def cb_game_mines_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "wheel"))
+async def cb_game_wheel_menu(callback: CallbackQuery, db_user: User) -> None:
+    st = await _game_state(db_user.id)
+    if not st["wheel_enabled"]:
+        await callback.answer("🔴 Omad g‘ildiragi hozircha o‘chirilgan.", show_alert=True)
+        return
+    if st["wheel_used"] >= st["wheel_limit"]:
+        await callback.answer(f"🎟 Bugungi urinishlar tugadi ({st['wheel_limit']}/{st['wheel_limit']}).", show_alert=True)
+        return
+    left = max(0, st["wheel_limit"] - st["wheel_used"])
+    cost = st["wheel_cost"]
+    fee_line = f"🎫 Chipta narxi: <b>{cost:,} 🪙</b>" if cost > 0 else "🎫 Chipta: <b>BEPUL</b>"
+    await edit_or_answer(
+        callback,
+        (
+            f"🎡 <b>OMAD G‘ILDIRAGI</b>\n{LINE_SEP}\n"
+            "Sektorlar:\n"
+            "• 💎 Jackpot: <b>500 🪙</b> + 30 XP\n"
+            "• 🔥 Katta yutuq: <b>220 🪙</b> + 20 XP\n"
+            "• 🪙 Oltin: <b>140 🪙</b> · Kichik: <b>75 🪙</b>\n"
+            "• ⚡ Energiya: <b>25 🪙 + 50 XP</b>\n\n"
+            f"{fee_line}\n"
+            f"💰 Balans: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Bugun qoldi: <b>{left}/{st['wheel_limit']}</b>"
+        ),
+        reply_markup=wheel_menu_kb(callback.from_user.id, cost),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "wheel_go"))
+async def cb_game_wheel_go(callback: CallbackQuery, db_user: User) -> None:
+    uid = db_user.id
+    used_now = 0
+    limit_now = 3
+    new_coins = 0
+    async with _user_game_lock(uid):
+        async with get_session() as session:
+            ok, msg, _coins = await GameplayService.play_wheel_game(session, uid)
+            if ok:
+                new_coins = int(
+                    (await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0
+                )
+                await session.commit()
+                _en, used_now, limit_now, _cost = await GameplayService.get_wheel_status(session, uid)
+            else:
+                await session.rollback()
+    if not ok:
+        await callback.answer(msg[:190], show_alert=True)
+        return
+    left = max(0, limit_now - used_now)
+    b = InlineKeyboardBuilder()
+    if left > 0:
+        b.row(InlineKeyboardButton(text="🎡 Yana aylantirish", callback_data=GameCb(owner_id=callback.from_user.id, act="wheel").pack()))
+    b.row(
+        InlineKeyboardButton(text="🎮 O‘yinlar", callback_data=GameCb(owner_id=callback.from_user.id, act="v").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=callback.from_user.id, target="home").pack()),
+    )
+    await edit_or_answer(
+        callback,
+        (
+            f"{msg}\n{LINE_SEP}\n"
+            f"💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n"
+            f"🎟 Qoldi: <b>{left}/{limit_now}</b>"
+        ),
+        reply_markup=b.as_markup(),
+    )
+    await callback.answer()
+
+
 # ------------------------------------------------------------------
 # AUCTION (/auction)
 # ------------------------------------------------------------------
-async def _show_auctions(target, owner_id: int) -> None:
+async def _show_auctions(
+    target,
+    owner_id: int,
+    page: int = 1,
+    my_only: bool = False,
+    db_user: Optional[User] = None,
+) -> None:
+    page = max(1, int(page))
     async with get_session() as session:
-        items, total = await AuctionWishlistService.list_active_auctions(session, page=1, page_size=10)
+        if my_only and db_user is not None:
+            items, total = await AuctionWishlistService.list_user_created_auctions(session, db_user.id, page=page, page_size=10)
+        else:
+            items, total = await AuctionWishlistService.list_active_auctions(session, page=page, page_size=10)
+    title_hdr = "📦 <b>MENING AUKSIONLARIM</b>" if my_only else "🔨 <b>AUKSION</b>"
     if not items:
+        empty_msg = (
+            f"{header(title_hdr)}\n📭 Sizda hozircha faol auksion yo‘q.\n\n"
+            "💡 «➕ Auksionga qo‘yish» tugmasi orqali o‘z kartangizni kim oshdi savdosiga qo‘yishingiz mumkin."
+            if my_only
+            else f"{header(title_hdr)}\n📭 Hozircha faol auksion yo‘q.\n\n💡 Istasangiz «➕ Auksionga qo‘yish» orqali birinchi bo‘lib kartangizni qo‘ying!"
+        )
         await edit_or_answer(
             target,
-            f"{header('🔨 <b>AUKSION</b>')}\n📭 Hozircha faol auksion yo‘q.\n\n💡 Yangi auksion boshlanganda xabar beramiz.",
-            reply_markup=auctions_list_kb(owner_id, []),
+            empty_msg,
+            reply_markup=auctions_list_kb(owner_id, [], page=1, total=0, my_only=my_only),
         )
         return
-    lines = [header("🔨 <b>AUKSION</b>"), f"🟢 Faol auksionlar: <b>{total}</b> ta\n"]
+    lines = [header(title_hdr), f"🟢 Faol auksionlar: <b>{total}</b> ta\n"]
     for auc, card in items:
         meta = get_rarity_meta(card.rarity)
-        lines.append(f"{meta.emoji} <b>{esc(card.character_name)}</b>")
+        tag = " 👤" if auc.seller_user_id else ""
+        lines.append(f"{meta.emoji} <b>{esc(card.character_name)}</b>{tag}")
         lines.append(f"      💰 {fmt_coins(auc.current_price)} 🪙 · 📈 {auc.bid_count} stavka")
     lines.append("\n👇 Auksionni tanlang:")
-    await edit_or_answer(target, "\n".join(lines), reply_markup=auctions_list_kb(owner_id, items))
+    await edit_or_answer(
+        target,
+        "\n".join(lines),
+        reply_markup=auctions_list_kb(owner_id, items, page=page, total=total, my_only=my_only),
+    )
 
 
 @router.message(Command("auction"))
@@ -539,30 +904,188 @@ async def cmd_auction(message: Message) -> None:
 
 
 @router.callback_query(AucCb.filter(F.act == "v"))
-async def cb_auction_list(callback: CallbackQuery) -> None:
-    await _show_auctions(callback, callback.from_user.id)
+async def cb_auction_list(callback: CallbackQuery, callback_data: AucCb, state: FSMContext) -> None:
+    await state.clear()
+    await _show_auctions(callback, callback.from_user.id, page=max(1, callback_data.p))
+    await callback.answer()
+
+
+@router.callback_query(AucCb.filter(F.act == "mine"))
+async def cb_auction_mine(callback: CallbackQuery, callback_data: AucCb, db_user: User) -> None:
+    await _show_auctions(callback, callback.from_user.id, page=max(1, callback_data.p), my_only=True, db_user=db_user)
+    await callback.answer()
+
+
+@router.callback_query(AucCb.filter(F.act == "new"))
+async def cb_auction_new(callback: CallbackQuery, callback_data: AucCb, db_user: User) -> None:
+    page = max(1, callback_data.p)
+    async with get_session() as session:
+        rows, total = await AuctionWishlistService.list_user_sellable_cards(session, db_user.id, page=page, page_size=8)
+    if not rows:
+        await callback.answer("📭 Auksionga qo‘yish uchun bo‘sh kartangiz yo‘q (qulflanganlar chiqmaydi).", show_alert=True)
+        return
+    await edit_or_answer(
+        callback,
+        (
+            f"{header('🔨 <b>AUKSIONGA KARTA QO‘YISH</b>')}\n"
+            f"📦 Bo‘sh kartalar: <b>{total}</b> ta\n\n"
+            "👇 Qaysi kartangizni auksionga qo‘ymoqchisiz?"
+        ),
+        reply_markup=user_auction_pick_card_kb(callback.from_user.id, rows, page=page, total=total),
+    )
+    await callback.answer()
+
+
+@router.callback_query(AucCb.filter(F.act == "uc_new"))
+async def cb_auction_pick_uc(callback: CallbackQuery, callback_data: AucCb, state: FSMContext, db_user: User) -> None:
+    uc_id = int(callback_data.aid)
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(UserCard, Card)
+                .join(Card, Card.id == UserCard.card_id)
+                .where(UserCard.id == uc_id, UserCard.user_id == db_user.id)
+            )
+        ).first()
+    if row is None:
+        await callback.answer("❌ Karta topilmadi.", show_alert=True)
+        return
+    uc, card = row
+    if uc.is_locked:
+        await callback.answer("🔒 Bu karta hozir bozorda yoki boshqa bitimda band!", show_alert=True)
+        return
+    await state.set_state(V2UserStates.waiting_user_auc_price)
+    await state.update_data(owner_tg_id=callback.from_user.id, auc_uc_id=uc.id, auc_card_id=card.id)
+    meta = get_rarity_meta(card.rarity)
+    lv_txt = f" · Lv.{uc.level}" if int(uc.level or 1) > 1 else ""
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor qilish", callback_data=AucCb(owner_id=callback.from_user.id, act="v").pack())]]
+    )
+    await edit_or_answer(
+        callback,
+        (
+            f"🔨 <b>AUKSION YARATISH (1/2)</b>\n{LINE_SEP}\n"
+            f"🎴 Karta: {meta.emoji} <b>{esc(card.character_name)}</b>{lv_txt}\n\n"
+            f"💰 Boshlang‘ich narxni yozing (<b>{MIN_CARD_PRICE:,}</b> – <b>{MAX_CARD_PRICE:,}</b> 🪙):\n"
+            "<i>Bekor qilish: /cancel</i>"
+        ),
+        reply_markup=cancel_kb,
+    )
+    await callback.answer()
+
+
+@router.message(V2UserStates.waiting_user_auc_price, NotCommandFilter())
+async def fsm_user_auc_price(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Faqat butun coin sonini kiriting (masalan: <code>5000</code>).")
+        return
+    price = int(raw)
+    if not (MIN_CARD_PRICE <= price <= MAX_CARD_PRICE):
+        await message.answer(f"⚠️ Boshlang‘ich narx <b>{MIN_CARD_PRICE:,}</b> dan <b>{MAX_CARD_PRICE:,}</b> 🪙 gacha bo‘lishi kerak.")
+        return
+    uc_id = int(data["auc_uc_id"])
+    await state.update_data(auc_price=price)
+    await state.set_state(None)
+    await message.answer(
+        (
+            f"🔨 <b>AUKSION YARATISH (2/2)</b>\n{LINE_SEP}\n"
+            f"💰 Boshlang‘ich narx: <b>{price:,} 🪙</b>\n\n"
+            "⏳ Auksion qancha vaqt davom etsin?"
+        ),
+        reply_markup=user_auction_dur_kb(message.from_user.id, uc_id),
+    )
+
+
+@router.callback_query(AucCb.filter(F.act == "dur"))
+async def cb_auction_dur(callback: CallbackQuery, callback_data: AucCb, state: FSMContext, db_user: User) -> None:
+    data = await state.get_data()
+    if int(data.get("auc_uc_id") or 0) != int(callback_data.aid) or not data.get("auc_price"):
+        await callback.answer("⏳ Ma’lumot eskirgan. Qaytadan boshlang.", show_alert=True)
+        return
+    price = int(data["auc_price"])
+    card_id = int(data["auc_card_id"])
+    uc_id = int(data["auc_uc_id"])
+    hours = max(1, min(72, int(callback_data.amt)))
+    min_step = max(50, min(5000, ((price // 10) // 50) * 50 or 50))
+    await state.clear()
+
+    async with get_session() as session:
+        ok, msg, _auc = await AuctionWishlistService.create_auction(
+            session,
+            card_id=card_id,
+            start_price=price,
+            hours=hours,
+            created_by_tg_id=callback.from_user.id,
+            min_step=min_step,
+            seller_user_id=db_user.id,
+            user_card_id=uc_id,
+        )
+        if ok:
+            await session.commit()
+        else:
+            await session.rollback()
+    await callback.answer(msg[:190], show_alert=True)
+    await _show_auctions(callback, callback.from_user.id, my_only=True, db_user=db_user)
+
+
+@router.callback_query(AucCb.filter(F.act == "cancel_u"))
+async def cb_auction_cancel_user(callback: CallbackQuery, callback_data: AucCb, db_user: User) -> None:
+    async with get_session() as session:
+        ok, msg = await AuctionWishlistService.cancel_user_auction(session, callback_data.aid, db_user.id)
+        if ok:
+            await session.commit()
+        else:
+            await session.rollback()
+    await callback.answer(msg[:190], show_alert=True)
+    await _show_auctions(callback, callback.from_user.id, my_only=True, db_user=db_user)
 
 
 @router.callback_query(AucCb.filter(F.act == "det"))
-async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb) -> None:
+async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb, db_user: User) -> None:
     async with get_session() as session:
         det = await AuctionWishlistService.get_auction_detail(session, callback_data.aid)
+        seller_name = "🏛 Tizim (Admin)"
+        uc_level = 1
+        if det is not None:
+            auc_tmp = det[0]
+            if auc_tmp.seller_user_id:
+                s_user = await session.get(User, auc_tmp.seller_user_id)
+                if s_user:
+                    seller_name = f"👤 {esc(s_user.display_name)}"
+            if auc_tmp.user_card_id:
+                uc = await session.get(UserCard, auc_tmp.user_card_id)
+                if uc:
+                    uc_level = int(uc.level or 1)
     if det is None:
         await callback.answer("Auksion topilmadi.", show_alert=True)
         return
     auc, card, leader = det
     leader_name = esc(leader.display_name) if leader else "Hali yo‘q"
+    is_seller = bool(auc.seller_user_id and auc.seller_user_id == db_user.id)
+    lvl_line = f"⚡ Daraja: <b>Lv.{uc_level}</b>\n" if uc_level > 1 else ""
     txt = (
         f"{header(f'🔨 <b>AUKSION #{auc.id}</b>')}\n"
         f"{format_card_block(card)}\n"
         f"{LINE_SEP}\n"
+        f"🏷 Sotuvchi: <b>{seller_name}</b>\n"
+        f"{lvl_line}"
         f"💰 Joriy narx: <b>{fmt_coins(auc.current_price)} 🪙</b>\n"
         f"📈 Eng kam qadam: <b>+{fmt_coins(auc.min_step)}</b> 🪙\n"
         f"👑 Yetakchi: <b>{leader_name}</b> · {auc.bid_count} stavka\n"
         f"⏳ Tugaydi: <b>{ensure_utc(auc.ends_at):%d.%m.%Y %H:%M} UTC</b>"
     )
     if callback.message:
-        await send_card_message(callback.bot, callback.message.chat.id, card, txt, auction_detail_kb(callback.from_user.id, auc))
+        await send_card_message(
+            callback.bot,
+            callback.message.chat.id,
+            card,
+            txt,
+            auction_detail_kb(callback.from_user.id, auc, is_seller=is_seller),
+        )
     await callback.answer()
 
 

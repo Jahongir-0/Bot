@@ -27,6 +27,7 @@ from services.card_level_service import CardLevelService
 from services.collection_service import CollectionService
 from services.gameplay_service import GameplayService
 from services.market_service import MarketService
+from services.settings_service import SettingsService
 from utils.callback_data import CollectionCb, NavCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.constants import get_rank_name_by_order, get_rarity_meta
@@ -285,6 +286,7 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
         qty = await CollectionService.count_copies(session, db_user.id, card.id)
         reps = await CollectionService.get_card_group_reps(session, card.id)
         lvl_cfg = await CardLevelService.get_config(session)
+        rcfg = await SettingsService.get_rarity_config(session)
 
     char_rep_id = reps[1] if reps else card.id
     target_uc_id = unlocked_copy.id if unlocked_copy else uc.id
@@ -292,11 +294,12 @@ async def cb_card_detail(callback: CallbackQuery, callback_data: CollectionCb, d
     level = int(getattr(uc, "level", 1) or 1)
     max_level = int(lvl_cfg["max_level"])
     power = CardLevelService.power(card.rarity, level, lvl_cfg)
+    card_val = CardLevelService.rank_value_for_card(card, rcfg)
     if level >= max_level:
         level_label = ""
         level_extra = "👑 <b>Maksimal daraja!</b>"
     else:
-        cost = CardLevelService.upgrade_cost(card.base_value, level, lvl_cfg)
+        cost = CardLevelService.upgrade_cost(card_val, level, lvl_cfg)
         level_label = f"⬆️ DARAJANI KO‘TARISH · 🪙 {cost:,}"
         level_extra = f"➡️ Keyingi daraja: <b>{cost:,}</b> 🪙 yoki shu kartani yana olish"
     frame = level_frame(level)
@@ -417,12 +420,14 @@ async def cb_level_ask(callback: CallbackQuery, callback_data: CollectionCb, db_
             return
         card = await session.get(Card, uc.card_id)
         cfg = await CardLevelService.get_config(session)
+        rcfg = await SettingsService.get_rarity_config(session)
         fresh = await session.get(User, db_user.id)
     level = int(uc.level or 1)
     if level >= int(cfg["max_level"]):
         await callback.answer("👑 Karta allaqachon eng yuqori darajada.", show_alert=True)
         return
-    cost = CardLevelService.upgrade_cost(card.base_value, level, cfg)
+    card_val = CardLevelService.rank_value_for_card(card, rcfg)
+    cost = CardLevelService.upgrade_cost(card_val, level, cfg)
     new_power = CardLevelService.power(card.rarity, level + 1, cfg)
     text = (
         "⬆️ <b>DARAJANI KO‘TARISH</b>\n"
@@ -611,4 +616,88 @@ async def fsm_sell_price(message: Message, state: FSMContext, db_user: User) -> 
     await message.answer(
         f"✅ <b>{esc(res.card.character_name)}</b> marketga <b>{price:,} 🪙</b> narxda qo‘yildi!",
         reply_markup=back_home_kb(message.from_user.id, "market"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kartani to'g'ridan-to'g'ri botga sotish (karta tafsilotidan)
+# ---------------------------------------------------------------------------
+@router.callback_query(CollectionCb.filter(F.action == "bot_sell_ask"))
+async def cb_collection_bot_sell_ask(
+    callback: CallbackQuery,
+    callback_data: CollectionCb,
+    db_user: User,
+) -> None:
+    async with get_session() as session:
+        ok, msg, q = await MarketService.get_bot_sell_quote(session, db_user.id, callback_data.item_id)
+    if not ok or q is None:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    meta = get_rarity_meta(q.card.rarity)
+    warn = "\n⚠️ <i>Diqqat: bu karta sevimli/vitrinada belgilangan!</i>" if (q.is_favorite or q.is_showcased) else ""
+    bonus_line = (
+        f"\n⭐ Daraja bonusi (Lvl {q.level}, +{q.bonus_pct}%/lvl): <b>+{fmt_coins(q.bonus_coins)} 🪙</b>"
+        if q.bonus_coins > 0
+        else (f"\n⭐ Daraja: <b>{q.level}</b>" if q.level > 1 else "")
+    )
+    text = (
+        "🤖 <b>BOTGA SOTISH</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"{meta.emoji} <b>{esc(q.card.character_name)}</b> ({esc(q.card.anime_name)})\n"
+        f"💎 Rank narxi: <b>{fmt_coins(q.base_rank_value)} 🪙</b>"
+        f"{bonus_line}\n"
+        f"💰 <b>Jami to‘lov: {fmt_coins(q.total_price)} 🪙</b>"
+        f"{warn}\n\n"
+        "<i>Karta botga qaytariladi va coin darhol hisobingizga tushadi.</i>"
+    )
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(
+            text=f"✅ Botga sotish (+{q.total_price:,} 🪙)",
+            callback_data=CollectionCb(
+                owner_id=callback.from_user.id, action="bot_sell_do", filter_val="d", page=1, item_id=q.user_card_id
+            ).pack(),
+        )
+    )
+    b.row(
+        InlineKeyboardButton(
+            text="❌ Bekor qilish",
+            callback_data=CollectionCb(
+                owner_id=callback.from_user.id, action="card_detail", filter_val="d", page=1, item_id=q.user_card_id
+            ).pack(),
+        )
+    )
+    try:
+        if callback.message and callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
+            await callback.answer()
+            return
+    except Exception:
+        pass
+    await edit_or_answer(callback, text, reply_markup=b.as_markup())
+
+
+@router.callback_query(CollectionCb.filter(F.action == "bot_sell_do"))
+async def cb_collection_bot_sell_do(
+    callback: CallbackQuery,
+    callback_data: CollectionCb,
+    db_user: User,
+) -> None:
+    async with get_session() as session:
+        res = await MarketService.sell_to_bot(session, db_user.id, callback_data.item_id)
+        if res.success:
+            await session.commit()
+        else:
+            await session.rollback()
+    if not res.success:
+        await callback.answer(f"❌ {res.message}", show_alert=True)
+        return
+    await callback.answer(f"✅ +{res.price_paid:,} 🪙!", show_alert=True)
+    await edit_or_answer(
+        callback,
+        f"🤖 <b>KARTA BOTGA SOTILDI!</b>\n\n"
+        f"🎴 <b>{esc(res.card.character_name)}</b> (Lvl {res.level_before})\n"
+        f"💰 Hisobingizga tushdi: <b>+{fmt_coins(res.price_paid)} 🪙</b>",
+        reply_markup=back_home_kb(callback.from_user.id, "cards"),
     )

@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 
 from database.session import get_session
 from keyboards.main_menu import back_home_kb
-from keyboards.market import listing_detail_kb, market_list_kb
+from keyboards.market import bot_sell_confirm_kb, bot_sell_list_kb, listing_detail_kb, market_list_kb
 from models.card import Card
 from models.user import User
 from models.user_card import UserCard
@@ -245,3 +245,107 @@ async def cb_cancel_listing(callback: CallbackQuery, callback_data: MarketCb, db
 
     await callback.answer(res.message, show_alert=not res.success)
     await _show_market(callback, callback.from_user.id, db_user, page=1, my_only=True)
+
+
+# ------------------------------------------------------------------
+# Bot Market: kartani botga sotish (rank narxi + level bonusi)
+# ------------------------------------------------------------------
+async def _show_bot_sell_list(target, owner_id: int, db_user: User, page: int = 1) -> None:
+    async with get_session() as session:
+        quotes, total = await MarketService.get_bot_sellable_cards(
+            session=session,
+            user_id=db_user.id,
+            page=page,
+            page_size=8,
+        )
+    if not quotes:
+        await edit_or_answer(
+            target,
+            f"{header('🤖 <b>BOTGA SOTISH</b>')}\n"
+            "📭 Hozircha botga sotish uchun bo‘sh kartalaringiz yo‘q.\n\n"
+            "<i>Marketda, auksionda yoki almashuvda turgan kartalar ko‘rsatilmaydi.</i>",
+            reply_markup=bot_sell_list_kb(owner_id, [], page=1, total=0, page_size=8),
+        )
+        return
+    lines = [
+        header("🤖 <b>BOTGA SOTISH</b>"),
+        f"📦 Mavjud bo‘sh kartalar: <b>{total}</b> ta\n",
+        "Narx avtomatik <b>rank narxi + karta darajasi bonusi</b> asosida hisoblanadi.\n",
+    ]
+    for q in quotes:
+        meta = get_rarity_meta(q.card.rarity)
+        lv = f" · ⭐ Lvl {q.level}" if q.level > 1 else ""
+        lines.append(
+            f"{meta.emoji} <b>{esc(q.card.character_name)}</b>{lv} — <b>{fmt_coins(q.total_price)} 🪙</b>"
+        )
+    lines.append("\n👇 Botga sotmoqchi bo‘lgan kartangizni tanlang:")
+    await edit_or_answer(
+        target,
+        "\n".join(lines),
+        reply_markup=bot_sell_list_kb(owner_id, quotes, page=page, total=total, page_size=8),
+    )
+
+
+@router.callback_query(MarketCb.filter(F.action == "bot_list"))
+async def cb_market_bot_list(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
+    await _show_bot_sell_list(callback, callback.from_user.id, db_user, page=max(1, callback_data.page))
+
+
+@router.callback_query(MarketCb.filter(F.action == "bot_ask"))
+async def cb_market_bot_ask(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
+    async with get_session() as session:
+        ok, msg, q = await MarketService.get_bot_sell_quote(session, db_user.id, callback_data.listing_id)
+    if not ok or q is None:
+        await callback.answer(msg, show_alert=True)
+        await _show_bot_sell_list(callback, callback.from_user.id, db_user, page=max(1, callback_data.page))
+        return
+    meta = get_rarity_meta(q.card.rarity)
+    warn = "\n⚠️ <i>Diqqat: bu karta sevimli/vitrinada belgilangan!</i>" if (q.is_favorite or q.is_showcased) else ""
+    bonus_line = (
+        f"\n⭐ Daraja bonusi (Lvl {q.level}, +{q.bonus_pct}%/lvl): <b>+{fmt_coins(q.bonus_coins)} 🪙</b>"
+        if q.bonus_coins > 0
+        else (f"\n⭐ Daraja: <b>{q.level}</b>" if q.level > 1 else "")
+    )
+    txt = (
+        f"{header('🤖 <b>BOTGA SOTISHNI TASDIQLANG</b>')}\n"
+        f"{meta.emoji} <b>{esc(q.card.character_name)}</b> ({esc(q.card.anime_name)})\n"
+        f"🏷 Rank: <b>{esc(meta.name)}</b> · 🆔 <code>{esc(q.card.card_code)}</code>\n"
+        f"{LINE}\n"
+        f"💎 Rank narxi: <b>{fmt_coins(q.base_rank_value)} 🪙</b>"
+        f"{bonus_line}\n"
+        f"💰 <b>Bot to‘laydigan narx: {fmt_coins(q.total_price)} 🪙</b>"
+        f"{warn}\n\n"
+        "<i>Sotilgach karta botga qaytariladi va coin darhol hisobingizga tushadi.</i>"
+    )
+    await edit_or_answer(
+        callback,
+        txt,
+        reply_markup=bot_sell_confirm_kb(
+            callback.from_user.id,
+            q.user_card_id,
+            q.total_price,
+            page=max(1, callback_data.page),
+        ),
+    )
+
+
+@router.callback_query(MarketCb.filter(F.action == "bot_do"))
+async def cb_market_bot_do(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
+    async with get_session() as session:
+        res = await MarketService.sell_to_bot(session, db_user.id, callback_data.listing_id)
+        if res.success:
+            await session.commit()
+        else:
+            await session.rollback()
+    if not res.success:
+        await callback.answer(f"❌ {res.message}", show_alert=True)
+        await _show_bot_sell_list(callback, callback.from_user.id, db_user, page=max(1, callback_data.page))
+        return
+    await callback.answer(f"✅ +{res.price_paid:,} 🪙!", show_alert=True)
+    await edit_or_answer(
+        callback,
+        f"🤖 <b>KARTA BOTGA SOTILDI!</b>\n\n"
+        f"🎴 <b>{esc(res.card.character_name)}</b> (Lvl {res.level_before})\n"
+        f"💰 Hisobingizga tushdi: <b>+{fmt_coins(res.price_paid)} 🪙</b>",
+        reply_markup=back_home_kb(callback.from_user.id, "market"),
+    )
