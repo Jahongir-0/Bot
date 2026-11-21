@@ -113,7 +113,7 @@ class TransferService:
                 await session.execute(
                     update(UserCard)
                     .where(UserCard.id == trf.user_card_id)
-                    .values(is_locked=False, updated_at=now)
+                    .values(is_locked=False, card_state="OWNED", updated_at=now)
                 )
                 await session.flush()
                 return TransferResult(False, "Transfer muddati tugagan.")
@@ -213,17 +213,16 @@ class TransferService:
             )
 
     @staticmethod
-    async def expire_stale_transfers(session: AsyncSession) -> int:
+    async def expire_stale_transfers(session: AsyncSession, user_id: Optional[int] = None) -> int:
         """Muddati tugagan transferlarni yopadi va band qilingan (locked) kartalarni qaytarib ochadi."""
         now = utcnow()
-        stale = (
-            await session.execute(
-                select(PendingTransfer).where(
-                    PendingTransfer.status == "pending",
-                    PendingTransfer.expires_at < now,
-                )
-            )
-        ).scalars().all()
+        conds = [
+            PendingTransfer.status == "pending",
+            PendingTransfer.expires_at < now,
+        ]
+        if user_id is not None:
+            conds.append((PendingTransfer.from_user_id == user_id) | (PendingTransfer.to_user_id == user_id))
+        stale = (await session.execute(select(PendingTransfer).where(*conds))).scalars().all()
         count = 0
         for trf in stale:
             upd = await session.execute(
@@ -235,7 +234,7 @@ class TransferService:
                 await session.execute(
                     update(UserCard)
                     .where(UserCard.id == trf.user_card_id)
-                    .values(is_locked=False, updated_at=now)
+                    .values(is_locked=False, card_state="OWNED", updated_at=now)
                 )
                 count += 1
         if count:
@@ -264,8 +263,43 @@ class TransferService:
             await session.execute(
                 update(UserCard)
                 .where(UserCard.id == trf.user_card_id)
-                .values(is_locked=False, updated_at=now)
+                .values(is_locked=False, card_state="OWNED", updated_at=now)
             )
             await session.flush()
             return TransferResult(True, "Transfer bekor qilindi.", transfer=trf)
         return TransferResult(False, "Transfer allaqachon yopilgan.")
+
+    @staticmethod
+    async def cancel_or_unlock_for_user(
+        session: AsyncSession,
+        user_id: int,
+        user_card_id: int,
+    ) -> TransferResult:
+        """Foydalanuvchining kartasidagi kutilayotgan transferni bekor qiladi yoki yetim bandlikni yechadi."""
+        from services.collection_service import CollectionService
+
+        await CollectionService.reconcile_user_card_locks(session, user_id)
+        uc = await session.get(UserCard, user_card_id)
+        if uc is None or uc.user_id != user_id:
+            return TransferResult(False, "Karta topilmadi.")
+        if not uc.is_locked:
+            return TransferResult(True, "Karta bandligi yechildi — endi yuborishingiz mumkin!")
+
+        trf = (
+            await session.execute(
+                select(PendingTransfer)
+                .where(
+                    PendingTransfer.user_card_id == uc.id,
+                    PendingTransfer.from_user_id == user_id,
+                    PendingTransfer.status == "pending",
+                )
+                .order_by(PendingTransfer.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if trf is not None:
+            res = await TransferService.cancel_transfer(session, trf.id, user_id)
+            if res.success:
+                return TransferResult(True, f"Transfer #{trf.id} bekor qilindi va karta bo‘shatildi!", transfer=trf)
+            return res
+        return TransferResult(False, "Karta boshqa bo‘limda (market/auksion/almashuv) band.")

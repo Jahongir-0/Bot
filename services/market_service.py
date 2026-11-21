@@ -315,13 +315,16 @@ class MarketService:
         user_card_id: int,
     ) -> Tuple[bool, str, Optional[BotSellQuote]]:
         from services.card_level_service import CardLevelService
+        from services.collection_service import CollectionService
         from services.settings_service import SettingsService
 
+        await CollectionService.reconcile_user_card_locks(session, user_id)
         uc = await session.get(UserCard, user_card_id)
         if uc is None or uc.user_id != user_id:
             return False, "Karta topilmadi yoki sizga tegishli emas.", None
         if uc.is_locked:
-            return False, "Karta hozir market/auksion/almashuvda band.", None
+            _, _, lock_lbl = await CollectionService.get_card_lock_info(session, uc.id)
+            return False, f"Karta hozir band ({lock_lbl}).", None
         card = await session.get(Card, uc.card_id)
         if card is None:
             return False, "Karta ma’lumoti topilmadi.", None
@@ -352,8 +355,10 @@ class MarketService:
         page_size: int = 8,
     ) -> Tuple[List[BotSellQuote], int]:
         from services.card_level_service import CardLevelService
+        from services.collection_service import CollectionService
         from services.settings_service import SettingsService
 
+        await CollectionService.reconcile_user_card_locks(session, user_id)
         cond = [UserCard.user_id == user_id, UserCard.is_locked.is_(False)]
         total = int((await session.execute(select(func.count(UserCard.id)).where(*cond))).scalar_one() or 0)
         offset = (max(1, page) - 1) * page_size

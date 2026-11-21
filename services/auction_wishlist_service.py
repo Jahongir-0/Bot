@@ -116,6 +116,11 @@ class AuctionWishlistService:
             return False, "Karta topilmadi.", None
 
         if user_card_id is not None:
+            from services.collection_service import CollectionService
+
+            await CollectionService.reconcile_user_card_locks(session, seller_user_id)
+            uc = await session.get(UserCard, user_card_id)
+            auc_level = max(1, int(getattr(uc, "level", 1) or 1)) if uc else 1
             upd = await session.execute(
                 update(UserCard)
                 .where(
@@ -129,6 +134,7 @@ class AuctionWishlistService:
                 return False, "Bu karta nusxasi auksion uchun band yoki topilmadi.", None
         else:
             # Admin auksioni: karta hali tashlanmagan/yopiq bo'lsa state AUCTION qilamiz
+            auc_level = max(1, int(getattr(card, "preset_level", 1) or 1))
             card.card_state = "AUCTION"
             card.is_available = False
 
@@ -144,6 +150,7 @@ class AuctionWishlistService:
             starts_at=now,
             ends_at=now + timedelta(hours=min(168, int(hours))),
             status="active",
+            card_level=auc_level,
         )
         session.add(auc)
         await session.flush()
@@ -196,6 +203,9 @@ class AuctionWishlistService:
     async def list_user_sellable_cards(
         session: AsyncSession, user_id: int, page: int = 1, page_size: int = 8
     ) -> Tuple[List[Tuple[UserCard, Card]], int]:
+        from services.collection_service import CollectionService
+
+        await CollectionService.reconcile_user_card_locks(session, user_id)
         cond = [UserCard.user_id == user_id, UserCard.is_locked.is_(False)]
         total = int((await session.execute(select(func.count(UserCard.id)).where(*cond))).scalar_one() or 0)
         rows = (
@@ -401,15 +411,23 @@ class AuctionWishlistService:
             if auc.seller_user_id:
                 await UserService.recompute_card_counts(session, auc.seller_user_id)
         else:
+            target_lvl = max(1, int(getattr(auc, "card_level", 1) or 1))
             if card is not None and await UserService.owns_card(session, winner_id, auc.card_id):
                 from services.card_level_service import CardLevelService
 
-                await CardLevelService.apply_duplicate(session, winner_id, card)
+                for _ in range(target_lvl):
+                    await CardLevelService.apply_duplicate(session, winner_id, card)
                 await UserService.recompute_card_counts(session, winner_id, add_xp=50)
             else:
                 try:
                     async with session.begin_nested():
-                        uc = UserCard(user_id=winner_id, card_id=auc.card_id, acquired_via="auction", card_state="OWNED")
+                        uc = UserCard(
+                            user_id=winner_id,
+                            card_id=auc.card_id,
+                            acquired_via="auction",
+                            card_state="OWNED",
+                            level=target_lvl,
+                        )
                         session.add(uc)
                         await session.flush()
                         uc.serial_number = 10000 + uc.id

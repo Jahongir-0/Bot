@@ -125,6 +125,7 @@ class EventService:
             ends_at=now + timedelta(hours=int(hours)),
             status="active",
             created_by_tg_id=admin_telegram_id,
+            card_level=max(1, int(getattr(card, "preset_level", 1) or 1)),
         )
         session.add(event)
         await session.flush()
@@ -216,7 +217,14 @@ class EventService:
             )
 
         try:
-            uc = UserCard(user_id=user_id, card_id=card.id, acquired_via="event", card_state="OWNED")
+            target_lvl = max(1, int(getattr(event, "card_level", 1) or 1))
+            uc = UserCard(
+                user_id=user_id,
+                card_id=card.id,
+                acquired_via="event",
+                card_state="OWNED",
+                level=target_lvl,
+            )
             session.add(uc)
             await session.flush()
             uc.serial_number = 10000 + uc.id

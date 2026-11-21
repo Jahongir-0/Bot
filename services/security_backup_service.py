@@ -148,6 +148,10 @@ class SecurityBackupService:
         reason: str,
         hours: Optional[int] = None,
     ) -> None:
+        from services.admin_service import AdminService
+
+        if await AdminService.is_protected_admin_user(session, user):
+            raise ValueError("Bu admin! Uni ban qilib bo‘lmaydi.")
         now = utcnow()
         user.is_banned = True
         user.ban_reason = reason[:500]

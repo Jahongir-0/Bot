@@ -109,11 +109,18 @@ class RankingService:
         return func.coalesce(weighted.c.w, 0) * 10 + User.total_cards, weighted
 
     @staticmethod
-    def _apply_scope(stmt, weighted, group_id: Optional[int]):
+    def _apply_scope(
+        stmt,
+        weighted,
+        group_id: Optional[int],
+        excluded_ids: Optional[List[int]] = None,
+    ):
         if weighted is not None:
             stmt = stmt.outerjoin(weighted, weighted.c.uid == User.id)
         if group_id is not None:
             stmt = stmt.join(GroupMember, GroupMember.user_id == User.id).where(GroupMember.group_id == group_id)
+        if excluded_ids:
+            stmt = stmt.where(User.id.not_in(excluded_ids))
         return stmt.where(User.is_banned.is_(False))
 
     @staticmethod
@@ -125,16 +132,21 @@ class RankingService:
 
     @staticmethod
     async def _top(session: AsyncSession, limit: int, group_id: Optional[int]) -> List[RankEntry]:
+        from services.admin_service import AdminService
+
         mode = await SettingsService.get_ranking_mode(session)
         ranks = await RankingService._live_ranks(session)
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
         rank_sig = tuple((str(r.get("name")), int(r.get("rank_weight", 1))) for r in ranks)
-        key = ("top", RankingService._scope(session), mode, group_id, limit, rank_sig)
+        key = ("top", RankingService._scope(session), mode, group_id, limit, rank_sig, tuple(excluded_ids))
         cached = _cache_get(key)
         if cached is not None:
             return cached
 
         score_expr, weighted = RankingService._score_parts(mode, ranks)
-        stmt = RankingService._apply_scope(select(User, score_expr.label("score")), weighted, group_id)
+        stmt = RankingService._apply_scope(
+            select(User, score_expr.label("score")), weighted, group_id, excluded_ids=excluded_ids
+        )
         stmt = stmt.order_by(
             score_expr.desc(), User.unique_cards.desc(), User.total_cards.desc(), User.id.asc()
         ).limit(limit)
@@ -197,7 +209,14 @@ class RankingService:
         mode: str,
         user_id: int,
         group_id: Optional[int],
+        excluded_ids: Optional[List[int]] = None,
     ) -> Optional[int]:
+        if excluded_ids is None:
+            from services.admin_service import AdminService
+
+            excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        if user_id in excluded_ids:
+            return 0
         ranks = await RankingService._live_ranks(session)
         score_expr, weighted = RankingService._score_parts(mode, ranks)
 
@@ -209,12 +228,14 @@ class RankingService:
             return None
         my_score = int(my_score)
 
-        key = ("rank", RankingService._scope(session), mode, group_id, my_score)
+        key = ("rank", RankingService._scope(session), mode, group_id, my_score, tuple(excluded_ids))
         cached = _cache_get(key)
         if cached is not None:
             return cached
 
-        count_stmt = RankingService._apply_scope(select(func.count(User.id)).select_from(User), weighted, group_id)
+        count_stmt = RankingService._apply_scope(
+            select(func.count(User.id)).select_from(User), weighted, group_id, excluded_ids=excluded_ids
+        )
         better = (await session.execute(count_stmt.where(score_expr > my_score))).scalar_one()
         rank = int(better or 0) + 1
         _cache_put(key, rank)
@@ -226,10 +247,19 @@ class RankingService:
         user_id: int,
         group_id: Optional[int] = None,
     ) -> tuple[int, Optional[int]]:
+        from services.admin_service import AdminService
+
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        if user_id in excluded_ids:
+            return 0, None
+
         mode = await SettingsService.get_ranking_mode(session)
-        global_rank = await RankingService._rank_of(session, mode, user_id, None)
+        global_rank = await RankingService._rank_of(session, mode, user_id, None, excluded_ids=excluded_ids)
         if global_rank is None:
-            total = (await session.execute(select(func.count(User.id)))).scalar_one()
+            cnt_stmt = select(func.count(User.id))
+            if excluded_ids:
+                cnt_stmt = cnt_stmt.where(User.id.not_in(excluded_ids))
+            total = (await session.execute(cnt_stmt)).scalar_one()
             global_rank = int(total or 0) + 1
 
         group_rank: Optional[int] = None
@@ -240,7 +270,9 @@ class RankingService:
                 )
             ).first()
             if is_member is not None:
-                group_rank = await RankingService._rank_of(session, mode, user_id, group_id)
+                group_rank = await RankingService._rank_of(
+                    session, mode, user_id, group_id, excluded_ids=excluded_ids
+                )
         return global_rank, group_rank
 
     @staticmethod
@@ -361,7 +393,9 @@ class RankingService:
     ) -> List[Tuple[User, int]]:
         from datetime import timedelta
         from models.base import utcnow
+        from services.admin_service import AdminService
 
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
         cutoff = None
         if period == "weekly":
             cutoff = utcnow() - timedelta(days=7)
@@ -389,6 +423,8 @@ class RankingService:
                 .join(Card, Card.id == UserCard.card_id)
                 .where(User.is_banned.is_(False), func.lower(Card.rarity).in_(target_rarities))
             )
+            if excluded_ids:
+                stmt = stmt.where(User.id.not_in(excluded_ids))
             if cutoff is not None:
                 stmt = stmt.where(UserCard.created_at >= cutoff)
             rows = (
@@ -409,6 +445,8 @@ class RankingService:
         }
         col = col_map.get(scope, User.total_cards)
         stmt = select(User, col.label("val")).where(User.is_banned.is_(False))
+        if excluded_ids:
+            stmt = stmt.where(User.id.not_in(excluded_ids))
         if cutoff is not None:
             stmt = stmt.where(User.last_activity >= cutoff)
         rows = (await session.execute(stmt.order_by(col.desc(), User.id.asc()).limit(limit))).all()

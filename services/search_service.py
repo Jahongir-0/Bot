@@ -65,17 +65,24 @@ class SearchService:
         page: int = 1,
         page_size: int = 20,
     ) -> Tuple[List[GlobalCardSearchItem], int]:
+        from services.admin_service import AdminService
+
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        base_where = [User.is_banned.is_(False), Card.is_deleted.is_(False)]
+        if excluded_ids:
+            base_where.append(User.id.not_in(excluded_ids))
+
         stmt = (
             select(UserCard, Card, User)
             .join(Card, Card.id == UserCard.card_id)
             .join(User, User.id == UserCard.user_id)
-            .where(User.is_banned.is_(False), Card.is_deleted.is_(False))
+            .where(*base_where)
         )
         count_stmt = (
             select(func.count(UserCard.id))
             .join(Card, Card.id == UserCard.card_id)
             .join(User, User.id == UserCard.user_id)
-            .where(User.is_banned.is_(False), Card.is_deleted.is_(False))
+            .where(*base_where)
         )
 
         stmt, count_stmt = _apply_card_filters(stmt, count_stmt, mode, query, include_user_card_id=True)
@@ -128,7 +135,13 @@ class SearchService:
         include_unreleased: bool = False,
     ) -> Tuple[List[Card], int]:
         """Foydalanuvchilar uchun katalog qidiruvi (unreleased kartalarni yashiradi, typo va aliaslarni qo'llab-quvvatlaydi)."""
-        has_owner = exists().where(UserCard.card_id == Card.id)
+        from services.admin_service import AdminService
+
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        owner_conds = [UserCard.card_id == Card.id]
+        if excluded_ids:
+            owner_conds.append(UserCard.user_id.not_in(excluded_ids))
+        has_owner = exists().where(*owner_conds)
         base_conds = [Card.is_deleted.is_(False)]
         if not include_unreleased:
             base_conds.append((Card.dropped_count > 0) | Card.is_event_card.is_(True) | has_owner)
@@ -182,12 +195,18 @@ class SearchService:
         session: AsyncSession,
         user_card_id: int,
     ) -> Optional[GlobalCardSearchItem]:
+        from services.admin_service import AdminService
+
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        conds = [UserCard.id == user_card_id, User.is_banned.is_(False)]
+        if excluded_ids:
+            conds.append(User.id.not_in(excluded_ids))
         row = (
             await session.execute(
                 select(UserCard, Card, User)
                 .join(Card, Card.id == UserCard.card_id)
                 .join(User, User.id == UserCard.user_id)
-                .where(UserCard.id == user_card_id)
+                .where(*conds)
             )
         ).first()
         if row is None:

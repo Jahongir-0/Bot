@@ -1,9 +1,10 @@
 from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from models.admin import AdminAction, Ban
 from models.base import utcnow
 from models.card import Card
@@ -12,6 +13,7 @@ from models.group import Group, GroupMember
 from models.market import CardListing, Offer
 from models.user import User
 from models.user_card import UserCard
+from models.v2_features import AdminRole
 from services.user_service import InsufficientCoinsError, UserService
 from utils.grouping import anime_key, character_key, get_anime_key_of, get_character_key_of, get_group_reps
 
@@ -121,29 +123,120 @@ class AdminService:
         return True, f"Balans yangilandi: {new_bal:,} 🪙", new_bal
 
     @staticmethod
+    async def is_protected_admin_user(session: AsyncSession, user: User) -> bool:
+        settings = get_settings()
+        if int(user.telegram_id) in set(settings.admin_ids):
+            return True
+        uname = (user.username or "").strip().lstrip("@").lower()
+        if uname and uname in {u.strip().lstrip("@").lower() for u in settings.admin_usernames}:
+            return True
+        cond = AdminRole.telegram_id == user.telegram_id
+        if uname:
+            cond = cond | (func.lower(AdminRole.username) == uname)
+        role_id = (
+            await session.execute(
+                select(AdminRole.id).where(AdminRole.is_active.is_(True), cond).limit(1)
+            )
+        ).scalar_one_or_none()
+        return role_id is not None
+
+    @staticmethod
+    async def get_excluded_admin_user_ids(session: AsyncSession) -> List[int]:
+        settings = get_settings()
+        tg_ids = {int(x) for x in settings.admin_ids if x}
+        unames = {str(u).strip().lstrip("@").lower() for u in settings.admin_usernames if str(u).strip()}
+
+        role_rows = (
+            await session.execute(
+                select(AdminRole.telegram_id, AdminRole.username).where(AdminRole.is_active.is_(True))
+            )
+        ).all()
+        for r_tg, r_un in role_rows:
+            if r_tg:
+                tg_ids.add(int(r_tg))
+            if r_un and str(r_un).strip():
+                unames.add(str(r_un).strip().lstrip("@").lower())
+
+        conds = []
+        if tg_ids:
+            conds.append(User.telegram_id.in_(list(tg_ids)))
+        if unames:
+            conds.append(func.lower(User.username).in_(list(unames)))
+        if not conds:
+            return []
+        rows = (await session.execute(select(User.id).where(or_(*conds)))).scalars().all()
+        return sorted({int(uid) for uid in rows})
+
+    @staticmethod
+    async def ensure_admins_unbanned(session: AsyncSession) -> int:
+        admin_uids = await AdminService.get_excluded_admin_user_ids(session)
+        if not admin_uids:
+            return 0
+        now = utcnow()
+        banned_admins = list(
+            (
+                await session.execute(
+                    select(User).where(
+                        User.id.in_(admin_uids),
+                        or_(User.is_banned.is_(True), User.is_frozen.is_(True)),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for u in banned_admins:
+            u.is_banned = False
+            u.ban_until = None
+            u.ban_reason = None
+            u.is_frozen = False
+        await session.execute(
+            update(Ban)
+            .where(Ban.user_id.in_(admin_uids), Ban.is_active.is_(True))
+            .values(is_active=False, unbanned_at=now)
+        )
+        await session.flush()
+        return len(banned_admins)
+
+    @staticmethod
     async def give_card_to_user(
         session: AsyncSession,
         admin_telegram_id: int,
         user_id: int,
         card_id: int,
+        level: Optional[int] = None,
     ) -> Optional[Card]:
+        from services.card_level_service import CardLevelService
+
         card = await session.get(Card, card_id)
         user = await session.get(User, user_id)
         if card is None or user is None:
             return None
+        cfg = await CardLevelService.get_config(session)
+        max_lvl = max(1, int(cfg.get("max_level", 10)))
+        target_level = max(
+            1,
+            min(
+                max_lvl,
+                int(level if level is not None else (getattr(card, "preset_level", 1) or 1)),
+            ),
+        )
         dup = None
         if await UserService.owns_card(session, user_id, card_id):
-            from services.card_level_service import CardLevelService
-
-            dup = await CardLevelService.apply_duplicate(session, user.id, card)
+            for _ in range(target_level):
+                dup = await CardLevelService.apply_duplicate(session, user.id, card)
         else:
-            session.add(
-                UserCard(
-                    user_id=user.id,
-                    card_id=card.id,
-                    acquired_via="admin_grant",
-                )
+            new_uc = UserCard(
+                user_id=user.id,
+                card_id=card.id,
+                acquired_via="admin_grant",
+                level=target_level,
+                card_state="OWNED",
             )
+            session.add(new_uc)
+            await session.flush()
+            if not new_uc.serial_number:
+                new_uc.serial_number = 10000 + new_uc.id
         await UserService.recompute_card_counts(session, user.id, add_xp=10)
         await AdminService.log_action(
             session,
@@ -154,11 +247,46 @@ class AdminService:
             {
                 "card_id": card.id,
                 "card_code": card.card_code,
+                "granted_level": target_level,
                 "duplicate_level_up": dup.level_after if dup else None,
             },
         )
         await session.flush()
         return card
+
+    @staticmethod
+    async def get_users_for_card_grant(
+        session: AsyncSession,
+        current_admin_tg_id: int,
+        page: int = 1,
+        page_size: int = 12,
+        query: str = "",
+    ) -> Tuple[List[User], int]:
+        conds = [User.is_banned.is_(False)]
+        q = query.strip().lstrip("@")
+        if q:
+            q_conds = [User.username.ilike(f"%{q}%"), User.first_name.ilike(f"%{q}%")]
+            if q.isdigit():
+                q_conds.append(User.telegram_id == int(q))
+                q_conds.append(User.id == int(q))
+            conds.append(or_(*q_conds))
+        total = int((await session.execute(select(func.count(User.id)).where(*conds))).scalar_one() or 0)
+        offset = (max(1, page) - 1) * page_size
+        self_first = case((User.telegram_id == current_admin_tg_id, 0), else_=1)
+        users = list(
+            (
+                await session.execute(
+                    select(User)
+                    .where(*conds)
+                    .order_by(self_first.asc(), User.last_activity.desc(), User.id.desc())
+                    .offset(offset)
+                    .limit(page_size)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return users, total
 
     @staticmethod
     async def remove_card_from_user(
@@ -246,7 +374,13 @@ class AdminService:
         user = await session.get(User, user_id)
         if user is None:
             return None
+        if ban and await AdminService.is_protected_admin_user(session, user):
+            raise PermissionError("Bu admin! Uni ban qilib bo‘lmaydi.")
         user.is_banned = ban
+        if not ban:
+            user.ban_until = None
+            user.ban_reason = None
+            user.is_frozen = False
         now = utcnow()
         if ban:
             session.add(

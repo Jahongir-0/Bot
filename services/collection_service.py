@@ -427,3 +427,193 @@ class CollectionService:
         rows = (await session.execute(stmt.order_by(*order_cols).offset(offset).limit(page_size))).all()
         return [(r[0], r[1]) for r in rows], total
 
+    @staticmethod
+    async def reconcile_user_card_locks(session: AsyncSession, user_id: int) -> int:
+        """Muddati tugagan transfer/almashuvlarni yopadi va yetim is_locked=True nusxalarni yechadi."""
+        from models.base import utcnow
+        from models.market import CardListing, PendingTransfer
+        from models.v2_features import Auction, CardTrade
+        from sqlalchemy import update
+
+        now = utcnow()
+        unlocked = 0
+
+        # 1. Muddati o'tgan pending transferlarni yopish
+        stale_trfs = (
+            await session.execute(
+                select(PendingTransfer).where(
+                    PendingTransfer.status == "pending",
+                    PendingTransfer.expires_at <= now,
+                    (PendingTransfer.from_user_id == user_id) | (PendingTransfer.to_user_id == user_id),
+                )
+            )
+        ).scalars().all()
+        for trf in stale_trfs:
+            trf.status = "expired"
+            trf.updated_at = now
+            await session.execute(
+                update(UserCard)
+                .where(UserCard.id == trf.user_card_id)
+                .values(is_locked=False, card_state="OWNED", updated_at=now)
+            )
+            unlocked += 1
+
+        # 2. Muddati o'tgan card trade larni yopish
+        stale_trades = (
+            await session.execute(
+                select(CardTrade).where(
+                    CardTrade.status == "pending_pick",
+                    CardTrade.expires_at <= now,
+                    (CardTrade.initiator_user_id == user_id) | (CardTrade.partner_user_id == user_id),
+                )
+            )
+        ).scalars().all()
+        for tr in stale_trades:
+            tr.status = "expired"
+            for ucid in (tr.initiator_uc_id, tr.partner_uc_id):
+                if ucid:
+                    await session.execute(
+                        update(UserCard)
+                        .where(UserCard.id == ucid)
+                        .values(is_locked=False, card_state="OWNED", updated_at=now)
+                    )
+                    unlocked += 1
+
+        # 3. Foydalanuvchining barcha is_locked=True kartalarini tekshirish
+        locked_ucs = (
+            await session.execute(
+                select(UserCard).where(UserCard.user_id == user_id, UserCard.is_locked.is_(True))
+            )
+        ).scalars().all()
+        for uc in locked_ucs:
+            has_listing = (
+                await session.execute(
+                    select(CardListing.id).where(CardListing.user_card_id == uc.id, CardListing.status == "active").limit(1)
+                )
+            ).scalar_one_or_none()
+            has_auction = (
+                await session.execute(
+                    select(Auction.id).where(Auction.user_card_id == uc.id, Auction.status == "active").limit(1)
+                )
+            ).scalar_one_or_none()
+            has_transfer = (
+                await session.execute(
+                    select(PendingTransfer.id).where(PendingTransfer.user_card_id == uc.id, PendingTransfer.status == "pending").limit(1)
+                )
+            ).scalar_one_or_none()
+            has_trade = (
+                await session.execute(
+                    select(CardTrade.id).where(
+                        CardTrade.status == "pending_pick",
+                        (CardTrade.initiator_uc_id == uc.id) | (CardTrade.partner_uc_id == uc.id),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+
+            if not (has_listing or has_auction or has_transfer or has_trade):
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+                uc.updated_at = now
+                unlocked += 1
+
+        if unlocked:
+            await session.flush()
+        return unlocked
+
+    @staticmethod
+    async def get_card_lock_info(session: AsyncSession, user_card_id: int) -> Tuple[str, int, str]:
+        """Qaytaradi: (kind, entity_id, human_label). kind in ('market','auction','transfer','trade','none')."""
+        from models.market import CardListing, PendingTransfer
+        from models.v2_features import Auction, CardTrade
+
+        listing_id = (
+            await session.execute(
+                select(CardListing.id).where(CardListing.user_card_id == user_card_id, CardListing.status == "active").limit(1)
+            )
+        ).scalar_one_or_none()
+        if listing_id is not None:
+            return "market", int(listing_id), f"🔒 Marketda sotuvda (#{listing_id})"
+
+        auc_id = (
+            await session.execute(
+                select(Auction.id).where(Auction.user_card_id == user_card_id, Auction.status == "active").limit(1)
+            )
+        ).scalar_one_or_none()
+        if auc_id is not None:
+            return "auction", int(auc_id), f"🔒 Auksionda band (#{auc_id})"
+
+        trf_id = (
+            await session.execute(
+                select(PendingTransfer.id).where(PendingTransfer.user_card_id == user_card_id, PendingTransfer.status == "pending").limit(1)
+            )
+        ).scalar_one_or_none()
+        if trf_id is not None:
+            return "transfer", int(trf_id), f"🔒 Transfer kutilmoqda (#{trf_id})"
+
+        tr_id = (
+            await session.execute(
+                select(CardTrade.id).where(
+                    CardTrade.status == "pending_pick",
+                    (CardTrade.initiator_uc_id == user_card_id) | (CardTrade.partner_uc_id == user_card_id),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if tr_id is not None:
+            return "trade", int(tr_id), f"🔒 Almashuv kutilmoqda (#{tr_id})"
+
+        return "none", 0, "🟢 Sotish/Transferga tayyor"
+
+    @staticmethod
+    async def unlock_user_card_action(session: AsyncSession, user_id: int, user_card_id: int) -> Tuple[bool, str]:
+        """Foydalanuvchi kartasidagi pending transfer/trade yoki yetim bandlikni bekor qilib yechadi."""
+        from models.base import utcnow
+        from models.market import PendingTransfer
+        from models.v2_features import CardTrade
+        from sqlalchemy import update
+
+        await CollectionService.reconcile_user_card_locks(session, user_id)
+        uc = await session.get(UserCard, user_card_id)
+        if uc is None or uc.user_id != user_id:
+            return False, "Karta topilmadi."
+        if not uc.is_locked:
+            return True, "✅ Karta bandligi allaqachon yechildi — endi yuborish/sotish mumkin!"
+
+        kind, eid, _ = await CollectionService.get_card_lock_info(session, uc.id)
+        now = utcnow()
+        if kind == "transfer":
+            trf = await session.get(PendingTransfer, eid)
+            if trf and user_id in (trf.from_user_id, trf.to_user_id):
+                trf.status = "cancelled"
+                trf.updated_at = now
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+                uc.updated_at = now
+                await session.flush()
+                return True, f"✅ Kutilayotgan transfer (#{eid}) bekor qilindi va karta bo‘shatildi!"
+        elif kind == "trade":
+            tr = await session.get(CardTrade, eid)
+            if tr and user_id in (tr.initiator_user_id, tr.partner_user_id):
+                tr.status = "cancelled"
+                for ucid in (tr.initiator_uc_id, tr.partner_uc_id):
+                    if ucid:
+                        await session.execute(
+                            update(UserCard)
+                            .where(UserCard.id == ucid)
+                            .values(is_locked=False, card_state="OWNED", updated_at=now)
+                        )
+                await session.flush()
+                return True, f"✅ Almashuv (#{eid}) bekor qilindi va karta bo‘shatildi!"
+        elif kind == "market":
+            return False, "🛒 Bu karta Marketda sotuvda turibdi. Uni «Market → Mening kartalarim» bo‘limidan olib tashlang."
+        elif kind == "auction":
+            return False, "🔨 Bu karta faol Auksionda band. Uni Auksion bo‘limidan bekor qiling (stavka bo‘lmasa)."
+        else:
+            uc.is_locked = False
+            uc.card_state = "OWNED"
+            uc.updated_at = now
+            await session.flush()
+            return True, "✅ Karta bandligi yechildi!"
+
+        return False, "Bu bandlikni yechib bo‘lmadi."
+
+

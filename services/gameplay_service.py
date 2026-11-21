@@ -1403,11 +1403,17 @@ class GameplayService:
 
     @staticmethod
     async def get_season_leaderboard(session: AsyncSession, season_id: int, limit: int = 10) -> List[Tuple[SeasonProgress, User]]:
+        from services.admin_service import AdminService
+
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        conds = [SeasonProgress.season_id == season_id, User.is_banned.is_(False)]
+        if excluded_ids:
+            conds.append(User.id.not_in(excluded_ids))
         rows = (
             await session.execute(
                 select(SeasonProgress, User)
                 .join(User, User.id == SeasonProgress.user_id)
-                .where(SeasonProgress.season_id == season_id, User.is_banned.is_(False))
+                .where(*conds)
                 .order_by(SeasonProgress.points.desc(), SeasonProgress.xp.desc())
                 .limit(limit)
             )

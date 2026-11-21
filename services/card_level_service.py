@@ -245,9 +245,12 @@ class CardLevelService:
     async def top_power(session: AsyncSession, limit: int = 10):
         """Eng kuchli kolleksiya egalari: [(User, umumiy_kuch)] — 60 soniya keshlanadi."""
         from models.user import User
+        from services.admin_service import AdminService
+        from utils.cache_scope import cache_scope
 
+        scope = cache_scope(session)
         now = time.monotonic()
-        if now - _POWER_CACHE["ts"] < 60 and _POWER_CACHE["rows"]:
+        if _POWER_CACHE.get("scope") == scope and now - _POWER_CACHE["ts"] < 60 and _POWER_CACHE["rows"]:
             ranked = _POWER_CACHE["rows"]
         else:
             cfg = await CardLevelService.get_config(session)
@@ -259,13 +262,21 @@ class CardLevelService:
             totals: Dict[int, int] = {}
             for uid, lv, rarity in rows:
                 totals[uid] = totals.get(uid, 0) + CardLevelService.power(rarity, int(lv or 1), cfg)
-            ranked = sorted(totals.items(), key=lambda x: -x[1])[:50]
-            _POWER_CACHE["ts"], _POWER_CACHE["rows"] = now, ranked
+            ranked = sorted(totals.items(), key=lambda x: -x[1])
+            _POWER_CACHE["ts"] = now
+            _POWER_CACHE["rows"] = ranked
+            _POWER_CACHE["scope"] = scope
+
+        excluded = set(await AdminService.get_excluded_admin_user_ids(session))
         out = []
-        for uid, val in ranked[:limit]:
+        for uid, val in ranked:
+            if uid in excluded:
+                continue
             u = await session.get(User, uid)
-            if u is not None:
+            if u is not None and not u.is_banned:
                 out.append((u, val))
+                if len(out) >= limit:
+                    break
         return out
 
     # ---------------------------------------------------------------- Stars bilan ko'tarish
