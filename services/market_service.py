@@ -469,9 +469,10 @@ class MarketService:
             )
 
             # Oddiy (event bo'lmagan) karta bot zaxirasiga qaytadi
-            if not card.is_event_card and int(card.dropped_count or 0) > 0:
-                card.dropped_count = max(0, int(card.dropped_count) - 1)
-                if card.card_state == "OWNED":
+            if not card.is_event_card:
+                if int(card.dropped_count or 0) > 0:
+                    card.dropped_count = max(0, int(card.dropped_count) - 1)
+                if not card.is_deleted and card.card_state in ("OWNED", "UNRELEASED", "LOCKED"):
                     card.card_state = "AVAILABLE"
 
             await session.delete(uc)

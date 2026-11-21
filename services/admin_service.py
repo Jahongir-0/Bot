@@ -201,6 +201,27 @@ class AdminService:
                 reference_id=f"offer:{off.id}",
             )
 
+        card = await session.get(Card, card_id)
+        if card is not None and not card.is_event_card:
+            if int(card.dropped_count or 0) > 0:
+                card.dropped_count = max(0, int(card.dropped_count) - 1)
+            if not card.is_deleted and card.card_state in ("OWNED", "UNRELEASED", "LOCKED"):
+                card.card_state = "AVAILABLE"
+
+        from models.v2_features import CardHistory
+
+        session.add(
+            CardHistory(
+                card_id=card_id,
+                user_card_id=None,
+                event_type="admin_revoked",
+                from_user_id=user_id,
+                to_user_id=None,
+                price=0,
+                details={"admin_tg_id": admin_telegram_id, "user_card_id": uc.id},
+            )
+        )
+
         await session.delete(uc)
         await session.flush()
         await UserService.recompute_card_counts(session, user_id)

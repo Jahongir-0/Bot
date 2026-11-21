@@ -1,8 +1,10 @@
+import html
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -282,11 +284,137 @@ class CommunityService:
         return True, f"💎 {tier.get('name', tier_key)} faollashtirildi!"
 
     # ------------------------------------------------------------------
-    # Reklama / Ad Campaigns
+    # Reklama / Ad Campaigns (matnli, joyga bog'liq cheklov + vaqt + klik)
     # ------------------------------------------------------------------
+    AD_MAX_LEN = 160
+    AD_MAX_LINES = 3
+    VALID_AD_PLACEMENTS = ("group", "private", "all")
+    AD_PLACEMENT_LABELS = {
+        "group": "👥 Guruh (drop tagiga)",
+        "private": "📱 User panelga",
+        "all": "🌍 Hamma joyga",
+    }
+    AD_DURATION_OPTIONS = (
+        (12, "12 soat"),
+        (24, "24 soat"),
+        (48, "48 soat"),
+        (72, "72 soat"),
+        (168, "7 kun"),
+        (0, "♾ To o‘chirilmaguncha"),
+    )
+    _AD_LINK_RE = re.compile(
+        r"(https?://[^\s<>()]+|(?:(?<=\s)|^)t\.me/[A-Za-z0-9_+/]+(?:\?[A-Za-z0-9_=&-]+)?|(?:(?<=[\s(\[])|^)@[A-Za-z][A-Za-z0-9_]{3,31}\b)"
+    )
+
+    @staticmethod
+    def extract_ad_link(text: str) -> Tuple[Optional[str], Optional[str]]:
+        """Matn ichidan birinchi link (https://..., t.me/...) yoki @username ni ajratadi."""
+        m = CommunityService._AD_LINK_RE.search(text or "")
+        if not m:
+            return None, None
+        raw = m.group(1).rstrip(".,!?;:)")
+        if not raw:
+            return None, None
+        if raw.startswith("@"):
+            url = f"https://t.me/{raw[1:]}"
+        elif raw.lower().startswith("t.me/"):
+            url = f"https://{raw}"
+        else:
+            url = raw
+        return raw[:64], url[:255]
+
+    @staticmethod
+    def validate_ad_text(raw: str) -> Tuple[bool, str, str]:
+        cleaned = "\n".join(line.strip() for line in (raw or "").strip().splitlines() if line.strip())
+        if not cleaned:
+            return False, "⚠️ Reklama matni bo‘sh bo‘lishi mumkin emas.", ""
+        if len(cleaned) > CommunityService.AD_MAX_LEN:
+            return (
+                False,
+                f"⚠️ Reklama matni juda uzun ({len(cleaned)}/{CommunityService.AD_MAX_LEN} belgi). Qisqaroq yozing.",
+                "",
+            )
+        if cleaned.count("\n") >= CommunityService.AD_MAX_LINES:
+            return (
+                False,
+                f"⚠️ Reklama ko‘pi bilan {CommunityService.AD_MAX_LINES} qatordan iborat bo‘lishi kerak.",
+                "",
+            )
+        return True, "ok", cleaned
+
+    @staticmethod
+    def is_ad_expired(ad: AdCampaign, now: Optional[datetime] = None) -> bool:
+        now = now or utcnow()
+        return bool(ad.expires_at is not None and ensure_utc(ad.expires_at) <= now)
+
+    @staticmethod
+    def placement_label(placement: str) -> str:
+        return CommunityService.AD_PLACEMENT_LABELS.get(placement, placement)
+
+    @staticmethod
+    async def expire_due_ads(session: AsyncSession) -> int:
+        now = utcnow()
+        res = await session.execute(
+            update(AdCampaign)
+            .where(
+                AdCampaign.is_active.is_(True),
+                AdCampaign.expires_at.is_not(None),
+                AdCampaign.expires_at <= now,
+            )
+            .values(is_active=False)
+        )
+        return int(res.rowcount or 0)
+
     @staticmethod
     async def list_ads(session: AsyncSession) -> List[AdCampaign]:
+        await CommunityService.expire_due_ads(session)
         return list((await session.execute(select(AdCampaign).order_by(AdCampaign.id.desc()))).scalars().all())
+
+    @staticmethod
+    async def get_occupied_ad_slots(
+        session: AsyncSession, exclude_ad_id: Optional[int] = None
+    ) -> Dict[str, AdCampaign]:
+        await CommunityService.expire_due_ads(session)
+        now = utcnow()
+        conds = [
+            AdCampaign.is_active.is_(True),
+            or_(AdCampaign.expires_at.is_(None), AdCampaign.expires_at > now),
+        ]
+        if exclude_ad_id is not None:
+            conds.append(AdCampaign.id != exclude_ad_id)
+        active = list((await session.execute(select(AdCampaign).where(*conds).order_by(AdCampaign.id.asc()))).scalars().all())
+        occupied: Dict[str, AdCampaign] = {}
+        for ad in active:
+            if ad.placement in ("all", "group"):
+                occupied.setdefault("group", ad)
+            if ad.placement in ("all", "private"):
+                occupied.setdefault("private", ad)
+        return occupied
+
+    @staticmethod
+    async def can_use_placement(
+        session: AsyncSession, placement: str, exclude_ad_id: Optional[int] = None
+    ) -> Tuple[bool, str]:
+        if placement not in CommunityService.VALID_AD_PLACEMENTS:
+            return False, "⚠️ Noto‘g‘ri reklama joyi tanlandi."
+        occupied = await CommunityService.get_occupied_ad_slots(session, exclude_ad_id=exclude_ad_id)
+        if placement == "all":
+            if "group" in occupied or "private" in occupied:
+                blockers = sorted({ad.id for ad in occupied.values()})
+                ids_txt = ", ".join(f"#{i}" for i in blockers)
+                return (
+                    False,
+                    f"⛔ «Hamma joyga» uchun barcha joylar bo‘sh bo‘lishi kerak. Hozir {ids_txt} reklama faol — avval uni o‘chiring, faolsizlantiring yoki joyini o‘zgartiring.",
+                )
+            return True, "ok"
+        if placement in occupied:
+            b_ad = occupied[placement]
+            pl_lbl = CommunityService.placement_label(placement)
+            return (
+                False,
+                f"⛔ «{pl_lbl}» joyi hozir #{b_ad.id} reklama bilan band ({CommunityService.placement_label(b_ad.placement)}). Avval uni o‘chiring, faolsizlantiring yoki joyini o‘zgartiring.",
+            )
+        return True, "ok"
 
     @staticmethod
     async def delete_ad(session: AsyncSession, ad_id: int) -> bool:
@@ -300,55 +428,205 @@ class CommunityService:
     @staticmethod
     async def create_ad(
         session: AsyncSession,
-        title: str,
         text: str,
         admin_tg_id: int,
         placement: str = "all",
-        frequency_mins: int = 120,
+        duration_hours: Optional[int] = None,
+        title: Optional[str] = None,
+        frequency_mins: int = 0,
         button_text: Optional[str] = None,
         button_url: Optional[str] = None,
         media_file_id: Optional[str] = None,
-    ) -> AdCampaign:
+    ) -> Tuple[bool, str, Optional[AdCampaign]]:
+        ok_txt, err_txt, cleaned = CommunityService.validate_ad_text(text)
+        if not ok_txt:
+            return False, err_txt, None
+        ok_plc, err_plc = await CommunityService.can_use_placement(session, placement)
+        if not ok_plc:
+            return False, err_plc, None
+
+        raw_tok, target_url = CommunityService.extract_ad_link(cleaned)
+        if button_url:
+            target_url = button_url[:255]
+        if button_text:
+            raw_tok = button_text[:64]
+
+        expires_at = (
+            utcnow() + timedelta(hours=int(duration_hours))
+            if duration_hours is not None and int(duration_hours) > 0
+            else None
+        )
+        ad_title = (title or cleaned.splitlines()[0])[:60]
         ad = AdCampaign(
-            title=title[:128],
-            text=text,
-            media_file_id=media_file_id,
-            media_type="photo" if media_file_id else "text",
-            button_text=button_text[:64] if button_text else None,
-            button_url=button_url[:255] if button_url else None,
+            title=ad_title[:128],
+            text=cleaned,
+            media_file_id=None,
+            media_type="text",
+            button_text=raw_tok[:64] if raw_tok else None,
+            button_url=target_url[:255] if target_url else None,
             placement=placement,
-            frequency_mins=max(1, int(frequency_mins)),
+            frequency_mins=max(0, int(frequency_mins)),
             is_active=True,
+            views_count=0,
+            clicks_count=0,
+            expires_at=expires_at,
             created_by_tg_id=admin_tg_id,
         )
         session.add(ad)
         await session.flush()
-        return ad
+        return True, "✅ Reklama faollashtirildi!", ad
+
+    @staticmethod
+    async def update_ad(
+        session: AsyncSession,
+        ad_id: int,
+        *,
+        text: Optional[str] = None,
+        placement: Optional[str] = None,
+        duration_hours: Optional[int] = None,
+    ) -> Tuple[bool, str, Optional[AdCampaign]]:
+        ad = await session.get(AdCampaign, ad_id)
+        if ad is None:
+            return False, "Reklama topilmadi.", None
+
+        if text is not None:
+            ok_txt, err_txt, cleaned = CommunityService.validate_ad_text(text)
+            if not ok_txt:
+                return False, err_txt, ad
+            raw_tok, target_url = CommunityService.extract_ad_link(cleaned)
+            ad.text = cleaned
+            ad.title = cleaned.splitlines()[0][:128]
+            ad.button_text = raw_tok
+            ad.button_url = target_url
+            ad.media_file_id = None
+            ad.media_type = "text"
+
+        if placement is not None and placement != ad.placement:
+            if ad.is_active and not CommunityService.is_ad_expired(ad):
+                ok_plc, err_plc = await CommunityService.can_use_placement(
+                    session, placement, exclude_ad_id=ad.id
+                )
+                if not ok_plc:
+                    return False, err_plc, ad
+            elif placement not in CommunityService.VALID_AD_PLACEMENTS:
+                return False, "⚠️ Noto‘g‘ri reklama joyi.", ad
+            ad.placement = placement
+
+        if duration_hours is not None:
+            if int(duration_hours) <= 0:
+                ad.expires_at = None
+            else:
+                ad.expires_at = utcnow() + timedelta(hours=int(duration_hours))
+            if not ad.is_active:
+                ok_plc, _ = await CommunityService.can_use_placement(
+                    session, ad.placement, exclude_ad_id=ad.id
+                )
+                if ok_plc:
+                    ad.is_active = True
+
+        await session.flush()
+        return True, "✅ Reklama yangilandi!", ad
+
+    @staticmethod
+    async def toggle_ad(session: AsyncSession, ad_id: int) -> Tuple[bool, str, Optional[AdCampaign]]:
+        ad = await session.get(AdCampaign, ad_id)
+        if ad is None:
+            return False, "Reklama topilmadi.", None
+        if ad.is_active:
+            ad.is_active = False
+            await session.flush()
+            return True, "⏸ Reklama faolsizlantirildi.", ad
+        if CommunityService.is_ad_expired(ad):
+            return (
+                False,
+                "⌛ Bu reklamaning muddati tugagan. Qayta yoqish uchun avval «⏳ Vaqtini o‘zgartirish» orqali yangi muddat tanlang.",
+                ad,
+            )
+        ok_plc, err_plc = await CommunityService.can_use_placement(session, ad.placement, exclude_ad_id=ad.id)
+        if not ok_plc:
+            return False, err_plc, ad
+        ad.is_active = True
+        await session.flush()
+        return True, "▶️ Reklama qayta faollashtirildi!", ad
 
     @staticmethod
     async def pick_due_ad(
-        session: AsyncSession, user: Optional[User], placement: str = "private"
+        session: AsyncSession, user: Optional[User] = None, placement: str = "private"
     ) -> Optional[AdCampaign]:
-        if user is not None and await CommunityService.has_vip_benefit(session, user, "no_ads"):
+        if placement == "private" and user is not None and await CommunityService.has_vip_benefit(session, user, "no_ads"):
             return None
+        await CommunityService.expire_due_ads(session)
         now = utcnow()
-        ads = (
-            await session.execute(
-                select(AdCampaign)
-                .where(
-                    AdCampaign.is_active.is_(True),
-                    AdCampaign.placement.in_(["all", placement]),
+        ads = list(
+            (
+                await session.execute(
+                    select(AdCampaign)
+                    .where(
+                        AdCampaign.is_active.is_(True),
+                        AdCampaign.placement.in_(["all", placement]),
+                        or_(AdCampaign.expires_at.is_(None), AdCampaign.expires_at > now),
+                    )
+                    .order_by(AdCampaign.views_count.asc(), AdCampaign.id.asc())
                 )
-                .order_by(AdCampaign.views_count.asc(), AdCampaign.id.asc())
             )
-        ).scalars().all()
-        for ad in ads:
-            if ad.last_shown_at is None or (now - ensure_utc(ad.last_shown_at)) >= timedelta(minutes=ad.frequency_mins):
-                ad.last_shown_at = now
-                ad.views_count += 1
-                await session.flush()
-                return ad
-        return None
+            .scalars()
+            .all()
+        )
+        if not ads:
+            return None
+        ad = next((a for a in ads if a.placement == placement), ads[0])
+        await session.execute(
+            update(AdCampaign)
+            .where(AdCampaign.id == ad.id)
+            .values(views_count=AdCampaign.views_count + 1, last_shown_at=now)
+        )
+        ad.views_count = int(ad.views_count or 0) + 1
+        ad.last_shown_at = now
+        await session.flush()
+        return ad
+
+    @staticmethod
+    async def record_ad_click(session: AsyncSession, ad_id: int) -> Optional[AdCampaign]:
+        ad = await session.get(AdCampaign, ad_id)
+        if ad is None:
+            return None
+        await session.execute(
+            update(AdCampaign)
+            .where(AdCampaign.id == ad_id)
+            .values(clicks_count=AdCampaign.clicks_count + 1)
+        )
+        ad.clicks_count = int(ad.clicks_count or 0) + 1
+        await session.flush()
+        return ad
+
+    @staticmethod
+    def format_ad_footer(ad: AdCampaign, bot_username: Optional[str] = None) -> str:
+        safe_txt = html.escape(ad.text or "")
+        if ad.button_url and ad.button_text:
+            tok_esc = html.escape(ad.button_text)
+            href = (
+                f"https://t.me/{bot_username}?start=ad_{ad.id}"
+                if bot_username
+                else ad.button_url
+            )
+            link_tag = f'<a href="{html.escape(href, quote=True)}">{tok_esc}</a>'
+            if tok_esc in safe_txt:
+                safe_txt = safe_txt.replace(tok_esc, link_tag, 1)
+            else:
+                safe_txt = f"{safe_txt} — {link_tag}"
+        return f"📢 {safe_txt}"
+
+    @staticmethod
+    async def get_rendered_ad(
+        session: AsyncSession,
+        bot_username: Optional[str] = None,
+        user: Optional[User] = None,
+        placement: str = "private",
+    ) -> Optional[str]:
+        ad = await CommunityService.pick_due_ad(session, user=user, placement=placement)
+        if ad is None:
+            return None
+        return CommunityService.format_ad_footer(ad, bot_username=bot_username)
 
     # ------------------------------------------------------------------
     # Support Tickets
