@@ -109,14 +109,14 @@ class QuizCb(CallbackData, prefix="qz"):
 
 class GameCb(CallbackData, prefix="gm"):
     owner_id: int
-    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick
+    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick, slots, slots_go, mines, mines_go, mines_open, mines_cash, wheel, wheel_go
     val: int = 0
     extra: str = ""
 
 
 class AucCb(CallbackData, prefix="auc"):
     owner_id: int
-    act: str = "v"  # v, det, bid, custom, mine
+    act: str = "v"  # v, det, bid, custom, mine, new, uc_new, dur, cancel_u
     aid: int = 0
     amt: int = 0
     p: int = 1
