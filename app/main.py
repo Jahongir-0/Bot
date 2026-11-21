@@ -9,6 +9,7 @@ from config.settings import get_settings
 from database.redis_client import init_lock_manager
 from database.seed import seed_initial_data
 from database.session import close_db, get_session, init_db
+from services.admin_service import AdminService
 from services.gameplay_service import GameplayService
 from utils.logging_config import setup_logging
 
@@ -56,6 +57,9 @@ async def main() -> None:
     async with get_session() as session:
         await seed_initial_data(session)
         await GameplayService.sync_runtime_and_legacy_ranks(session)
+        unbanned = await AdminService.ensure_admins_unbanned(session)
+        if unbanned:
+            logger.info("Avtomatik bandan ochilgan adminlar soni: %s", unbanned)
         await session.commit()
 
     lock_manager = await init_lock_manager(settings.redis_url)
