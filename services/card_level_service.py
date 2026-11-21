@@ -47,6 +47,7 @@ DEFAULT_LEVEL_CONFIG: Dict[str, Any] = {
     "dup_refund_percent": 50,  # maksimal darajada dublikat tushsa, qiymatning necha foizi coin bo'lib qaytadi
     "stars_per_level": 20,     # Stars narxi = shu son x joriy daraja
     "stars_max_level": 5,      # Stars bilan faqat shu darajagacha ko'tariladi
+    "bot_sell_level_bonus_pct": 10,  # Botga sotishda har bir qo'shimcha daraja uchun +foiz (o'rtacha 10%)
     "merge_cost_4": 5,         # 4-rank (Legendary) -> 5-rank (Mythic): nechta karta kerak (0 = o'chirilgan)
     "merge_cost_5": 10,        # 5-rank (Mythic) -> 6-rank (Divine): nechta karta kerak (0 = o'chirilgan)
     "base_power": {"1": 10, "2": 25, "3": 60, "4": 150, "5": 400, "6": 1000},
@@ -154,6 +155,31 @@ class CardLevelService:
         factor = float(cfg.get("coin_cost_factor", 0.5))
         return max(100, int(round(int(base_value) * factor * max(1, int(level)))))
 
+    @staticmethod
+    def bot_sell_price(rank_base_value: int, level: int, cfg: Dict[str, Any]) -> Tuple[int, int, int]:
+        """Botga sotish narxi: (jami, rank_narxi, daraja_bonusi).
+
+        Lvl 1 -> rank_narxi. Har +1 lvl uchun bot_sell_level_bonus_pct% (standart +10%) qo'shiladi.
+        """
+        base = max(1, int(rank_base_value or 0))
+        lv = max(1, int(level or 1))
+        pct = max(0, int(cfg.get("bot_sell_level_bonus_pct", 10)))
+        bonus = int(round(base * (pct / 100.0) * (lv - 1))) if lv > 1 and pct > 0 else 0
+        return base + bonus, base, bonus
+
+    @staticmethod
+    def rank_value_for_card(card: Card, rcfg: Dict[str, Dict[str, int]]) -> int:
+        """Kartaning ranki bo'yicha joriy coin qiymatini qaytaradi."""
+        rarity_low = (card.rarity or "").strip().lower()
+        for k, entry in (rcfg or {}).items():
+            if str(k).strip().lower() == rarity_low and isinstance(entry, dict):
+                val = int(entry.get("value", 0) or 0)
+                if val > 0:
+                    return val
+        if int(card.base_value or 0) > 0:
+            return int(card.base_value)
+        return max(1, int(get_rarity_meta(card.rarity).default_base_value))
+
     # ---------------------------------------------------------------- amallar
     @staticmethod
     async def upgrade_with_coins(session: AsyncSession, user_id: int, user_card_id: int) -> UpgradeResult:
@@ -164,10 +190,12 @@ class CardLevelService:
         if card is None:
             return UpgradeResult(False, "Karta topilmadi.")
         cfg = await CardLevelService.get_config(session)
+        rcfg = await SettingsService.get_rarity_config(session)
         level = int(uc.level or 1)
         if level >= cfg["max_level"]:
             return UpgradeResult(False, "👑 Bu karta allaqachon eng yuqori darajada.", level)
-        cost = CardLevelService.upgrade_cost(card.base_value, level, cfg)
+        card_val = CardLevelService.rank_value_for_card(card, rcfg)
+        cost = CardLevelService.upgrade_cost(card_val, level, cfg)
         try:
             await UserService.debit_coins(
                 session, user_id, cost, "card_level_up", f"Level up: {card.character_name} {level}->{level + 1}"

@@ -32,6 +32,7 @@ from utils.constants import (
     PROFILE_BACKGROUNDS,
     PROFILE_FRAMES,
     get_rank_name_by_order,
+    get_rarity_aliases,
     sync_runtime_ranks,
 )
 
@@ -255,6 +256,7 @@ class GameplayService:
         emoji: Optional[str] = None,
         drop_probability: Optional[int] = None,
         drop_limit: Optional[int] = None,
+        base_value: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Bitta rank maydonini alohida tahrirlash (100% moslash tugmasi bilan birga)."""
         ranks = await GameplayService.get_rank_definitions(session)
@@ -273,11 +275,24 @@ class GameplayService:
             target["drop_probability"] = max(0, min(100, int(drop_probability)))
         if drop_limit is not None:
             target["drop_limit"] = max(1, int(drop_limit))
+        if base_value is not None:
+            val = max(1, int(base_value))
+            target["base_value"] = val
+            aliases = get_rarity_aliases(str(target["name"]))
+            if aliases:
+                await session.execute(
+                    update(Card)
+                    .where(func.lower(Card.rarity).in_(aliases))
+                    .values(base_value=val)
+                )
         await SettingsService.set_value(session, "rank_definitions", ranks)
         rcfg = await SettingsService.get_rarity_config(session)
         for r in ranks:
-            rcfg[str(r["name"])] = {
-                "value": int(r.get("base_value", 0)),
+            r_nm = str(r["name"])
+            existing_val = int((rcfg.get(r_nm) or {}).get("value", 0) or 0)
+            r_val = int(r.get("base_value", 0) or 0)
+            rcfg[r_nm] = {
+                "value": r_val if r_val > 0 else (existing_val if existing_val > 0 else 1000),
                 "drops": int(r.get("drop_limit", 1)),
             }
         await SettingsService.set_value(session, "rarity_config", rcfg)
@@ -296,24 +311,26 @@ class GameplayService:
         emoji: str,
         drop_probability: int,
         drop_limit: int,
+        base_value: int = 1000,
     ) -> List[Dict[str, Any]]:
         ranks = await GameplayService.get_rank_definitions(session)
         if any(str(r["name"]).lower() == name.strip().lower() for r in ranks):
             raise ValueError("Bu nomdagi rank allaqachon mavjud.")
+        b_val = max(1, int(base_value or 1000))
         ranks.append(
             {
                 "name": name.strip()[:32],
                 "emoji": emoji.strip()[:8] or "⭐",
                 "order": len(ranks) + 1,
                 "drop_probability": max(0, min(100, int(drop_probability))),
-                "base_value": 0,
+                "base_value": b_val,
                 "drop_limit": max(1, int(drop_limit)),
                 "rank_weight": max(1, len(ranks) * 20),
             }
         )
         await SettingsService.set_value(session, "rank_definitions", ranks)
         rcfg = await SettingsService.get_rarity_config(session)
-        rcfg[name.strip()[:32]] = {"value": 0, "drops": max(1, int(drop_limit))}
+        rcfg[name.strip()[:32]] = {"value": b_val, "drops": max(1, int(drop_limit))}
         await SettingsService.set_value(session, "rarity_config", rcfg)
         sync_runtime_ranks(ranks)
         return ranks
@@ -877,6 +894,394 @@ class GameplayService:
             f"{title}\n\n{cards_reveal}\n\n"
             f"Siz <b>#{picked_slot}</b> kartani ochdingiz: <b>+{reward_coins:,} 🪙</b> · ⚡ +{reward_xp} XP"
         ), reward_coins
+
+    # ------------------------------------------------------------------
+    # Mini Games: Slots (🎰 777), Mines / Xazina Ovi (💣), Spin Wheel (🎡)
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def _daily_game_count(session: AsyncSession, uid: int, game_type: str) -> Tuple[Any, int]:
+        tz = ZoneInfo(get_settings().timezone)
+        today = datetime.now(tz).date()
+        used = int(
+            (
+                await session.execute(
+                    select(func.count(GameSession.id)).where(
+                        GameSession.user_id == uid,
+                        GameSession.game_type == game_type,
+                        GameSession.created_date == today,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        return today, used
+
+    @staticmethod
+    async def get_slots_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        cfg = await GameplayService.get_game_config(session)
+        _today, used = await GameplayService._daily_game_count(session, uid, "slots")
+        return bool(cfg.get("slots_enabled", True)), used, int(cfg.get("slots_daily_limit", 5))
+
+    @staticmethod
+    def decode_slot_reels(dice_value: int) -> Tuple[str, str, str]:
+        syms = ("🍫", "🍇", "🍋", "7️⃣")
+        d = max(0, min(63, int(dice_value) - 1))
+        return syms[d % 4], syms[(d // 4) % 4], syms[(d // 16) % 4]
+
+    @staticmethod
+    async def play_slots_game(
+        session: AsyncSession,
+        user_or_id: Union[User, int],
+        dice_value: int,
+        bet: int,
+    ) -> Tuple[bool, str, int, int]:
+        """Slot mashina (🎰): 777=10x, 3x bir xil=4x, 2x yonma-yon=1.5x. Qaytaradi (ok, msg, payout, net_delta)."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", 0, 0
+        cfg = await GameplayService.get_game_config(session)
+        if not cfg.get("slots_enabled", True):
+            return False, "🎰 Slot mashinasi vaqtincha o‘chirilgan.", 0, 0
+        bet_amt = int(bet)
+        if bet_amt not in (50, 100, 250, 500):
+            return False, "Garov miqdori 50, 100, 250 yoki 500 coin bo‘lishi kerak.", 0, 0
+
+        today, used = await GameplayService._daily_game_count(session, uid, "slots")
+        limit = int(cfg.get("slots_daily_limit", 5))
+        if used >= limit:
+            return False, f"🎰 Bugungi Slot limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0, 0
+
+        try:
+            await UserService.debit_coins(
+                session,
+                uid,
+                bet_amt,
+                "mini_game_slots_bet",
+                f"Slots bet {bet_amt}",
+                reference_id=f"slots_bet:{uid}:{today.isoformat()}:{used + 1}",
+            )
+        except InsufficientCoinsError:
+            return False, f"🪙 Coinlaringiz yetarli emas ({bet_amt:,} 🪙 kerak).", 0, 0
+
+        val = max(1, min(64, int(dice_value)))
+        r1, r2, r3 = GameplayService.decode_slot_reels(val)
+        combo_txt = f"[ {r1} | {r2} | {r3} ]"
+
+        if val == 64:
+            mult = 10.0
+            label = "💎 MEGA JACKPOT 777 (10x)!"
+        elif val in (1, 22, 43):
+            mult = 4.0
+            label = "🔥 3 TA BIR XIL (4x)!"
+        elif r1 == r2 or r2 == r3:
+            mult = 1.5
+            label = "✨ JUFT KOMBO (1.5x)!"
+        else:
+            mult = 0.0
+            label = "😔 Omad kelmadi"
+
+        payout = int(round(bet_amt * mult)) if mult > 0 else 0
+        reward_xp = int(cfg.get("slots_xp", 15)) if payout > 0 else 0
+
+        session.add(
+            GameSession(
+                user_id=uid,
+                game_type="slots",
+                roll_value=val,
+                reward_coins=payout,
+                reward_xp=reward_xp,
+                created_date=today,
+            )
+        )
+        if payout > 0:
+            await UserService.credit_coins(
+                session,
+                uid,
+                payout,
+                "mini_game_slots_win",
+                f"Slots win {combo_txt}",
+                reference_id=f"slots_win:{uid}:{today.isoformat()}:{used + 1}",
+            )
+            user.game_wins = int(user.game_wins or 0) + 1
+            user.xp = int(user.xp or 0) + reward_xp
+            user.level = max(1, 1 + (user.xp // 250))
+            await GameplayService.add_season_points(session, uid, points=12, xp=reward_xp)
+        await session.flush()
+
+        net = payout - bet_amt
+        if payout > 0:
+            return True, (
+                f"🎰 <b>{label}</b>\n\n{combo_txt}\n\n"
+                f"🪙 Yutuq: <b>+{payout:,}</b> coin (sof: +{net:,} 🪙) · ⚡ +{reward_xp} XP"
+            ), payout, net
+        return True, (
+            f"🎰 <b>{label}</b>\n\n{combo_txt}\n\n"
+            f"🪙 Yo‘qotildi: <b>-{bet_amt:,}</b> coin"
+        ), 0, -bet_amt
+
+    @staticmethod
+    async def get_mines_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int]:
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        cfg = await GameplayService.get_game_config(session)
+        _today, used = await GameplayService._daily_game_count(session, uid, "mines")
+        return bool(cfg.get("mines_enabled", True)), used, int(cfg.get("mines_daily_limit", 5))
+
+    MINES_MULTIPLIERS: Tuple[float, ...] = (1.0, 1.35, 1.85, 2.6, 4.0)
+
+    @staticmethod
+    async def start_mines_game(
+        session: AsyncSession,
+        user_or_id: Union[User, int],
+        bet: int,
+        forced_bombs: Optional[List[int]] = None,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """6 ta sandiqdan 4 oltin / 2 bomba o'yinini boshlaydi."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", None
+        cfg = await GameplayService.get_game_config(session)
+        if not cfg.get("mines_enabled", True):
+            return False, "💣 Xazina ovi o‘yini vaqtincha o‘chirilgan.", None
+        bet_amt = int(bet)
+        if bet_amt not in (50, 100, 250, 500):
+            return False, "Garov miqdori 50, 100, 250 yoki 500 coin bo‘lishi kerak.", None
+
+        today, used = await GameplayService._daily_game_count(session, uid, "mines")
+        limit = int(cfg.get("mines_daily_limit", 5))
+        if used >= limit:
+            return False, f"💣 Bugungi Xazina ovi limiti tugadi ({limit}/{limit}). Ertaga qayting!", None
+
+        try:
+            await UserService.debit_coins(
+                session,
+                uid,
+                bet_amt,
+                "mini_game_mines_bet",
+                f"Mines bet {bet_amt}",
+                reference_id=f"mines_bet:{uid}:{today.isoformat()}:{used + 1}",
+            )
+        except InsufficientCoinsError:
+            return False, f"🪙 Coinlaringiz yetarli emas ({bet_amt:,} 🪙 kerak).", None
+
+        gs = GameSession(
+            user_id=uid,
+            game_type="mines",
+            roll_value=bet_amt,
+            reward_coins=0,
+            reward_xp=0,
+            created_date=today,
+        )
+        session.add(gs)
+        await session.flush()
+
+        bombs = sorted(forced_bombs)[:2] if forced_bombs and len(forced_bombs) == 2 else sorted(random.sample(range(6), 2))
+        state_obj: Dict[str, Any] = {
+            "session_id": gs.id,
+            "bet": bet_amt,
+            "bombs": bombs,
+            "opened": [],
+            "safe_hits": 0,
+            "finished": False,
+        }
+        return True, "💣 6 ta sandiq tayyor! Ehtiyot bo‘lib oching:", state_obj
+
+    @staticmethod
+    async def step_mines_game(
+        session: AsyncSession,
+        user_or_id: Union[User, int],
+        game_state: Dict[str, Any],
+        cell_idx: int,
+    ) -> Tuple[str, int, str]:
+        """Sandiq ochish: qaytaradi (outcome: 'safe'|'boom'|'jackpot'|'invalid', payout, message)."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        if game_state.get("finished"):
+            return "invalid", 0, "Bu o‘yin allaqachon tugagan."
+        if not (0 <= int(cell_idx) < 6) or int(cell_idx) in game_state["opened"]:
+            return "invalid", 0, "Boshqa yopiq sandiq tanlang."
+
+        game_state["opened"].append(int(cell_idx))
+        bet_amt = int(game_state["bet"])
+        if int(cell_idx) in game_state["bombs"]:
+            game_state["finished"] = True
+            return "boom", 0, (
+                f"💥 <b>BOMBA PORTLADI!</b>\n\n"
+                f"Sandiq #{cell_idx + 1} da bomba bor edi.\n"
+                f"🪙 Yo‘qotildi: <b>-{bet_amt:,}</b> coin"
+            )
+
+        game_state["safe_hits"] = int(game_state["safe_hits"]) + 1
+        hits = game_state["safe_hits"]
+        mult = GameplayService.MINES_MULTIPLIERS[min(hits, len(GameplayService.MINES_MULTIPLIERS) - 1)]
+        cur_payout = int(round(bet_amt * mult))
+
+        if hits >= 4:
+            # Barcha 4 oltin topildi -> avtomatik JACKPOT cashout!
+            return await GameplayService.cashout_mines_game(session, uid, game_state, forced_jackpot=True)
+
+        next_mult = GameplayService.MINES_MULTIPLIERS[min(hits + 1, len(GameplayService.MINES_MULTIPLIERS) - 1)]
+        next_payout = int(round(bet_amt * next_mult))
+        return "safe", cur_payout, (
+            f"💎 <b>OLTIN TOPILDI!</b> ({hits}/4)\n\n"
+            f"📈 Joriy koeffitsient: <b>{mult:.2f}x</b> → <b>{cur_payout:,} 🪙</b>\n"
+            f"🔥 Keyingi oltin: <b>{next_mult:.2f}x</b> ({next_payout:,} 🪙)\n\n"
+            "Yana ochasizmi yoki yutuqni olasizmi?"
+        )
+
+    @staticmethod
+    async def cashout_mines_game(
+        session: AsyncSession,
+        user_or_id: Union[User, int],
+        game_state: Dict[str, Any],
+        forced_jackpot: bool = False,
+    ) -> Tuple[str, int, str]:
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        if game_state.get("finished"):
+            return "invalid", 0, "Bu o‘yin allaqachon tugagan."
+        hits = int(game_state.get("safe_hits", 0))
+        if hits <= 0:
+            return "invalid", 0, "Avval kamida 1 ta sandiq oching!"
+
+        game_state["finished"] = True
+        bet_amt = int(game_state["bet"])
+        mult = GameplayService.MINES_MULTIPLIERS[min(hits, len(GameplayService.MINES_MULTIPLIERS) - 1)]
+        payout = int(round(bet_amt * mult))
+
+        user = await session.get(User, uid)
+        cfg = await GameplayService.get_game_config(session)
+        reward_xp = int(cfg.get("mines_xp", 15))
+        gs = await session.get(GameSession, int(game_state["session_id"]))
+        if gs is not None:
+            gs.reward_coins = payout
+            gs.reward_xp = reward_xp
+
+        await UserService.credit_coins(
+            session,
+            uid,
+            payout,
+            "mini_game_mines_win",
+            f"Mines cashout {mult:.2f}x ({hits}/4)",
+            reference_id=f"mines_win:{game_state['session_id']}",
+        )
+        if user is not None:
+            user.game_wins = int(user.game_wins or 0) + 1
+            user.xp = int(user.xp or 0) + reward_xp
+            user.level = max(1, 1 + (user.xp // 250))
+            await GameplayService.add_season_points(session, uid, points=12, xp=reward_xp)
+        await session.flush()
+
+        net = payout - bet_amt
+        title = "🏆 <b>BARCHA XAZINA TOPILDI (4.0x JACKPOT)!</b>" if forced_jackpot else f"💰 <b>YUTUQ OLIB CHIQILDI ({mult:.2f}x)!</b>"
+        return ("jackpot" if forced_jackpot else "cashout"), payout, (
+            f"{title}\n\n"
+            f"💎 Topilgan oltinlar: <b>{hits}/4</b>\n"
+            f"🪙 Yutuq: <b>+{payout:,}</b> coin (sof: +{net:,} 🪙) · ⚡ +{reward_xp} XP"
+        )
+
+    @staticmethod
+    async def get_wheel_status(session: AsyncSession, user_or_id: Union[User, int]) -> Tuple[bool, int, int, int]:
+        """(enabled, used, limit, ticket_cost)"""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        cfg = await GameplayService.get_game_config(session)
+        _today, used = await GameplayService._daily_game_count(session, uid, "wheel")
+        return (
+            bool(cfg.get("wheel_enabled", True)),
+            used,
+            int(cfg.get("wheel_daily_limit", 3)),
+            max(0, int(cfg.get("wheel_ticket_cost", 100))),
+        )
+
+    WHEEL_SECTORS: Tuple[Tuple[str, int, int, int], ...] = (
+        # (label, weight, coins, extra_xp)
+        ("💎 JACKPOT", 3, 500, 30),
+        ("🔥 Katta Yutuq", 9, 220, 20),
+        ("🪙 Oltin Sektor", 22, 140, 15),
+        ("🪙 Kichik Yutuq", 30, 75, 10),
+        ("⚡ Energiya (+XP)", 20, 25, 50),
+        ("😅 Bo‘sh sektor", 16, 0, 5),
+    )
+
+    @staticmethod
+    async def play_wheel_game(
+        session: AsyncSession,
+        user_or_id: Union[User, int],
+    ) -> Tuple[bool, str, int]:
+        """Omad g'ildiragi: kirish bileti (ticket_cost) -> sektor yutuqlari."""
+        uid = user_or_id if isinstance(user_or_id, int) else int(user_or_id.id)
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", 0
+        cfg = await GameplayService.get_game_config(session)
+        if not cfg.get("wheel_enabled", True):
+            return False, "🎡 Omad g‘ildiragi vaqtincha o‘chirilgan.", 0
+
+        today, used = await GameplayService._daily_game_count(session, uid, "wheel")
+        limit = int(cfg.get("wheel_daily_limit", 3))
+        if used >= limit:
+            return False, f"🎡 Bugungi Omad g‘ildiragi limiti tugadi ({limit}/{limit}). Ertaga qayting!", 0
+
+        ticket = max(0, int(cfg.get("wheel_ticket_cost", 100)))
+        if ticket > 0:
+            try:
+                await UserService.debit_coins(
+                    session,
+                    uid,
+                    ticket,
+                    "mini_game_wheel_ticket",
+                    f"Wheel ticket ({ticket})",
+                    reference_id=f"wheel_bet:{uid}:{today.isoformat()}:{used + 1}",
+                )
+            except InsufficientCoinsError:
+                return False, f"🪙 Chipta uchun coin yetarli emas ({ticket:,} 🪙 kerak).", 0
+
+        weights = [s[1] for s in GameplayService.WHEEL_SECTORS]
+        idx = random.choices(range(len(GameplayService.WHEEL_SECTORS)), weights=weights, k=1)[0]
+        label, _w, reward_coins, bonus_xp = GameplayService.WHEEL_SECTORS[idx]
+        total_xp = int(cfg.get("wheel_xp", 15)) if reward_coins > 0 else 0
+        total_xp = max(total_xp, bonus_xp)
+
+        session.add(
+            GameSession(
+                user_id=uid,
+                game_type="wheel",
+                roll_value=idx + 1,
+                reward_coins=reward_coins,
+                reward_xp=total_xp,
+                created_date=today,
+            )
+        )
+        if reward_coins > 0:
+            await UserService.credit_coins(
+                session,
+                uid,
+                reward_coins,
+                "mini_game_wheel_win",
+                f"Wheel sector: {label}",
+                reference_id=f"wheel_win:{uid}:{today.isoformat()}:{used + 1}",
+            )
+            if reward_coins >= ticket:
+                user.game_wins = int(user.game_wins or 0) + 1
+        user.xp = int(user.xp or 0) + total_xp
+        user.level = max(1, 1 + (user.xp // 250))
+        await GameplayService.add_season_points(session, uid, points=10 if reward_coins > 0 else 3, xp=total_xp)
+        await session.flush()
+
+        ticket_note = f"\n🎟 Chipta: -{ticket:,} 🪙" if ticket > 0 else ""
+        if reward_coins > 0:
+            return True, (
+                f"🎡 <b>OMAD G‘ILDIRAGI TO‘XTADI!</b>\n\n"
+                f"🎯 Sektor: <b>{label}</b>\n"
+                f"🎁 Mukofot: <b>+{reward_coins:,} 🪙</b> · ⚡ +{total_xp} XP"
+                f"{ticket_note}"
+            ), reward_coins
+        return True, (
+            f"🎡 <b>OMAD G‘ILDIRAGI TO‘XTADI!</b>\n\n"
+            f"🎯 Sektor: <b>{label}</b>\n"
+            f"⚡ Tasalli mukofoti: <b>+{total_xp} XP</b>"
+            f"{ticket_note}"
+        ), 0
 
     # ------------------------------------------------------------------
     # Daily Random Card (faqat released/faol kartalardan)

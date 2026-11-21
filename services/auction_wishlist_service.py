@@ -22,6 +22,7 @@ from models.v2_features import (
 from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
 from services.user_service import InsufficientCoinsError, UserService
+from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +88,45 @@ class AuctionWishlistService:
     ) -> Tuple[bool, str, Optional[Auction]]:
         if start_price <= 0 or hours <= 0:
             return False, "Narx va davomiylik musbat bo‘lishi kerak.", None
+        if seller_user_id is not None:
+            if not (MIN_CARD_PRICE <= int(start_price) <= MAX_CARD_PRICE):
+                return (
+                    False,
+                    f"Boshlang‘ich narx {MIN_CARD_PRICE:,} dan {MAX_CARD_PRICE:,} 🪙 gacha bo‘lishi kerak.",
+                    None,
+                )
+            if not (1 <= int(hours) <= 72):
+                return False, "Auksion davomiyligi 1 soatdan 72 soatgacha bo‘lishi kerak.", None
+            active_cnt = int(
+                (
+                    await session.execute(
+                        select(func.count(Auction.id)).where(
+                            Auction.seller_user_id == seller_user_id,
+                            Auction.status == "active",
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            if active_cnt >= 3:
+                return False, "Bir vaqtda eng ko‘pi bilan 3 ta faol auksion qo‘yishingiz mumkin.", None
+
         card = await session.get(Card, card_id)
         if card is None or card.is_deleted:
             return False, "Karta topilmadi.", None
 
         if user_card_id is not None:
-            uc = await session.get(UserCard, user_card_id)
-            if uc is None or uc.user_id != seller_user_id or uc.is_locked:
+            upd = await session.execute(
+                update(UserCard)
+                .where(
+                    UserCard.id == user_card_id,
+                    UserCard.user_id == seller_user_id,
+                    UserCard.is_locked.is_(False),
+                )
+                .values(is_locked=True, card_state="AUCTION", updated_at=utcnow())
+            )
+            if upd.rowcount != 1:
                 return False, "Bu karta nusxasi auksion uchun band yoki topilmadi.", None
-            uc.is_locked = True
-            uc.card_state = "AUCTION"
         else:
             # Admin auksioni: karta hali tashlanmagan/yopiq bo'lsa state AUCTION qilamiz
             card.card_state = "AUCTION"
@@ -138,6 +168,68 @@ class AuctionWishlistService:
             )
         ).all()
         return [(r[0], r[1]) for r in rows], total
+
+    @staticmethod
+    async def list_user_created_auctions(
+        session: AsyncSession, seller_user_id: int, page: int = 1, page_size: int = 10
+    ) -> Tuple[List[Tuple[Auction, Card]], int]:
+        now = utcnow()
+        cond = [
+            Auction.seller_user_id == seller_user_id,
+            Auction.status == "active",
+            Auction.ends_at > now,
+        ]
+        total = int((await session.execute(select(func.count(Auction.id)).where(*cond))).scalar_one() or 0)
+        rows = (
+            await session.execute(
+                select(Auction, Card)
+                .join(Card, Card.id == Auction.card_id)
+                .where(*cond)
+                .order_by(Auction.ends_at.asc())
+                .offset((max(1, page) - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        return [(r[0], r[1]) for r in rows], total
+
+    @staticmethod
+    async def list_user_sellable_cards(
+        session: AsyncSession, user_id: int, page: int = 1, page_size: int = 8
+    ) -> Tuple[List[Tuple[UserCard, Card]], int]:
+        cond = [UserCard.user_id == user_id, UserCard.is_locked.is_(False)]
+        total = int((await session.execute(select(func.count(UserCard.id)).where(*cond))).scalar_one() or 0)
+        rows = (
+            await session.execute(
+                select(UserCard, Card)
+                .join(Card, Card.id == UserCard.card_id)
+                .where(*cond)
+                .order_by(UserCard.is_favorite.asc(), UserCard.level.desc(), UserCard.id.desc())
+                .offset((max(1, page) - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        return [(r[0], r[1]) for r in rows], total
+
+    @staticmethod
+    async def cancel_user_auction(
+        session: AsyncSession, auction_id: int, user_id: int
+    ) -> Tuple[bool, str]:
+        auc = await session.get(Auction, auction_id)
+        if auc is None or auc.seller_user_id != user_id:
+            return False, "Auksion topilmadi yoki sizga tegishli emas."
+        if auc.status != "active":
+            return False, "Bu auksion allaqachon yakunlangan."
+        if int(auc.bid_count or 0) > 0:
+            return False, "⚠️ Stavka qo‘yilgan auksionni bekor qilib bo‘lmaydi!"
+        if auc.user_card_id:
+            uc = await session.get(UserCard, auc.user_card_id)
+            if uc:
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+        auc.status = "cancelled"
+        auc.finalized = True
+        await session.flush()
+        return True, "✅ Auksion bekor qilindi va kartangiz qaytarildi."
 
     @staticmethod
     async def get_auction_detail(session: AsyncSession, auction_id: int) -> Optional[Tuple[Auction, Card, Optional[User]]]:
