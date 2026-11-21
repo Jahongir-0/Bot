@@ -233,9 +233,11 @@ class AdCampaign(Base, TimestampMixin):
     button_text: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     button_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     placement: Mapped[str] = mapped_column(String(24), nullable=False, default="all")
-    frequency_mins: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    frequency_mins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     views_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clicks_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_shown_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
