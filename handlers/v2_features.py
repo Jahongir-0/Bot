@@ -38,6 +38,7 @@ from keyboards.v2 import (
     wishlist_kb,
 )
 from models.base import ensure_utc
+from utils.timeutils import fmt_tashkent, to_tashkent
 from models.card import Card
 from models.user import User
 from models.user_card import UserCard
@@ -1083,7 +1084,7 @@ async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb, db_us
         f"💰 Joriy narx: <b>{fmt_coins(auc.current_price)} 🪙</b>\n"
         f"📈 Eng kam qadam: <b>+{fmt_coins(auc.min_step)}</b> 🪙\n"
         f"👑 Yetakchi: <b>{leader_name}</b> · {auc.bid_count} stavka\n"
-        f"⏳ Tugaydi: <b>{ensure_utc(auc.ends_at):%d.%m.%Y %H:%M} UTC</b>"
+        f"⏳ Tugaydi: <b>{fmt_tashkent(auc.ends_at)}</b> (Toshkent vaqti)"
     )
     if callback.message:
         await send_card_message(
@@ -1199,7 +1200,7 @@ async def _show_vip(target, owner_id: int, db_user: User) -> None:
         cfg = await CommunityService.get_vip_config(session)
         u = await session.get(User, db_user.id) or db_user
     active_str = (
-        f"💎 Faol: <b>{esc(u.vip_tier)}</b> ({ensure_utc(u.vip_until):%d.%m.%Y} gacha)"
+        f"💎 Faol: <b>{esc(u.vip_tier)}</b> ({fmt_tashkent(u.vip_until, '%d.%m.%Y')} gacha)"
         if CommunityService.is_vip_active(u)
         else "▫️ Hozircha oddiy status"
     )
@@ -1351,7 +1352,7 @@ async def cb_season_view(callback: CallbackQuery) -> None:
         return
     lines = [
         f"🏆 <b>{esc(s.name)}</b>\n",
-        f"⏳ Tugash: <b>{ensure_utc(s.ends_at):%d.%m.%Y %H:%M} UTC</b>\n",
+        f"⏳ Tugash: <b>{fmt_tashkent(s.ends_at)}</b> (Toshkent vaqti)\n",
         "<b>TOP 10 O‘YINCHILAR:</b>",
     ]
     for idx, (sp, u) in enumerate(top, start=1):

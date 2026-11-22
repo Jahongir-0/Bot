@@ -12,6 +12,7 @@ from models.user import User
 from services.community_service import CommunityService
 from services.drop_service import DropService
 from services.gameplay_service import GameplayService
+from services.welcome_bonus_service import NEW_USER_TEXT
 from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
@@ -133,6 +134,10 @@ async def cmd_start(
         fresh = await session.get(User, db_user.id)
         if fresh is not None:
             fresh_user = fresh
+            if isinstance(fresh.stats, dict) and fresh.stats.get("welcome_notice"):
+                fresh.stats = {k: v for k, v in fresh.stats.items() if k != "welcome_notice"}
+                await session.commit()
+                ref_notice = NEW_USER_TEXT
         if args.startswith("ref_") and args[4:].isdigit():
             referrer_tg_id = int(args[4:])
             res = await UserService.apply_referral(session, fresh_user, referrer_tg_id)
@@ -140,7 +145,7 @@ async def cmd_start(
                 await session.commit()
                 fresh_user = await session.get(User, db_user.id) or fresh_user
                 referrer, inviter_coins, invitee_coins = res
-                ref_notice = (
+                ref_notice += (
                     f"🎉 <b>{esc(referrer.display_name)}</b> taklifi bilan keldingiz! "
                     f"Sizga <b>+{fmt_coins(invitee_coins)} 🪙</b> bonus berildi!\n\n"
                 )
