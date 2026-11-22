@@ -5,6 +5,7 @@ from models.card import Card
 from models.event import Event
 from models.group import Group
 from models.user import User
+from utils.timeutils import fmt_tashkent
 from utils.constants import PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
 
 
@@ -207,7 +208,7 @@ def format_profile_message(
     is_vip = bool(vip_tier and vip_until and ensure_utc(vip_until) > utcnow())
     if is_vip:
         top, bottom = "💎✨━━━━━━━━━━━━━💎✨", "💎✨━━━━━━━━━━━━━💎✨"
-        status = f"💎 <b>{esc(vip_tier)} VIP</b> · {ensure_utc(vip_until):%d.%m.%Y} gacha"
+        status = f"💎 <b>{esc(vip_tier)} VIP</b> · {fmt_tashkent(vip_until, '%d.%m.%Y')} gacha"
     else:
         status = "▫️ Oddiy a’zo  <i>(💎 VIP olib ko‘proq imkoniyat oching)</i>"
 
@@ -320,7 +321,9 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
 
     meta = get_rarity_meta(card.rarity)
     ends_utc = ensure_utc(event.ends_at)
-    ends_local = ends_utc.astimezone(ZoneInfo(tz_name))
+    from utils.timeutils import to_tashkent
+
+    ends_local = to_tashkent(ends_utc)  # har doim Toshkent vaqti
     remaining = max(0, int(event.total_copies) - int(event.sold_count))
 
     secs_left = max(0, int((ends_utc - utcnow()).total_seconds()))
@@ -358,7 +361,7 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
                 f"✅ Qolgan nusxa: <b>{remaining} ta</b>",
                 "✨ <i>Bu karta boshqa hech kimda yo‘q va guruhlarga tashlanmaydi!</i>",
                 f"💳 Narxi: {'  yoki  '.join(prices)}",
-                f"⏳ Amal qiladi: <b>{ends_local:%d.%m.%Y %H:%M}</b> gacha ({dur_str})",
+                f"⏳ Amal qiladi: <b>{ends_local:%d.%m.%Y %H:%M}</b> gacha (Toshkent vaqti) ({dur_str})",
                 "━━━━━━━━━━━━━━━",
                 "👇 Pastdagi tugma yoki /event orqali oling! (Har bir odamga 1 ta nusxa)",
             ]
