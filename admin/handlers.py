@@ -43,6 +43,7 @@ from keyboards.event import (
 )
 from keyboards.v2 import admin_v2_cards_menu_kb, admin_v2_home_kb
 from models.base import ensure_utc
+from utils.timeutils import fmt_tashkent, to_tashkent
 from models.card import Card
 from models.event import Event
 from models.group import Group, GroupMember
@@ -1110,7 +1111,7 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
 
     if user.is_banned:
         if user.ban_until:
-            ban_str = f"⏱ Vaqtli ban ({ensure_utc(user.ban_until):%d.%m.%Y %H:%M} UTC gacha)"
+            ban_str = f"⏱ Vaqtli ban ({fmt_tashkent(user.ban_until)} gacha (Toshkent vaqti))"
         else:
             ban_str = "🚫 Umrbod BANNED"
     else:
@@ -1127,7 +1128,7 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         f"🎴 Cards: <b>{user.total_cards}</b> (Unique: <b>{user.unique_cards}</b>)\n"
         f"👥 Guruhlar: {groups_str}\n"
         f"📌 Holat: <b>{ban_str}</b>\n"
-        f"🕒 Oxirgi faollik: <code>{user.last_activity.strftime('%Y-%m-%d %H:%M UTC')}</code>"
+        f"🕒 Oxirgi faollik: <code>{fmt_tashkent(user.last_activity, '%Y-%m-%d %H:%M')}</code>"
     )
     await edit_or_answer(target, text, reply_markup=admin_user_detail_kb(admin_tg_id, user))
 
@@ -1164,7 +1165,7 @@ async def cb_admin_user_vip_menu(callback: CallbackQuery, callback_data: AdminCb
         text="⬅️ ORQAGA",
         callback_data=AdminCb(owner_id=owner_id, section="users", action="detail", target_id=user.id).pack(),
     ))
-    cur = f"{esc(user.vip_tier)} ({ensure_utc(user.vip_until):%d.%m.%Y} gacha)" if CommunityService.is_vip_active(user) else "yo‘q"
+    cur = f"{esc(user.vip_tier)} ({fmt_tashkent(user.vip_until, '%d.%m.%Y')} gacha)" if CommunityService.is_vip_active(user) else "yo‘q"
     await edit_or_answer(
         callback,
         f"💎 <b>VIP BERISH</b>\n\n👤 {esc(user.display_name)}\nHozirgi VIP: <b>{cur}</b>\n\nQaysi darajani beramiz?",
@@ -2059,7 +2060,7 @@ _EVT_STATUS = {"active": "🟢 Faol", "sold_out": "🔥 Sotilib bo‘ldi", "ende
 
 
 def _local_dt(dt):
-    return ensure_utc(dt).astimezone(ZoneInfo(get_settings().timezone))
+    return to_tashkent(dt)
 
 
 # ----------------------------------------------------------------------

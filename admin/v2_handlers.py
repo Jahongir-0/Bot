@@ -42,6 +42,7 @@ from keyboards.v2 import (
 )
 from models.admin import AdminAction
 from models.base import ensure_utc, utcnow
+from utils.timeutils import fmt_tashkent, to_tashkent
 from models.card import Card
 from models.group import Group
 from models.schedule import ActiveDrop
@@ -160,7 +161,9 @@ def _cancel_kb(owner_id: int, sec: str, act: str = "v") -> InlineKeyboardMarkup:
 
 
 def _local_tz() -> ZoneInfo:
-    return ZoneInfo(get_settings().timezone)
+    from utils.timeutils import TASHKENT
+
+    return TASHKENT
 
 
 def _parse_local_dt(raw: str) -> Optional[datetime]:
@@ -487,7 +490,7 @@ async def _build_v2_card_detail_text(session, card: Card) -> str:
 
     owner_preview = ", ".join(f"{n} (×{q})" for n, q in owners_list[:4]) if owners_list else "Yo‘q"
     acquired = getattr(latest_uc, "acquired_at", None) if latest_uc is not None else None
-    claimed_dt = acquired.strftime("%Y-%m-%d %H:%M") if acquired else "—"
+    claimed_dt = fmt_tashkent(acquired, "%Y-%m-%d %H:%M") if acquired else "—"
     preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
     preset_line = (
         f"\n⭐ <b>Boshlang‘ich daraja:</b> Lvl {preset_lvl}/{max_lvl} (Auksion / Event / Sovg‘a)"
@@ -793,7 +796,7 @@ async def cb_v2_card_sub_actions(callback: CallbackQuery, callback_data: AdmV2Cb
             hist = await AuctionWishlistService.get_card_history(session, card.id, limit=20)
             lines = [f"📜 <b>KARTA TARIXI: {esc(card.character_name)}</b>\n"]
             for h in hist:
-                dt = ensure_utc(h.created_at).strftime("%d.%m %H:%M")
+                dt = fmt_tashkent(h.created_at, "%d.%m %H:%M")
                 lines.append(f"• <code>{dt}</code> — <b>{esc(h.event_type)}</b>" + (f" ({h.price:,} 🪙)" if h.price else ""))
             if not hist:
                 lines.append("📭 Tarix yozuvlari yo‘q.")
@@ -1320,7 +1323,7 @@ async def _render_channels_menu(target, owner_id: int) -> None:
     for ch in channels:
         st = "🟢" if ch.is_active else "🔴"
         lim = f" · Limit: {ch.target_subscribers}" if ch.target_subscribers else ""
-        exp = f" · {ensure_utc(ch.expires_at):%d.%m %H:%M} gacha" if ch.expires_at else ""
+        exp = f" · {fmt_tashkent(ch.expires_at, '%d.%m %H:%M')} gacha" if ch.expires_at else ""
         lines.append(f"{st} <b>{esc(ch.title)}</b> [{mode_lbl.get(ch.sub_mode, ch.sub_mode)}]{lim}{exp}")
         b.row(
             InlineKeyboardButton(text=f"{st} {ch.title[:24]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="channels", act="tog", tid=ch.id).pack()),
@@ -2458,7 +2461,7 @@ async def _show_season_home(target, owner_id: int) -> None:
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="➕ Yangi Mavsum Boshlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="season", act="new").pack()))
     if s:
-        lines = [f"🏆 <b>{esc(s.name)}</b> (#{s.season_number})\n⏳ Tugash: <b>{ensure_utc(s.ends_at):%d.%m.%Y %H:%M} UTC</b>\n"]
+        lines = [f"🏆 <b>{esc(s.name)}</b> (#{s.season_number})\n⏳ Tugash: <b>{fmt_tashkent(s.ends_at)}</b> (Toshkent vaqti)\n"]
         for i, (sp, u) in enumerate(top, 1):
             lines.append(f"{i}. {esc(u.display_name)} — {sp.points} ball")
         b.row(
@@ -3208,7 +3211,7 @@ async def _show_memory_home(target, owner_id: int, date_filter: Optional[str] = 
         InlineKeyboardButton(text="📅 Sana bo‘yicha", callback_data=AdmV2Cb(owner_id=owner_id, sec="memory", act="date_q").pack()),
     )
     for b_rec in backups[:8]:
-        dt_s = ensure_utc(b_rec.created_at).strftime("%d.%m %H:%M")
+        dt_s = fmt_tashkent(b_rec.created_at, "%d.%m %H:%M")
         kb_size = max(1, b_rec.file_size_bytes // 1024)
         lines.append(f"• <code>{dt_s}</code> — {kb_size} KB ({b_rec.backup_type})")
         b.row(
@@ -3574,7 +3577,7 @@ async def cb_v2_logs(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perm
         )
     lines = [f"📋 <b>ADMIN HARAKATLARI JURNALI</b> (Jami: {total} ta | Sahifa {page})\n━━━━━━━━━━━━━━━"]
     for lg in logs:
-        dt = ensure_utc(lg.created_at).strftime("%d.%m %H:%M")
+        dt = fmt_tashkent(lg.created_at, "%d.%m %H:%M")
         lines.append(f"• <code>{dt}</code> | <code>{lg.admin_telegram_id}</code> | <b>{esc(lg.action_type)}</b> → {esc(lg.target_type)}:{esc(lg.target_id or '')}")
     if not logs:
         lines.append("📭 Loglar bo‘sh.")
