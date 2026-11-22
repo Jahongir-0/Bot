@@ -10,6 +10,7 @@ from database.redis_client import get_lock_manager
 from database.session import get_session
 from models.admin import Ban
 from models.base import ensure_utc, utcnow
+from utils.timeutils import fmt_tashkent, to_tashkent
 from models.group import Group
 from services.community_service import CommunityService
 from services.settings_service import SettingsService
@@ -184,7 +185,7 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
             # User ban check (allow support/appeal callbacks, never block admins)
             if user.is_banned and not is_adm_total and not is_payment and not is_support_cb:
                 reason = user.ban_reason or "Qoidalarni buzish"
-                exp = f"\n⏳ Muddat: {ensure_utc(user.ban_until):%d.%m.%Y %H:%M} UTC" if user.ban_until else "\n⛔ Muddat: Umrbod"
+                exp = f"\n⏳ Muddat: {fmt_tashkent(user.ban_until)} (Toshkent vaqti)" if user.ban_until else "\n⛔ Muddat: Umrbod"
                 ban_msg = f"🚫 <b>Siz botdan bloklangansiz!</b>\n📌 Sabab: {reason}{exp}"
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
