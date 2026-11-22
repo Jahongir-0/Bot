@@ -12,6 +12,7 @@ from models.transaction import CoinTransaction
 from models.user import User
 from models.user_card import UserCard
 from services.settings_service import SettingsService
+from services.welcome_bonus_service import TX_NEW, WELCOME_BONUS_COINS
 from utils.constants import Rarity
 
 
@@ -36,14 +37,26 @@ class UserService:
                 telegram_id=telegram_id,
                 username=clean_username,
                 first_name=first_name[:128] if first_name else "Collector",
-                coins=100,
-                stats={"claims": 0, "trades": 0, "sales": 0},
+                coins=WELCOME_BONUS_COINS,
+                stats={"claims": 0, "trades": 0, "sales": 0, "welcome_notice": True},
                 last_activity=now,
             )
             try:
                 # SAVEPOINT: ikki parallel birinchi xabar bir vaqtda kelsa, unique xatosi butun sessiyani buzmasin
                 async with session.begin_nested():
                     session.add(user)
+                    await session.flush()
+                    session.add(
+                        CoinTransaction(
+                            user_id=user.id,
+                            amount=WELCOME_BONUS_COINS,
+                            balance_after=WELCOME_BONUS_COINS,
+                            tx_type=TX_NEW,
+                            description="Yangi foydalanuvchi boshlang‘ich bonusi",
+                            reference_id=f"{TX_NEW}:{user.id}",
+                            meta={},
+                        )
+                    )
                     await session.flush()
             except IntegrityError:
                 result = await session.execute(select(User).where(User.telegram_id == telegram_id))
@@ -69,6 +82,7 @@ class UserService:
         username: Optional[str],
         user_id: Optional[int] = None,
     ) -> Group:
+        clean_title = title[:255] if title else "Anime Group"
         result = await session.execute(
             select(Group).where(Group.telegram_chat_id == telegram_chat_id)
         )
@@ -76,15 +90,28 @@ class UserService:
         if group is None:
             group = Group(
                 telegram_chat_id=telegram_chat_id,
-                title=title[:255] if title else "Anime Group",
+                title=clean_title,
                 username=username,
                 is_active=True,
             )
-            session.add(group)
-            await session.flush()
+            try:
+                # SAVEPOINT: bir guruhdan ikki xabar bir vaqtda kelsa, unique xatosi butun sessiyani buzmasin
+                async with session.begin_nested():
+                    session.add(group)
+                    await session.flush()
+            except IntegrityError:
+                result = await session.execute(
+                    select(Group).where(Group.telegram_chat_id == telegram_chat_id)
+                )
+                group = result.scalar_one()
+                if title:
+                    group.title = clean_title
+                group.username = username
+                group.is_active = True
+                await session.flush()
         else:
             if title:
-                group.title = title[:255]
+                group.title = clean_title
             group.username = username
             group.is_active = True
             await session.flush()
@@ -98,16 +125,29 @@ class UserService:
             )
             gm = gm_res.scalar_one_or_none()
             if gm is None:
-                session.add(
-                    GroupMember(
-                        group_id=group.id,
-                        user_id=user_id,
-                        last_seen=utcnow(),
+                try:
+                    async with session.begin_nested():
+                        session.add(
+                            GroupMember(
+                                group_id=group.id,
+                                user_id=user_id,
+                                last_seen=utcnow(),
+                            )
+                        )
+                        await session.flush()
+                except IntegrityError:
+                    gm_res = await session.execute(
+                        select(GroupMember).where(
+                            GroupMember.group_id == group.id,
+                            GroupMember.user_id == user_id,
+                        )
                     )
-                )
+                    gm = gm_res.scalar_one()
+                    gm.last_seen = utcnow()
+                    await session.flush()
             else:
                 gm.last_seen = utcnow()
-            await session.flush()
+                await session.flush()
 
         return group
 
