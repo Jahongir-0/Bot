@@ -12,14 +12,14 @@ Production-ready, asynchronous Telegram bot built with **Python 3.11+**, **aiogr
 - **Full Admin Panel (`/admin`)**: Card CRUD + safe soft-delete migration, user management, coin +/-, global ban, group settings, events, and broadcast.
 
 ## Quick Start (Local)
-1. Install Python **3.11+** (3.10+ supported).
-2. Create virtualenv & install dependencies:
+1. Install Python **3.11+** (the production Docker image uses Python 3.11).
+2. Create a virtualenv and install dependencies:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
-3. Copy `.env.example` to `.env` and set `BOT_TOKEN` and `ADMIN_IDS`.
+3. Copy `.env.example` to `.env` and set `BOT_TOKEN`, `ADMIN_IDS`, and a random 32+ character `STARS_PAYMENT_SECRET` if Stars payments are enabled.
 4. Run migrations & start bot:
    ```bash
    alembic upgrade head
@@ -79,3 +79,30 @@ Stars bilan olinganda **coin emas, kartaning o'zi** beriladi; event kartada coin
 ## Yangilanish
 Eski bazaga yangi ustun/jadvallar bot ishga tushganda **avtomatik** qo'shiladi. Alembic ishlatsangiz: `alembic upgrade head`.
 Eslatma: guruhda ismni yozish (FSM) uchun BotFather'da `/setprivacy` → **Disable** tavsiya etiladi.
+
+
+## Production / Railway
+
+- Railway PostgreSQL should be provided through `DATABASE_URL`. The application normalizes Railway's `postgresql://` URL to SQLAlchemy's asyncpg driver.
+- Deployment runs `alembic upgrade head` before starting the bot. Keep `AUTO_SCHEMA_UPGRADE=false` in production so schema changes have one source of truth: Alembic migrations.
+- For small Railway PostgreSQL plans, the default pool is intentionally conservative: `DB_POOL_SIZE=5`, `DB_MAX_OVERFLOW=10`, `DB_POOL_TIMEOUT=30`. Increase only after measuring connection usage.
+- `REDIS_URL` is recommended in production for distributed locks, cooldowns and FSM state. Without Redis the bot falls back to in-memory state/locks and should run as a single instance.
+- Never commit `.env`, bot tokens, Stars secrets or database credentials. Use Railway environment variables / GitHub Secrets.
+
+## GitHub + Railway yangilash
+
+Agar bot GitHub repository va Railway orqali deploy qilingan bo'lsa:
+
+1. Ushbu yangi kodni GitHub repository'dagi eski kod o'rniga qo'ying.
+2. `.env` yoki Railway secretlarini GitHub'ga yuklamang. Faqat `.env.example` commit qilinadi.
+3. Commit qiling va `main`/production branch'ga push qiling.
+4. Railway GitHub repository bilan bog'langan bo'lsa, push'dan keyin yangi deployment avtomatik boshlanadi.
+5. Railway deploy komandasi `alembic upgrade head && python -m app.main` bo'lib, production schema Alembic orqali yangilanadi.
+6. Railway Variables ichida `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `REDIS_URL` (agar ishlatilsa) va `STARS_PAYMENT_SECRET` saqlanadi.
+7. Deploy logida `Anime Card Collection bot is starting polling...` ko'rinsa, bot pollingni boshlagan bo'ladi.
+
+### Muhim
+
+Production PostgreSQL bazasini o'zgartiradigan kod yangilanishlarida avval yangi Alembic migration yarating. `AUTO_SCHEMA_UPGRADE=true` ni production'da yoqmang.
+
+Redis bir nechta Railway instance ishlatilsa tavsiya etiladi: local MemoryStorage/lock fallback faqat bitta instance uchun xavfsiz.

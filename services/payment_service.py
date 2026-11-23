@@ -120,8 +120,15 @@ class PaymentService:
         if dup is not None:
             return None
 
+        # Lock the order row so two concurrent successful_payment updates cannot both
+        # observe `pending` and credit the same order twice. PostgreSQL (Railway)
+        # enforces this at the database transaction level.
         order = (
-            await session.execute(select(StarPayment).where(StarPayment.order_uid == order_uid))
+            await session.execute(
+                select(StarPayment)
+                .where(StarPayment.order_uid == order_uid)
+                .with_for_update()
+            )
         ).scalar_one_or_none()
         if order is None or order.status != "pending" or order.stars_amount != total_amount:
             return None

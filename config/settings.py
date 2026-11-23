@@ -26,10 +26,11 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     default_offer_expiry_hours: int = Field(default=24, alias="DEFAULT_OFFER_EXPIRY_HOURS")
     enable_telegram_stars: bool = Field(default=True, alias="ENABLE_TELEGRAM_STARS")
-    stars_payment_secret: str = Field(
-        default="dev_secret_change_in_prod",
-        alias="STARS_PAYMENT_SECRET",
-    )
+    stars_payment_secret: str = Field(default="", alias="STARS_PAYMENT_SECRET")
+    auto_schema_upgrade: bool = Field(default=False, alias="AUTO_SCHEMA_UPGRADE")
+    db_pool_size: int = Field(default=5, alias="DB_POOL_SIZE", ge=1, le=50)
+    db_max_overflow: int = Field(default=10, alias="DB_MAX_OVERFLOW", ge=0, le=100)
+    db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT", ge=5, le=120)
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -65,6 +66,17 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    def validate_runtime(self) -> None:
+        """Fail fast on unsafe/missing production configuration."""
+        if not self.bot_token:
+            raise RuntimeError("BOT_TOKEN is not set. Configure it in .env or the deployment environment.")
+        if not self.admin_ids and not self.admin_usernames:
+            raise RuntimeError("ADMIN_IDS or ADMIN_USERNAMES must contain at least one administrator.")
+        if self.enable_telegram_stars and len(self.stars_payment_secret) < 32:
+            raise RuntimeError(
+                "STARS_PAYMENT_SECRET must be at least 32 characters when Telegram Stars payments are enabled."
+            )
 
 
 @lru_cache(maxsize=1)

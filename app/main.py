@@ -44,17 +44,10 @@ async def _set_bot_commands(bot) -> None:
 async def main() -> None:
     settings = get_settings()
     setup_logging(level=settings.log_level, bot_token=settings.bot_token)
-
-    if getattr(settings, "enable_telegram_stars", False) and settings.stars_payment_secret in (
-        "dev_secret_change_in_prod",
-        "change_this_to_a_random_32_char_secret",
-    ):
-        logger.warning(
-            "STARS_PAYMENT_SECRET standart qiymatda! Production uchun .env da tasodifiy uzun kalit qo'ying."
-        )
+    settings.validate_runtime()
 
     logger.info("Initializing database...")
-    await init_db()
+    await init_db(auto_schema_upgrade=settings.auto_schema_upgrade)
     async with get_session() as session:
         await seed_initial_data(session)
         await GameplayService.sync_runtime_and_legacy_ranks(session)

@@ -27,11 +27,13 @@ def create_engine_from_url(database_url: Optional[str] = None) -> AsyncEngine:
         "echo": False,
         "future": True,
         "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_timeout": settings.db_pool_timeout,
         "connect_args": connect_args,
     }
     if not is_sqlite:
-        engine_kwargs["pool_size"] = 15
-        engine_kwargs["max_overflow"] = 25
+        engine_kwargs["pool_size"] = settings.db_pool_size
+        engine_kwargs["max_overflow"] = settings.db_max_overflow
 
     eng = create_async_engine(url, **engine_kwargs)
 
@@ -66,16 +68,19 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def init_db(target_engine: Optional[AsyncEngine] = None) -> None:
+async def init_db(target_engine: Optional[AsyncEngine] = None, auto_schema_upgrade: Optional[bool] = None) -> None:
     import models  # noqa: F401 - ensures all ORM models are registered on Base.metadata
 
     from database.schema_upgrade import upgrade_schema_sync
 
     eng = target_engine or engine
+    if auto_schema_upgrade is None:
+        auto_schema_upgrade = get_settings().auto_schema_upgrade
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Eski bazaga yangi ustun/jadval/indekslarni avtomatik qo'shadi (idempotent)
-        await conn.run_sync(upgrade_schema_sync)
+        if auto_schema_upgrade:
+            # Eski bazaga yangi ustun/jadval/indekslarni avtomatik qo'shadi (idempotent).
+            await conn.run_sync(upgrade_schema_sync)
 
 
 async def close_db(target_engine: Optional[AsyncEngine] = None) -> None:

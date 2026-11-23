@@ -250,14 +250,56 @@ async def _dispatch_slot(bot: Bot, schedule_id: int) -> None:
         msg = await send_card_message(bot, chat_id, card, caption, reply_markup=None)
     except TelegramRetryAfter as exc:
         await asyncio.sleep(float(exc.retry_after) + 0.5)
-        msg = await send_card_message(bot, chat_id, card, caption, reply_markup=None)
-    except (TelegramForbiddenError, TelegramBadRequest) as send_exc:
+        try:
+            msg = await send_card_message(bot, chat_id, card, caption, reply_markup=None)
+        except Exception as retry_exc:
+            logger.exception("Drop retry failed for chat %s: %s", chat_id, retry_exc)
+            async with get_session() as s_fail:
+                await s_fail.execute(delete(ActiveDrop).where(ActiveDrop.id == drop.id))
+                await s_fail.execute(
+                    update(DropSchedule)
+                    .where(DropSchedule.id == schedule_id)
+                    .values(status="failed", updated_at=utcnow())
+                )
+                await s_fail.commit()
+            return
+    except TelegramForbiddenError as send_exc:
+        # Bot removed/blocked: this is a reliable signal that the group should be disabled.
         logger.warning("Cannot send drop to chat %s (%s). Deactivating group.", chat_id, send_exc)
         async with get_session() as s_fail:
             await s_fail.execute(delete(ActiveDrop).where(ActiveDrop.id == drop.id))
+            await s_fail.execute(
+                update(DropSchedule)
+                .where(DropSchedule.id == schedule_id)
+                .values(status="failed", updated_at=utcnow())
+            )
             g_fail = await s_fail.get(Group, group_pk)
             if g_fail is not None:
                 g_fail.is_active = False
+                g_fail.drop_enabled = False
+            await s_fail.commit()
+        return
+    except TelegramBadRequest as send_exc:
+        # A malformed media/message must not automatically disable an otherwise healthy group.
+        logger.warning("Drop message rejected for chat %s: %s", chat_id, send_exc)
+        async with get_session() as s_fail:
+            await s_fail.execute(delete(ActiveDrop).where(ActiveDrop.id == drop.id))
+            await s_fail.execute(
+                update(DropSchedule)
+                .where(DropSchedule.id == schedule_id)
+                .values(status="failed", updated_at=utcnow())
+            )
+            await s_fail.commit()
+        return
+    except Exception as send_exc:
+        logger.exception("Unexpected drop send failure for chat %s: %s", chat_id, send_exc)
+        async with get_session() as s_fail:
+            await s_fail.execute(delete(ActiveDrop).where(ActiveDrop.id == drop.id))
+            await s_fail.execute(
+                update(DropSchedule)
+                .where(DropSchedule.id == schedule_id)
+                .values(status="failed", updated_at=utcnow())
+            )
             await s_fail.commit()
         return
 

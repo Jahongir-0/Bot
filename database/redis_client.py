@@ -26,7 +26,7 @@ class LockManager:
 
     def __init__(self, redis_client: Optional[Redis] = None) -> None:
         self._redis = redis_client
-        self._local_locks: Dict[str, asyncio.Lock] = {}
+        self._local_locks: Dict[str, tuple[str, float]] = {}
         self._local_expiries: Dict[str, float] = {}
         self._guard = asyncio.Lock()
 
@@ -50,17 +50,27 @@ class LockManager:
                         logger.warning("Failed to release Redis lock %s: %s", full_key, exc)
             return
 
-        # Local single-process fallback
+        # Local single-process fallback. Keep the same fail-fast + TTL semantics as Redis.
+        token = str(uuid.uuid4())
+        now = time.monotonic()
+        ttl_seconds = max(0.1, ttl_ms / 1000.0)
         async with self._guard:
-            lock_obj = self._local_locks.setdefault(full_key, asyncio.Lock())
-        if lock_obj.locked():
+            current = self._local_locks.get(full_key)
+            if current is not None and current[1] > now:
+                acquired = False
+            else:
+                self._local_locks[full_key] = (token, now + ttl_seconds)
+                acquired = True
+        if not acquired:
             yield False
             return
-        await lock_obj.acquire()
         try:
             yield True
         finally:
-            lock_obj.release()
+            async with self._guard:
+                current = self._local_locks.get(full_key)
+                if current is not None and current[0] == token:
+                    self._local_locks.pop(full_key, None)
 
     async def check_and_set_cooldown(self, key: str, seconds: float) -> bool:
         """Returns True if action is allowed (and records cooldown), False if still cooling down."""
@@ -75,11 +85,16 @@ class LockManager:
             expires_at = self._local_expiries.get(full_key, 0.0)
             if expires_at > now:
                 return False
-            self._local_expiries[full_key] = now + seconds
-            if len(self._local_expiries) > 5000:
+            self._local_expiries[full_key] = now + max(0.0, seconds)
+            # Bound local fallback memory without scanning on every request.
+            if len(self._local_expiries) > 10_000:
                 expired = [k for k, v in self._local_expiries.items() if v <= now]
                 for k in expired:
-                    del self._local_expiries[k]
+                    self._local_expiries.pop(k, None)
+            if len(self._local_locks) > 10_000:
+                stale_locks = [k for k, (_, expiry) in self._local_locks.items() if expiry <= now]
+                for k in stale_locks:
+                    self._local_locks.pop(k, None)
             return True
 
     async def close(self) -> None:
