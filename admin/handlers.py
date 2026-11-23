@@ -141,6 +141,7 @@ class AdminStates(StatesGroup):
     edit_ref_inviter = State()
     edit_ref_invitee = State()
     edit_group_reward = State()
+    edit_group_cfg_field = State()
     edit_daily_field = State()
     edit_drop_rule_field = State()
     edit_welcome_text = State()
@@ -852,13 +853,21 @@ async def _render_group_detail(target, owner_id: int, group_id: int) -> None:
             await edit_or_answer(target, "❌ Guruh topilmadi.", reply_markup=admin_home_kb(owner_id))
             return
         analytics = await AdminService.get_group_analytics(session, group.id)
+        from services.group_policy_service import GroupPolicyService
+
+        link = await GroupPolicyService.resolve_link(
+            getattr(target, "bot", None), session, group.telegram_chat_id, group.username, try_create=False
+        )
+        await session.commit()
+    link_line = "" if group.username else (f"🔗 Havola: {esc(link)}\n" if link else "🔗 Havola: yo‘q (yopiq guruh)\n")
     text = (
         f"{format_group_settings(group)}\n"
+        f"{link_line}"
         f"👤 Faol a’zolar (bazada): <b>{analytics['active_members']}</b>\n"
         f"📦 Jami droplar: <b>{analytics['total_drops']}</b> (Olingani: <b>{analytics['claimed_drops']}</b>)\n"
         f"🔌 Bot holati: <b>{'🟢 Faol' if group.is_active else '🔴 Nofaol'}</b>"
     )
-    await edit_or_answer(target, text, reply_markup=admin_group_settings_kb(owner_id, group))
+    await edit_or_answer(target, text, reply_markup=admin_group_settings_kb(owner_id, group, link=link))
 
 
 @router.callback_query(
@@ -1514,6 +1523,7 @@ _DAILY_FIELD_LABELS = {
 }
 _DROP_RULE_LABELS = {
     "members_per_card": "👥 Nechta a’zoga 1 ta karta (kamida 1)",
+    "min_members": "🚫 Guruhda kamida nechta a’zo bo‘lsa karta tushsin (0 = cheklov yo‘q)",
     "min_per_day": "🔽 Kuniga eng kam tashlash soni (0+)",
     "max_per_day": "🔼 Kuniga eng ko‘p tashlash soni (1+)",
     "any_group_cooldown_hours": "⏳ Guruhlararo kutish vaqti (soat, 0+)",
@@ -1598,9 +1608,10 @@ async def _render_drop_rules(target, owner_id: int) -> None:
     )
     b.row(
         InlineKeyboardButton(text=f"🌃 Tugash: {rules['window_end_hour']}:00", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="window_end_hour").pack()),
+        InlineKeyboardButton(text=f"🚫 Min a’zo: {rules['min_members']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="dr_ed", extra="min_members").pack()),
     )
     b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
-    await edit_or_answer(target, "📡 <b>DROP QOIDALARI</b>\n\nO‘zgartirish uchun bosing:", reply_markup=b.as_markup())
+    await edit_or_answer(target, f"📡 <b>DROP QOIDALARI</b>\n\n🚫 Guruhda <b>{rules['min_members']}</b> tadan kam haqiqiy a’zo bo‘lsa karta tushmaydi.\n\nO‘zgartirish uchun bosing:", reply_markup=b.as_markup())
 
 
 async def _render_vip_menu(target, owner_id: int) -> None:
@@ -1642,6 +1653,35 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
         await state.set_state(st)
         await state.update_data(owner_tg_id=owner_id)
         await edit_or_answer(callback, txt, reply_markup=_settings_cancel_kb(owner_id, "rewards_menu"))
+        return
+
+    if act == "grp_tog":
+        field = callback_data.extra
+        async with get_session() as session:
+            cur = await SettingsService.get_group_reward_config(session)
+            if field not in ("enabled", "per_member", "give_epic_card"):
+                await callback.answer("Noma’lum sozlama", show_alert=True)
+                return
+            await SettingsService.set_group_reward_field(session, field, not cur[field])
+            await AdminService.log_action(session, owner_id, "edit_group_reward_cfg", "settings", field, {"value": not cur[field]})
+            await session.commit()
+        await callback.answer("✅ Yangilandi!")
+        await state.clear()
+        await _render_rewards_menu(callback)
+        return
+
+    if act == "grp_ed":
+        field = callback_data.extra
+        if field not in _GRP_CFG_LABELS:
+            await callback.answer("Noma’lum sozlama", show_alert=True)
+            return
+        await state.set_state(AdminStates.edit_group_cfg_field)
+        await state.update_data(owner_tg_id=owner_id, field=field)
+        await edit_or_answer(
+            callback,
+            f"🏰 <b>{esc(_GRP_CFG_LABELS[field])}</b>\n\nYangi qiymatni kiriting (butun son, 0 ham mumkin):",
+            reply_markup=_settings_cancel_kb(owner_id, "rewards_menu"),
+        )
         return
 
     if act == "daily_menu":
@@ -1817,7 +1857,7 @@ async def fsm_edit_drop_rule_field(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ Faqat butun son kiriting.")
         return
     val = int(raw)
-    if field in ("min_per_day", "any_group_cooldown_hours") and val < 0:
+    if field in ("min_per_day", "any_group_cooldown_hours", "min_members") and val < 0:
         await message.answer("⚠️ 0 yoki musbat son kiriting.")
         return
     if field in ("members_per_card", "max_per_day", "same_group_cooldown_days") and val < 1:
@@ -1879,27 +1919,57 @@ async def fsm_edit_vip_price(message: Message, state: FSMContext) -> None:
     await _render_vip_menu(message, message.from_user.id)
 
 
+_GRP_CFG_LABELS = {
+    "per_member_coins": "👥 Har bir a’zo uchun coin",
+    "flat_coins": "🪙 Qat’iy mukofot (a’zo soniga bog‘liq bo‘lmasa)",
+    "min_members": "🚫 Kamida nechta haqiqiy a’zo kerak",
+}
+
+
 async def _rewards_menu_text_and_kb(owner_id: int):
     from utils.constants import get_rank_name_by_order
 
     async with get_session() as session:
         ref_cfg = await SettingsService.get_referral_config(session)
-        grp_coins = await SettingsService.get_group_add_reward_coins(session)
+        gcfg = await SettingsService.get_group_reward_config(session)
     r3_name = get_rank_name_by_order(3, "Epic")
     r3_meta = get_rarity_meta(r3_name)
+    on = lambda v: "✅ Yoqilgan" if v else "❌ O‘chiq"  # noqa: E731
+    if gcfg["per_member"]:
+        amount_line = f"👥 Hisoblash: <b>a’zolar soni × {gcfg['per_member_coins']:,} 🪙</b> (masalan 100 a’zo = {100 * gcfg['per_member_coins']:,} 🪙)"
+    else:
+        amount_line = f"🪙 Hisoblash: qat’iy <b>{gcfg['flat_coins']:,} 🪙</b>"
     text = (
         "🤝 <b>REFERAL VA GURUH MUKOFOTLARI</b>\n\n"
-        f"👤 Taklif qiluvchi mukofoti: <b>{ref_cfg['inviter_coins']:,} 🪙</b>\n"
-        f"🆕 Yangi foydalanuvchi mukofoti: <b>{ref_cfg['invitee_coins']:,} 🪙</b>\n"
-        f"🏰 Botni guruhga qo‘shish mukofoti: <b>{grp_coins:,} 🪙</b> + {r3_meta.emoji} 1 ta {esc(r3_name)} karta"
+        "<b>Referal (do‘st taklif qilish)</b>\n"
+        f"👤 Taklif qilgan odamga: <b>{ref_cfg['inviter_coins']:,} 🪙</b>\n"
+        f"🆕 Taklif qilingan do‘stga: <b>{ref_cfg['invitee_coins']:,} 🪙</b>\n\n"
+        "<b>Botni guruhga qo‘shish mukofoti</b>\n"
+        f"Holat: <b>{on(gcfg['enabled'])}</b>\n"
+        f"{amount_line}\n"
+        f"🚫 Kamida <b>{gcfg['min_members']}</b> ta haqiqiy a’zo bo‘lmasa mukofot berilmaydi (botlar hisobga olinmaydi)\n"
+        f"{r3_meta.emoji} Qo‘shimcha {esc(r3_name)} karta: <b>{on(gcfg['give_epic_card'])}</b>"
     )
+    cb = lambda action, extra="": AdminCb(owner_id=owner_id, section="settings", action=action, extra=extra).pack()  # noqa: E731
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="👤 Taklif qiluvchi coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="edit_ref_inviter").pack()),
-        InlineKeyboardButton(text="🆕 Yangi user coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="edit_ref_invitee").pack()),
+        InlineKeyboardButton(text="👤 Taklif qilgan coin", callback_data=cb("edit_ref_inviter")),
+        InlineKeyboardButton(text="🆕 Do‘st coin", callback_data=cb("edit_ref_invitee")),
+    )
+    builder.row(InlineKeyboardButton(text=f"🏰 Guruh mukofoti: {on(gcfg['enabled'])}", callback_data=cb("grp_tog", "enabled")))
+    builder.row(
+        InlineKeyboardButton(
+            text="🔀 A’zo soniga hisoblash: " + ("✅ Ha" if gcfg["per_member"] else "❌ Yo‘q"),
+            callback_data=cb("grp_tog", "per_member"),
+        )
     )
     builder.row(
-        InlineKeyboardButton(text="🏰 Guruhga qo‘shish coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="edit_group_reward").pack())
+        InlineKeyboardButton(text=f"👥 1 a’zo = {gcfg['per_member_coins']:,} 🪙", callback_data=cb("grp_ed", "per_member_coins")),
+        InlineKeyboardButton(text=f"🪙 Qat’iy: {gcfg['flat_coins']:,}", callback_data=cb("grp_ed", "flat_coins")),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"🚫 Min a’zo: {gcfg['min_members']}", callback_data=cb("grp_ed", "min_members")),
+        InlineKeyboardButton(text=f"{r3_meta.emoji} Karta: {'✅' if gcfg['give_epic_card'] else '❌'}", callback_data=cb("grp_tog", "give_epic_card")),
     )
     builder.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings", action="view").pack())
@@ -1952,6 +2022,29 @@ async def fsm_edit_ref_invitee(message: Message, state: FSMContext) -> None:
 @router.message(AdminStates.edit_group_reward, NotCommandFilter())
 async def fsm_edit_group_reward(message: Message, state: FSMContext) -> None:
     await _save_reward_coin_setting(message, state, "group")
+
+
+@router.message(AdminStates.edit_group_cfg_field, NotCommandFilter())
+async def fsm_edit_group_cfg_field(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") is not None and data.get("owner_tg_id") != message.from_user.id:
+        return
+    field = str(data.get("field", ""))
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Faqat musbat butun son (yoki 0) kiriting.")
+        return
+    try:
+        async with get_session() as session:
+            await SettingsService.set_group_reward_field(session, field, int(raw))
+            await AdminService.log_action(session, message.from_user.id, "edit_group_reward_cfg", "settings", field, {"value": int(raw)})
+            await session.commit()
+    except ValueError as exc:
+        await message.answer(f"⚠️ {esc(str(exc))}")
+        return
+    await state.clear()
+    text, kb = await _rewards_menu_text_and_kb(message.from_user.id)
+    await message.answer("✅ Saqlandi!\n\n" + text, reply_markup=kb)
 
 
 # ---------------------------------------------------------------------------

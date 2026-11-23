@@ -36,8 +36,6 @@ CFG_FIELDS = {
     "bot_sell_level_bonus_pct": ("🤖 Botga sotish: lvl bonusi (%)", [0, 5, 10, 15, 20, 25], lambda v: f"+{int(v)}% / lvl"),
     "stars_per_level": ("⭐ Stars narxi (daraja boshiga)", [10, 20, 50, 100], lambda v: f"{int(v)} ⭐"),
     "stars_max_level": ("⭐ Stars bilan maksimal daraja", [3, 5, 7, 10], lambda v: f"{int(v)}"),
-    "merge_cost_4": ("🔮 Birlashtirish: 4→5 rank (karta soni)", [0, 3, 5, 8, 10], lambda v: "o‘chiq" if int(v) == 0 else f"{int(v)} ta"),
-    "merge_cost_5": ("🔮 Birlashtirish: 5→6 rank (karta soni)", [0, 5, 10, 20], lambda v: "o‘chiq" if int(v) == 0 else f"{int(v)} ta"),
     "power_step": ("💪 Daraja boshiga kuch o‘sishi", [0.1, 0.15, 0.2, 0.3], lambda v: f"+{int(float(v) * 100)}%"),
 }
 
@@ -89,6 +87,9 @@ async def _render(target, owner: int) -> None:
         InlineKeyboardButton(text="✏️ Bot Lvl %", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="bot_sell_level_bonus_pct").pack()),
     )
     b.row(
+        InlineKeyboardButton(text="🔮 Birlashtirish sozlamalari (barcha ranklar)", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mg_v").pack()),
+    )
+    b.row(
         InlineKeyboardButton(text="💎 Rank narxlarini o‘zgartirish", callback_data=AdmV2Cb(owner_id=owner, sec="ranks", act="v").pack()),
     )
     b.row(
@@ -103,6 +104,82 @@ async def _perm(callback: CallbackQuery, admin_perms: Optional[set]) -> bool:
         await callback.answer("⛔ Bu bo‘limga ruxsatingiz yo‘q.", show_alert=True)
         return False
     return True
+
+
+MERGE_PRESETS = [0, 2, 3, 5, 8, 10, 15, 20]
+
+
+def _merge_fmt(v: int) -> str:
+    return "🚫 o‘chiq" if int(v) <= 0 else f"{int(v)} ta"
+
+
+async def _render_merge(target, owner: int) -> None:
+    async with get_session() as session:
+        ranks = await GameplayService.get_rank_definitions(session)
+        cfg = await CardLevelService.get_config(session)
+    ranks = sorted(ranks, key=lambda r: int(r.get("order", 0)))
+    lines = [
+        header("🔮 <b>BIRLASHTIRISH SOZLAMALARI</b>"),
+        "Foydalanuvchi bir xil rankdagi kartalarini topshirib, <b>keyingi rankdagi</b> karta oladi.",
+        "Har bir rank uchun nechta karta kerakligini belgilang. <b>0 = o‘chiq</b> (o‘sha rankdan oshirib bo‘lmaydi).",
+        "",
+    ]
+    b = InlineKeyboardBuilder()
+    for idx, r in enumerate(ranks[:-1]):
+        order = int(r.get("order", idx + 1))
+        nxt = ranks[idx + 1]
+        cost = int(cfg.get(f"merge_cost_{order}", 0) or 0)
+        lines.append(f"{r.get('emoji', '⭐')} {esc(r['name'])} → {nxt.get('emoji', '⭐')} {esc(nxt['name'])}: <b>{_merge_fmt(cost)}</b>")
+        b.row(
+            InlineKeyboardButton(
+                text=f"{r.get('emoji', '⭐')} {r['name']} → {nxt['name']}: {_merge_fmt(cost)}"[:50],
+                callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mg_c", tid=order).pack(),
+            ),
+            InlineKeyboardButton(text="✏️", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mg_ed", tid=order).pack()),
+        )
+    lines += ["", "<i>Tugmani bossangiz tayyor qiymatlar almashadi (0 → 2 → 3 → 5 → 8 → 10 → 15 → 20). Aniq son uchun ✏️ ni bosing.</i>"]
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="v").pack()))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mg_v")))
+async def cb_merge_home(callback: CallbackQuery, state: FSMContext, admin_perms: Optional[set] = None) -> None:
+    await state.clear()
+    if await _perm(callback, admin_perms):
+        await _render_merge(callback, callback.from_user.id)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mg_c")))
+async def cb_merge_cycle(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: Optional[set] = None) -> None:
+    if not await _perm(callback, admin_perms):
+        return
+    key = f"merge_cost_{int(callback_data.tid)}"
+    async with get_session() as session:
+        cfg = await CardLevelService.get_config(session)
+        cur = int(cfg.get(key, 0) or 0)
+        nxt = next((p for p in MERGE_PRESETS if p > cur), MERGE_PRESETS[0])
+        await CardLevelService.set_config_value(session, key, nxt)
+        await session.commit()
+    await _render_merge(callback, callback.from_user.id)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mg_ed")))
+async def cb_merge_edit_prompt(
+    callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: Optional[set] = None
+) -> None:
+    if not await _perm(callback, admin_perms):
+        return
+    key = f"merge_cost_{int(callback_data.tid)}"
+    await state.set_state(AdminCardRulesStates.waiting_val)
+    await state.update_data(owner_tg_id=callback.from_user.id, cr_field=key)
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec=SEC, act="mg_v").pack())]]
+    )
+    await edit_or_answer(
+        callback,
+        "🔮 Nechta karta topshirilsa keyingi rankdagi karta berilsin? Butun son kiriting (<code>0</code> = o‘chirish):",
+        reply_markup=cancel_kb,
+    )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "v")))
@@ -183,6 +260,10 @@ async def fsm_rules_val(message: Message, state: FSMContext) -> None:
             val = int(float(raw))
             if not (0 <= val <= 100):
                 raise ValueError("0 dan 100 gacha foiz kiriting.")
+        elif key.startswith("merge_cost_"):
+            val = int(float(raw))
+            if not (0 <= val <= 1000):
+                raise ValueError("0 dan 1000 gacha butun son kiriting (0 = o‘chirish).")
         else:
             await state.clear()
             return
@@ -193,4 +274,7 @@ async def fsm_rules_val(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         await CardLevelService.set_config_value(session, key, val)
         await session.commit()
-    await _render(message, message.from_user.id)
+    if key.startswith("merge_cost_"):
+        await _render_merge(message, message.from_user.id)
+    else:
+        await _render(message, message.from_user.id)

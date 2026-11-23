@@ -64,6 +64,7 @@ from services.community_service import CommunityService
 from services.drop_service import DropService
 from services.event_service import EventService
 from services.gameplay_service import GameplayService
+from services.quiz_announce import build_quiz_announcement
 from services.security_backup_service import MAX_ZIP_BYTES, SecurityBackupService
 from services.settings_service import SettingsService
 from services.user_service import UserService
@@ -111,6 +112,10 @@ class AdminV2States(StatesGroup):
     waiting_quiz_q_opts = State()
     waiting_quiz_sched_dt = State()
     waiting_quiz_clone_coins = State()
+    waiting_quiz_edit_title = State()
+    waiting_quiz_edit_coins = State()
+    waiting_quiz_edit_q_text = State()
+    waiting_quiz_edit_q_opts = State()
 
     # Games
     waiting_games_field = State()
@@ -1796,13 +1801,8 @@ async def fsm_v2_rank_add_drops(message: Message, state: FSMContext) -> None:
 # ===========================================================================
 async def _dispatch_quiz_announcement(bot, session, quiz: Quiz) -> None:
     qs_res = await GameplayService.get_quiz_with_questions(session, quiz.id)
-    first_q = qs_res[1][0] if qs_res and qs_res[1] else None
-    text = (
-        f"🧠 <b>YANGI VIKTORINA BOSHLANDI: {esc(quiz.title)}</b>\n\n"
-        f"🎁 Har bir to‘g‘ri javob uchun: <b>{quiz.reward_coins:,} 🪙</b>\n"
-        + (f"❓ <b>1-savol:</b> {esc(first_q.question_text)}\n\n" if first_q else "")
-        + f"👇 Ishtirok etish uchun /quiz yozing (yoki ushbu xabarga javob yozing)!\n<code>Quiz #{quiz.id}</code>"
-    )
+    bot_un = await get_bot_username(bot)
+    text, markup = build_quiz_announcement(quiz, len(qs_res[1]) if qs_res else 0, bot_un)
     chat_ids: List[int] = []
     if quiz.target_scope == "group" and quiz.target_group_id:
         grp = await session.get(Group, quiz.target_group_id)
@@ -1819,7 +1819,7 @@ async def _dispatch_quiz_announcement(bot, session, quiz: Quiz) -> None:
     async def _send(cid: int) -> None:
         async with sem:
             try:
-                await bot.send_message(cid, text)
+                await bot.send_message(cid, text, reply_markup=markup)
             except TelegramRetryAfter as exc:
                 await asyncio.sleep(float(exc.retry_after) + 0.5)
             except Exception:
@@ -1893,6 +1893,14 @@ async def cb_v2_quiz(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSM
         return
 
     if act == "q_done":
+        # Qayerga/qachon allaqachon tanlangan bo'lsa (tasdiqlash ekranidan qo'shimcha savol qo'shilganda) — to'g'ri tasdiqlashga
+        if (await state.get_data()).get("quiz_when"):
+            await state.set_state(None)
+            await _show_quiz_review(callback, state, owner_id)
+            return
+        act = "q_scope"
+
+    if act == "q_scope":
         b = InlineKeyboardBuilder()
         b.row(InlineKeyboardButton(text="🌍 Barcha guruh & userlarga", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="scope_all").pack()))
         b.row(InlineKeyboardButton(text="👥 Aniq bitta guruhga", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="scope_grp").pack()))
@@ -1915,7 +1923,7 @@ async def cb_v2_quiz(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSM
         b = InlineKeyboardBuilder()
         for g in groups:
             b.row(InlineKeyboardButton(text=f"👥 {g.title[:36]}", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="set_grp", tid=g.id).pack()))
-        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_done").pack()))
+        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_scope").pack()))
         await edit_or_answer(callback, "👥 Qaysi guruhni tanlaysiz?", reply_markup=b.as_markup())
         return
 
@@ -1935,7 +1943,86 @@ async def cb_v2_quiz(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSM
         return
 
     if act == "when_now":
+        await state.update_data(quiz_when="now", quiz_sched_iso=None)
+        await _show_quiz_review(callback, state, owner_id)
+        return
+
+    if act == "rv":
+        await state.set_state(None)
+        await _show_quiz_review(callback, state, owner_id)
+        return
+
+    if act == "rv_title":
+        await state.set_state(AdminV2States.waiting_quiz_edit_title)
+        await edit_or_answer(callback, "🏷 Quiz uchun <b>yangi nom</b> yozing:", reply_markup=_rv_back_kb(owner_id))
+        return
+
+    if act == "rv_coins":
+        await state.set_state(AdminV2States.waiting_quiz_edit_coins)
+        await edit_or_answer(callback, "🪙 To‘g‘ri javob uchun <b>yangi coin mukofotini</b> yozing (son):", reply_markup=_rv_back_kb(owner_id))
+        return
+
+    if act == "rv_q":
+        await state.set_state(None)
+        await _show_quiz_question_edit(callback, state, owner_id, callback_data.tid)
+        return
+
+    if act == "rv_qt":
+        await state.set_state(AdminV2States.waiting_quiz_edit_q_text)
+        await state.update_data(edit_idx=callback_data.tid)
+        await edit_or_answer(callback, f"📝 <b>{callback_data.tid + 1}-savol</b> uchun yangi matnni yozing:", reply_markup=_rv_back_kb(owner_id, "rv_q", callback_data.tid))
+        return
+
+    if act == "rv_qo":
+        await state.set_state(AdminV2States.waiting_quiz_edit_q_opts)
+        await state.update_data(edit_idx=callback_data.tid)
+        await edit_or_answer(
+            callback,
+            f"🔤 <b>{callback_data.tid + 1}-savol</b> uchun javob variantlarini vergul yoki yangi qator bilan yozing "
+            "(masalan: <code>Naruto, Sasuke, Sakura</code>).\n<i>Bitta javob yozsangiz — ochiq javobli savol bo‘ladi.</i>",
+            reply_markup=_rv_back_kb(owner_id, "rv_q", callback_data.tid),
+        )
+        return
+
+    if act == "rv_qc":
         data = await state.get_data()
+        qs = list(data.get("quiz_questions") or [])
+        qi = int(callback_data.ext or 0)
+        if 0 <= qi < len(qs):
+            opts = list(qs[qi].get("opts") or [])
+            ci = max(0, min(len(opts) - 1, callback_data.tid))
+            qs[qi]["cidx"] = ci
+            qs[qi]["acc"] = [opts[ci]] if opts else []
+            await state.update_data(quiz_questions=qs)
+        await _show_quiz_question_edit(callback, state, owner_id, qi)
+        return
+
+    if act == "rv_qd":
+        data = await state.get_data()
+        qs = list(data.get("quiz_questions") or [])
+        if len(qs) <= 1:
+            await callback.answer("Kamida 1 ta savol bo‘lishi kerak.", show_alert=True)
+            return
+        if 0 <= callback_data.tid < len(qs):
+            qs.pop(callback_data.tid)
+            await state.update_data(quiz_questions=qs)
+        await _show_quiz_review(callback, state, owner_id)
+        return
+
+    if act == "rv_ok":
+        data = await state.get_data()
+        qs_items = list(data.get("quiz_questions") or [])
+        if not qs_items:
+            await callback.answer("Kamida 1 ta savol kerak.", show_alert=True)
+            return
+        when = data.get("quiz_when", "now")
+        sched_dt = None
+        if when == "sched":
+            try:
+                sched_dt = datetime.fromisoformat(str(data.get("quiz_sched_iso")))
+            except (TypeError, ValueError):
+                await callback.answer("Boshlanish vaqti noto‘g‘ri. Qayta belgilang.", show_alert=True)
+                return
         await state.clear()
         async with get_session() as session:
             q = await GameplayService.create_quiz(
@@ -1945,15 +2032,20 @@ async def cb_v2_quiz(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSM
                 admin_tg_id=owner_id,
                 target_scope=data.get("quiz_scope", "all"),
                 target_group_id=data.get("quiz_grp_id"),
-                status="active",
+                scheduled_at=sched_dt,
+                status="scheduled" if sched_dt else "active",
             )
-            for item in data.get("quiz_questions") or []:
+            for item in qs_items:
                 await GameplayService.add_quiz_question(
                     session, q.id, item["q"], item["opts"], item["cidx"], accepted_answers=item.get("acc")
                 )
             await session.commit()
-            await _dispatch_quiz_announcement(callback.bot, session, q)
-        await callback.answer("🎉 Quiz yaratildi va yuborildi!", show_alert=True)
+            if not sched_dt:
+                await _dispatch_quiz_announcement(callback.bot, session, q)
+        if sched_dt:
+            await callback.answer("⏰ Quiz tasdiqlandi va belgilangan vaqtga rejalashtirildi!", show_alert=True)
+        else:
+            await callback.answer("🎉 Quiz tasdiqlandi va yuborildi!", show_alert=True)
         await _show_quiz_home(callback, owner_id)
         return
 
@@ -2101,23 +2193,176 @@ async def fsm_v2_quiz_sched_dt(message: Message, state: FSMContext) -> None:
     if dt_utc is None:
         await message.answer("⚠️ Sana formati noto‘g‘ri. Misol: <code>2026-12-01 18:00</code>")
         return
-    await state.clear()
-    async with get_session() as session:
-        q = await GameplayService.create_quiz(
-            session,
-            title=data.get("quiz_title", "Quiz"),
-            reward_coins=int(data.get("quiz_coins", 300)),
-            admin_tg_id=message.from_user.id,
-            target_scope=data.get("quiz_scope", "all"),
-            target_group_id=data.get("quiz_grp_id"),
-            scheduled_at=dt_utc,
-            status="scheduled",
-        )
-        for item in data.get("quiz_questions") or []:
-            await GameplayService.add_quiz_question(session, q.id, item["q"], item["opts"], item["cidx"], accepted_answers=item.get("acc"))
-        await session.commit()
-    await message.answer(f"⏰ Quiz #{q.id} belgilangan vaqtga rejalashtirildi!")
-    await _show_quiz_home(message, message.from_user.id)
+    await state.update_data(quiz_when="sched", quiz_sched_iso=dt_utc.isoformat())
+    await state.set_state(None)
+    await _show_quiz_review(message, state, message.from_user.id)
+
+
+# ---- Tasdiqlash (review) ekrani: admin hammasini tekshiradi va kerak bo'lsa tuzatadi ----
+def _rv_back_kb(owner_id: int, act: str = "rv", tid: int = 0) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act=act, tid=tid).pack())]]
+    )
+
+
+async def _show_quiz_review(target, state: FSMContext, owner_id: int) -> None:
+    data = await state.get_data()
+    qs = list(data.get("quiz_questions") or [])
+    scope = data.get("quiz_scope", "all")
+    where = "🌍 Barcha guruh va foydalanuvchilarga"
+    if scope == "group" and data.get("quiz_grp_id"):
+        async with get_session() as session:
+            grp = await session.get(Group, int(data["quiz_grp_id"]))
+        where = f"👥 Guruh: {esc(grp.title) if grp else '—'}"
+    if data.get("quiz_when") == "sched" and data.get("quiz_sched_iso"):
+        try:
+            when_txt = f"⏰ {fmt_tashkent(datetime.fromisoformat(str(data['quiz_sched_iso'])))} (Toshkent vaqti)"
+        except ValueError:
+            when_txt = "⏰ Vaqt noto‘g‘ri — qayta belgilang"
+    else:
+        when_txt = "⚡ Tasdiqlangach darhol boshlanadi"
+
+    lines = [
+        "📝 <b>VIKTORINANI TASDIQLASH</b>",
+        "Hammasini diqqat bilan tekshiring. Xato bo‘lsa — pastdan o‘zgartiring, so‘ng <b>Tasdiqlash</b> ni bosing.",
+        "━━━━━━━━━━━━━━━",
+        f"🏷 Nomi: <b>{esc(data.get('quiz_title', 'Quiz'))}</b>",
+        f"🪙 Mukofot: <b>{int(data.get('quiz_coins', 300)):,}</b> coin (har bir to‘g‘ri javobga)",
+        f"📢 Qayerga: {where}",
+        f"{when_txt}",
+        "",
+        f"❓ <b>Savollar ({len(qs)} ta):</b>",
+    ]
+    for i, item in enumerate(qs[:12], 1):
+        lines.append(f"\n<b>{i}.</b> {esc(str(item.get('q', ''))[:140])}")
+        opts = list(item.get("opts") or [])
+        if len(opts) <= 1:
+            lines.append(f"   ✅ To‘g‘ri javob (yozma): <code>{esc(opts[0] if opts else '—')}</code>")
+        else:
+            for oi, opt in enumerate(opts):
+                mark = "✅" if oi == int(item.get("cidx", 0)) else "▫️"
+                lines.append(f"   {mark} {esc(str(opt)[:60])}")
+    if len(qs) > 12:
+        lines.append(f"\n… yana {len(qs) - 12} ta savol")
+
+    b = InlineKeyboardBuilder()
+    for i in range(min(len(qs), 12)):
+        b.add(InlineKeyboardButton(text=f"✏️ {i + 1}-savol", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_q", tid=i).pack()))
+    b.adjust(3)
+    b.row(
+        InlineKeyboardButton(text="🏷 Nomini o‘zgartirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_title").pack()),
+        InlineKeyboardButton(text="🪙 Mukofot", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_coins").pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text="➕ Savol qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_more").pack()),
+        InlineKeyboardButton(text="📢 Qayerga/qachon", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="q_scope").pack()),
+    )
+    b.row(InlineKeyboardButton(text="✅ TASDIQLASH VA YUBORISH", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_ok").pack()))
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="v").pack()))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+async def _show_quiz_question_edit(target, state: FSMContext, owner_id: int, idx: int) -> None:
+    data = await state.get_data()
+    qs = list(data.get("quiz_questions") or [])
+    if not (0 <= idx < len(qs)):
+        await _show_quiz_review(target, state, owner_id)
+        return
+    item = qs[idx]
+    opts = list(item.get("opts") or [])
+    lines = [f"✏️ <b>{idx + 1}-SAVOLNI TAHRIRLASH</b>", "━━━━━━━━━━━━━━━", f"❓ {esc(item.get('q', ''))}", ""]
+    b = InlineKeyboardBuilder()
+    if len(opts) <= 1:
+        lines.append(f"✅ To‘g‘ri javob (yozma): <code>{esc(opts[0] if opts else '—')}</code>")
+    else:
+        lines.append("Variantlar (✅ — to‘g‘ri javob). To‘g‘ri javobni almashtirish uchun variantni bosing:")
+        for oi, opt in enumerate(opts):
+            mark = "✅" if oi == int(item.get("cidx", 0)) else "▫️"
+            lines.append(f"{mark} {esc(str(opt)[:60])}")
+            b.row(
+                InlineKeyboardButton(
+                    text=f"{mark} {str(opt)[:40]}",
+                    callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_qc", tid=oi, ext=str(idx)).pack(),
+                )
+            )
+    b.row(
+        InlineKeyboardButton(text="📝 Savol matni", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_qt", tid=idx).pack()),
+        InlineKeyboardButton(text="🔤 Variantlar/javob", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_qo", tid=idx).pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text="🗑 Savolni o‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv_qd", tid=idx).pack()),
+        InlineKeyboardButton(text="⬅️ Tasdiqlash ekrani", callback_data=AdmV2Cb(owner_id=owner_id, sec="quiz", act="rv").pack()),
+    )
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.message(AdminV2States.waiting_quiz_edit_title, NotCommandFilter())
+async def fsm_v2_quiz_edit_title(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    title = (message.text or "").strip()[:160]
+    if not title:
+        await message.answer("⚠️ Nomni yozing.")
+        return
+    await state.update_data(quiz_title=title)
+    await state.set_state(None)
+    await _show_quiz_review(message, state, message.from_user.id)
+
+
+@router.message(AdminV2States.waiting_quiz_edit_coins, NotCommandFilter())
+async def fsm_v2_quiz_edit_coins(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Musbat son kiriting.")
+        return
+    await state.update_data(quiz_coins=int(raw))
+    await state.set_state(None)
+    await _show_quiz_review(message, state, message.from_user.id)
+
+
+@router.message(AdminV2States.waiting_quiz_edit_q_text, NotCommandFilter())
+async def fsm_v2_quiz_edit_q_text(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    txt = (message.text or "").strip()
+    if not txt:
+        await message.answer("⚠️ Savol matnini yozing.")
+        return
+    qs = list(data.get("quiz_questions") or [])
+    idx = int(data.get("edit_idx", 0))
+    if 0 <= idx < len(qs):
+        qs[idx]["q"] = txt
+        await state.update_data(quiz_questions=qs)
+    await state.set_state(None)
+    await _show_quiz_question_edit(message, state, message.from_user.id, idx)
+
+
+@router.message(AdminV2States.waiting_quiz_edit_q_opts, NotCommandFilter())
+async def fsm_v2_quiz_edit_q_opts(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    opts = [x.strip() for x in re.split(r"[\n,;]+", (message.text or "").strip()) if x.strip()][:6]
+    if not opts:
+        await message.answer("⚠️ Kamida 1 ta javob yozing.")
+        return
+    qs = list(data.get("quiz_questions") or [])
+    idx = int(data.get("edit_idx", 0))
+    if not (0 <= idx < len(qs)):
+        await state.set_state(None)
+        await _show_quiz_review(message, state, message.from_user.id)
+        return
+    qs[idx]["opts"] = opts
+    qs[idx]["cidx"] = 0
+    qs[idx]["acc"] = [opts[0]]
+    await state.update_data(quiz_questions=qs)
+    await state.set_state(None)
+    if len(opts) > 1:
+        await message.answer("👇 Endi <b>to‘g‘ri javobni</b> tanlang (hozir 1-variant belgilangan):")
+    await _show_quiz_question_edit(message, state, message.from_user.id, idx)
 
 
 @router.message(AdminV2States.waiting_quiz_clone_coins, NotCommandFilter())
