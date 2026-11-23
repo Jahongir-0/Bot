@@ -20,8 +20,10 @@ from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
 from services.community_service import CommunityService
 from services.drop_service import DropService
+from services.group_policy_service import GroupPolicyService
 from services.gameplay_service import GameplayService
 from services.offer_service import OfferService
+from services.quiz_announce import build_quiz_announcement
 from services.security_backup_service import SecurityBackupService
 from services.settings_service import SettingsService
 from services.transfer_service import TransferService
@@ -54,14 +56,9 @@ async def _fetch_member_counts(bot: Bot, groups: List[Group]) -> dict:
             out[g.id] = g.member_count
             return
         async with sem:
-            try:
-                out[g.id] = int(await bot.get_chat_member_count(g.telegram_chat_id))
-            except TelegramRetryAfter as exc:
-                await asyncio.sleep(float(exc.retry_after) + 0.5)
-            except (TelegramForbiddenError, TelegramBadRequest) as exc:
-                logger.warning("member count failed for %s: %s", g.telegram_chat_id, exc)
-            except Exception as exc:
-                logger.warning("member count error for %s: %s", g.telegram_chat_id, exc)
+            stats = await GroupPolicyService.fetch_member_stats(bot, g.telegram_chat_id)
+            if stats is not None:
+                out[g.id] = stats.real  # botlarsiz, haqiqiy odamlar
 
     await asyncio.gather(*[_one(g) for g in groups])
     return out
@@ -200,6 +197,15 @@ async def _dispatch_slot(bot: Bot, schedule_id: int) -> None:
         if group is None or not group.is_active or not group.drop_enabled:
             s_row.status = "skipped"
             await session.commit()
+            return
+
+        # Guruhda haqiqiy a'zolar admin belgilagan minimumdan kam bo'lsa karta tushmaydi
+        _rules = await SettingsService.get_drop_rules(session)
+        _min_members = max(0, int(_rules.get("min_members", 0)))
+        if _min_members and group.member_count is not None and int(group.member_count) < _min_members:
+            s_row.status = "skipped"
+            await session.commit()
+            logger.info("Group %s has %s members (< %s); drop skipped.", group.telegram_chat_id, group.member_count, _min_members)
             return
 
         # Slotni atomik band qilamiz (parallel ishlovdan himoya)
@@ -360,7 +366,6 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
         for q in due_quizzes:
             async with get_session() as s_q:
                 qs_res = await GameplayService.get_quiz_with_questions(s_q, q.id)
-                first_q = qs_res[1][0] if qs_res and qs_res[1] else None
                 q_targets: List[int] = []
                 if q.target_scope == "group" and q.target_group_id:
                     grp = await s_q.get(Group, q.target_group_id)
@@ -377,12 +382,8 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                     q_targets.extend(int(x) for x in u_ids)
             q_targets = list(dict.fromkeys(q_targets))
 
-            q_text = (
-                f"🧠 <b>YANGI VIKTORINA BOSHLANDI: {esc(q.title)}</b>\n\n"
-                f"🎁 Har bir to‘g‘ri javob uchun: <b>{q.reward_coins:,} 🪙</b>\n"
-                + (f"❓ <b>1-savol:</b> {esc(first_q.question_text)}\n\n" if first_q else "")
-                + f"👇 Ishtirok etish uchun /quiz yozing (yoki ushbu xabarga javob yozing)!\n<code>Quiz #{q.id}</code>"
-            )
+            _bot_un = await get_bot_username(bot)
+            q_text, q_markup = build_quiz_announcement(q, len(qs_res[1]) if qs_res else 0, _bot_un)
             sem_q = asyncio.Semaphore(4)
 
             async def _send_quiz_msg(cid: int) -> None:
@@ -390,7 +391,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                     target_cid = cid
                     for _attempt in range(2):
                         try:
-                            await bot.send_message(target_cid, q_text)
+                            await bot.send_message(target_cid, q_text, reply_markup=q_markup)
                             break
                         except TelegramRetryAfter as exc:
                             await asyncio.sleep(float(exc.retry_after) + 0.5)
