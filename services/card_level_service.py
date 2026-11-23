@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import random
 import re
 
 import logging
@@ -132,6 +133,42 @@ class CardLevelService:
     @staticmethod
     def rarity_mult(mults: Dict[int, float], rarity: str) -> float:
         return CardLevelService.mult_for(mults, get_rarity_meta(rarity).order)
+
+    @staticmethod
+    def choose_drop_rank(
+        ranks: list[Dict[str, Any]],
+        drop_mults: Dict[int, float],
+        eligible_orders: Optional[set[int]] = None,
+        event_boosted_rarity: Optional[str] = None,
+        event_multiplier: float = 1.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Choose the rank first, using the admin-configured probabilities.
+
+        A zero drop multiplier disables a rank; positive values do not distort
+        its configured probability. Event boosts are applied separately.
+        """
+        candidates: list[Dict[str, Any]] = []
+        weights: list[float] = []
+        boosted = (event_boosted_rarity or "").strip().casefold()
+        for rank in ranks:
+            try:
+                order = int(rank.get("order", 0))
+            except (TypeError, ValueError):
+                continue
+            if eligible_orders is not None and order not in eligible_orders:
+                continue
+            if CardLevelService.mult_for(drop_mults, order) <= 0:
+                continue
+            probability = max(0.0, float(rank.get("drop_probability", 0) or 0))
+            if probability <= 0:
+                continue
+            if boosted and str(rank.get("name", "")).strip().casefold() == boosted:
+                probability *= max(1.0, float(event_multiplier or 1.0))
+            candidates.append(rank)
+            weights.append(probability)
+        if not candidates or sum(weights) <= 0:
+            return None
+        return random.choices(candidates, weights=weights, k=1)[0]
 
     # ---------------------------------------------------------------- hisob-kitob
     @staticmethod

@@ -1302,7 +1302,13 @@ async def fsm_admin_coin_delta(message: Message, state: FSMContext) -> None:
     uid = int(data["target_user_id"])
 
     async with get_session() as session:
-        ok, msg_text, _ = await AdminService.adjust_user_coins(session, message.from_user.id, uid, delta)
+        ok, msg_text, _ = await AdminService.adjust_user_coins(
+            session,
+            message.from_user.id,
+            uid,
+            delta,
+            request_id=f"{message.chat.id}:{message.message_id}",
+        )
         u = await session.get(User, uid) if ok else None
         if ok:
             await session.commit()

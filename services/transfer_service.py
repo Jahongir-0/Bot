@@ -33,11 +33,23 @@ class TransferService:
     @staticmethod
     async def create_pending_transfer(
         session: AsyncSession,
-        from_user_id: int,
-        to_user_id: int,
-        user_card_id: int,
+        from_user_id: Optional[int] = None,
+        to_user_id: Optional[int] = None,
+        user_card_id: Optional[int] = None,
         price: int = 0,
+        *,
+        sender_id: Optional[int] = None,
+        receiver_id: Optional[int] = None,
+        mode: Optional[str] = None,
     ) -> TransferResult:
+        from_user_id = from_user_id if from_user_id is not None else sender_id
+        to_user_id = to_user_id if to_user_id is not None else receiver_id
+        if mode not in (None, "gift", "paid"):
+            return TransferResult(False, "Transfer turi noto‘g‘ri.")
+        if mode == "gift":
+            price = 0
+        if from_user_id is None or to_user_id is None or user_card_id is None:
+            return TransferResult(False, "Transfer ma’lumotlari to‘liq emas.")
         if from_user_id == to_user_id:
             return TransferResult(False, "O‘zingizga o‘zingiz karta bera olmaysiz.")
         if price < 0:

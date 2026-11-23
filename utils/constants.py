@@ -239,6 +239,7 @@ class RankingMode(str, Enum):
     WEIGHTED = "weighted"
     UNIQUE_FIRST = "unique_first"
     TOTAL_CARDS = "total_cards"
+    COINS = "coins"
 
 
 DEFAULT_DROP_RULES: Dict[str, object] = {

@@ -12,14 +12,15 @@ from services.auction_wishlist_service import AuctionWishlistService
 from services.card_level_service import CardLevelService
 from services.gameplay_service import GameplayService
 from services.market_service import MarketService
+from services.card_service import CardService
 from services.settings_service import SettingsService
 from services.user_service import UserService
 
 
 async def _user(session, tg_id: int, coins: int = 0) -> User:
     u = await UserService.upsert_user(session, tg_id, f"u{tg_id}", f"U{tg_id}")
-    if coins:
-        await UserService.credit_coins(session, u.id, coins, "test", "seed", f"seed:{tg_id}")
+    u.coins = coins
+    await session.flush()
     return u
 
 
@@ -35,14 +36,20 @@ async def test_bot_market_quote_and_sell_respects_rank_and_level_bonus(db_sessio
     epic_card = (
         await db_session.execute(select(Card).where(Card.rarity == "Epic").limit(1))
     ).scalar_one()
+    bonus_card = await CardService.create_card(
+        db_session, "Epic Level Bonus", "Test Anime", "https://x/epic-bonus.png", "Epic", 5000
+    )
     epic_card.dropped_count = 2
+    bonus_card.dropped_count = 2
     uc_lvl1 = UserCard(user_id=seller.id, card_id=epic_card.id, acquired_via="drop", level=1)
-    uc_lvl3 = UserCard(user_id=seller.id, card_id=epic_card.id, acquired_via="drop", level=3)
+    uc_lvl3 = UserCard(user_id=seller.id, card_id=bonus_card.id, acquired_via="drop", level=3)
     db_session.add_all([uc_lvl1, uc_lvl3])
     await db_session.flush()
 
-    q1 = await MarketService.get_bot_sell_quote(db_session, seller.id, uc_lvl1.id)
-    q3 = await MarketService.get_bot_sell_quote(db_session, seller.id, uc_lvl3.id)
+    ok_q1, _, q1 = await MarketService.get_bot_sell_quote(db_session, seller.id, uc_lvl1.id)
+    ok_q3, _, q3 = await MarketService.get_bot_sell_quote(db_session, seller.id, uc_lvl3.id)
+    assert ok_q1 and q1 is not None
+    assert ok_q3 and q3 is not None
     assert q1 is not None and q1.base_rank_value == 10000 and q1.bonus_coins == 0 and q1.total_price == 10000
     assert q3 is not None and q3.base_rank_value == 10000 and q3.bonus_coins == 2000 and q3.total_price == 12000
 
@@ -50,7 +57,7 @@ async def test_bot_market_quote_and_sell_respects_rank_and_level_bonus(db_sessio
     db_session.add(
         Offer(
             user_card_id=uc_lvl3.id,
-            card_id=epic_card.id,
+            card_id=bonus_card.id,
             buyer_id=buyer.id,
             owner_id=seller.id,
             amount=500,
@@ -70,9 +77,9 @@ async def test_bot_market_quote_and_sell_respects_rank_and_level_bonus(db_sessio
     await db_session.refresh(buyer)
     await db_session.refresh(epic_card)
     assert int(seller.coins) == before_seller + 12000
-    assert int(buyer.coins) == 5100  # 100 seed + 5000 - 500 + 500 refund
+    assert int(buyer.coins) == 5000  # seed + 500 escrowed - 500 refund
     assert await db_session.get(UserCard, uc_lvl3.id) is None
-    assert epic_card.dropped_count == 1
+    assert bonus_card.dropped_count == 1
 
 
 @pytest.mark.asyncio

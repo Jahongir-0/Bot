@@ -13,6 +13,7 @@ class CoinTransaction(Base, TimestampMixin):
         CheckConstraint("balance_after >= 0", name="ck_transactions_balance_non_negative"),
         Index("ix_transactions_user_created", "user_id", "created_at"),
         Index("ix_transactions_type_created", "tx_type", "created_at"),
+        Index("uq_transactions_idempotency_key", "idempotency_key", unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -22,6 +23,7 @@ class CoinTransaction(Base, TimestampMixin):
     tx_type: Mapped[str] = mapped_column(String(48), nullable=False)
     description: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     reference_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     meta: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
 

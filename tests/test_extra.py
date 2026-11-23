@@ -16,6 +16,7 @@ from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.transfer_service import TransferService
 from services.user_service import UserService
+from services.welcome_bonus_service import WELCOME_BONUS_COINS
 
 
 async def _give(session, user_id, card_id, times=1):
@@ -125,7 +126,7 @@ async def test_stars_payment_uses_admin_price_and_is_idempotent(db_session):
     )
     assert done is not None
     await db_session.refresh(user)
-    assert user.coins == 100 + 7777
+    assert user.coins == WELCOME_BONUS_COINS + 7777
 
     again = await PaymentService.complete_star_payment(
         db_session, payload, 7100, "XTR", 77, "charge-1", "prov-1"
@@ -133,7 +134,7 @@ async def test_stars_payment_uses_admin_price_and_is_idempotent(db_session):
     assert again is None
     assert await PaymentService.is_charge_processed(db_session, "charge-1")
     await db_session.refresh(user)
-    assert user.coins == 100 + 7777
+    assert user.coins == WELCOME_BONUS_COINS + 7777
 
     # Noto'g'ri summa yoki valyuta qabul qilinmaydi
     order2, payload2, _ = await PaymentService.create_star_order(db_session, user.id, 7100, pkg["id"])
@@ -172,11 +173,11 @@ async def test_admin_remove_card_refunds_pending_offer(db_session):
     res = await OfferService.create_offer(db_session, buyer.id, uc_id, 600)
     assert res.success
     await db_session.refresh(buyer)
-    assert buyer.coins == 100 + 1000 - 600  # escrow ushlab turibdi
+    assert buyer.coins == WELCOME_BONUS_COINS + 1000 - 600
 
     assert await AdminService.remove_card_from_user(db_session, 999999, owner.id, card.id)
     await db_session.refresh(buyer)
-    assert buyer.coins == 100 + 1000  # coin qaytarildi
+    assert buyer.coins == WELCOME_BONUS_COINS + 1000
     off = (await db_session.execute(select(Offer).where(Offer.id == res.offer.id))).scalar_one()
     assert off.status == "cancelled"
 
@@ -226,20 +227,47 @@ async def test_v2_rbac_permissions_and_revocation(db_session):
 async def test_v2_zip_import_zipslip_protection_and_duplicates(db_session):
     import io
     import json
+    from types import SimpleNamespace
     import zipfile
     from services.security_backup_service import SecurityBackupService
+
+    from PIL import Image
+
+    image = io.BytesIO()
+    Image.new("RGB", (64, 64), color="red").save(image, format="JPEG")
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("../../etc/passwd", "bad")
-        zf.writestr("cards/hero.jpg", b"\xff\xd8\xff\xe0TESTJPG")
+        zf.writestr("cards/hero.jpg", image.getvalue())
         manifest = [
-            {"character_name": "V2 Test Hero", "anime_name": "V2 Anime", "rarity": "Epic", "image": "hero.jpg"},
-            {"character_name": "V2 Test Hero", "anime_name": "V2 Anime", "rarity": "Epic", "image": "hero.jpg"},
+            {
+                "character_name": "V2 Test Hero",
+                "media_type": "Anime",
+                "media_name": "V2 Anime",
+                "rank_id": 3,
+                "image": "hero.jpg",
+            },
+            {
+                "character_name": "V2 Test Hero",
+                "media_type": "Anime",
+                "media_name": "V2 Anime",
+                "rank_id": 3,
+                "image": "hero.jpg",
+            },
         ]
         zf.writestr("cards.json", json.dumps(manifest))
 
-    rep = await SecurityBackupService.import_cards_from_zip(db_session, buf.getvalue(), admin_tg_id=999999)
+    class FakeBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace(photo=[SimpleNamespace(file_id="fake-file-id")], message_id=1)
+
+        async def delete_message(self, *args, **kwargs):
+            return None
+
+    rep = await SecurityBackupService.import_cards_from_zip(
+        db_session, buf.getvalue(), admin_tg_id=999999, bot=FakeBot()
+    )
     assert rep.added == 1
     assert rep.duplicates == 1
     assert rep.failed >= 1  # ZipSlip entry rejected
@@ -285,14 +313,14 @@ async def test_v2_auction_bid_outbid_refund_and_finalize(db_session):
     ok1, _ = await AuctionWishlistService.place_bid(db_session, auc.id, b1, 1000)
     assert ok1
     await db_session.refresh(b1)
-    assert b1.coins == 4100 and b1.locked_coins == 1000
+    assert b1.coins == WELCOME_BONUS_COINS + 5000 - 1000 and b1.locked_coins == 1000
 
     ok2, _ = await AuctionWishlistService.place_bid(db_session, auc.id, b2, 1500)
     assert ok2
     await db_session.refresh(b1)
     await db_session.refresh(b2)
-    assert b1.coins == 5100 and b1.locked_coins == 0  # outbid refund
-    assert b2.coins == 3600 and b2.locked_coins == 1500
+    assert b1.coins == WELCOME_BONUS_COINS + 5000 and b1.locked_coins == 0  # outbid refund
+    assert b2.coins == WELCOME_BONUS_COINS + 5000 - 1500 and b2.locked_coins == 1500
 
     row = await db_session.get(Auction, auc.id)
     row.ends_at = utcnow() - timedelta(minutes=1)
@@ -380,7 +408,7 @@ async def test_v2_admin_media_titles_ranks_and_auction_cancel(db_session):
             {"name": "Elita", "emoji": "🔵", "chance": 40.0, "value": 2500, "drops": 2},
         ],
     )
-    await GameplayService.update_single_rank_attr(db_session, 0, "chance", "70")
+    await GameplayService.update_single_rank_attr(db_session, "Basic", drop_probability=70)
     await GameplayService.normalize_rank_probabilities(db_session)
     ranks = await GameplayService.get_rank_definitions(db_session)
     assert sum(int(r.get("drop_probability", 0)) for r in ranks) == 100

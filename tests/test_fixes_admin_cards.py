@@ -41,16 +41,15 @@ async def test_stale_transfer_lock_reconcile_and_manual_unlock(db_session):
     # 1. Transfer yaratib, muddatini o'tkazamiz
     res = await TransferService.create_pending_transfer(
         db_session,
-        sender_id=sender.id,
-        receiver_id=receiver.id,
+        from_user_id=sender.id,
+        to_user_id=receiver.id,
         user_card_id=uc.id,
-        mode="gift",
     )
     assert res.success and res.transfer is not None
     await db_session.refresh(uc)
     assert uc.is_locked is True
 
-    kind, tr_id = await CollectionService.get_card_lock_info(db_session, uc.id)
+    kind, tr_id, _label = await CollectionService.get_card_lock_info(db_session, uc.id)
     assert kind == "transfer" and tr_id == res.transfer.id
 
     res.transfer.expires_at = utcnow() - timedelta(minutes=2)
@@ -148,21 +147,28 @@ async def test_admin_unban_protection_and_exclusion_from_rankings_and_search(db_
     assert adm_user.id not in {u.id for u, _ in top_coins}
     assert normal_u.id in {u.id for u, _ in top_coins}
 
-    adm_rank, _ = await RankingService.get_user_ranks(db_session, adm_user)
+    adm_rank, _ = await RankingService.get_user_ranks(db_session, adm_user.id)
     assert adm_rank == 0
-    prof_txt = format_profile_message(adm_user, adm_rank)
+    prof_txt = format_profile_message(adm_user, adm_rank, None)
     assert "Admin (reytingdan tashqari)" in prof_txt
 
     power_top = await CardLevelService.top_power(db_session, limit=10)
-    assert adm_user.id not in {u.id for u, _, _ in power_top}
-    assert normal_u.id in {u.id for u, _, _ in power_top}
+    assert adm_user.id not in {u.id for u, _ in power_top}
+    assert normal_u.id in {u.id for u, _ in power_top}
 
     # SearchService admin kartalarini yashiradi
-    s_global, _ = await SearchService.search_global_cards(db_session, "Ranking Hero", page=1, page_size=20)
-    assert all(u.id != adm_user.id for _, u, _ in s_global)
-    assert any(u.id == normal_u.id for _, u, _ in s_global)
+    s_global, _ = await SearchService.search_global_cards(
+        db_session, mode="any", query="Ranking Hero", page=1, page_size=20
+    )
+    assert all(item.owner.id != adm_user.id for item in s_global)
+    assert any(item.owner.id == normal_u.id for item in s_global)
 
-    insp = await SearchService.inspect_user_card(db_session, card.id, adm_user.id)
+    adm_uc = (
+        await db_session.execute(
+            select(UserCard).where(UserCard.user_id == adm_user.id, UserCard.card_id == card.id)
+        )
+    ).scalar_one()
+    insp = await SearchService.inspect_user_card(db_session, adm_uc.id)
     assert insp is None
 
     # Lekin oddiy foydalanuvchi adminga sovg'a yubora oladi
@@ -176,7 +182,7 @@ async def test_admin_unban_protection_and_exclusion_from_rankings_and_search(db_
         db_session, sender_id=normal_u.id, receiver_id=adm_user.id, user_card_id=uc_norm.id, mode="gift"
     )
     assert tr.success and tr.transfer is not None
-    acc = await TransferService.accept_pending_transfer(db_session, tr.transfer.id, adm_user.id)
+    acc = await TransferService.confirm_transfer(db_session, tr.transfer.id, normal_u.id)
     assert acc.success
     assert await UserService.owns_card(db_session, adm_user.id, gift_card.id)
 
@@ -218,7 +224,7 @@ async def test_undropped_card_preset_level_for_event_auction_and_grant(db_sessio
         db_session, card_id=c_auc.id, start_price=1000, hours=1, created_by_tg_id=admin_tg
     )
     assert ok_auc and auc is not None and auc.card_level == 3
-    ok_bid, _ = await AuctionWishlistService.place_bid(db_session, auc.id, buyer.id, 1500)
+    ok_bid, _ = await AuctionWishlistService.place_bid(db_session, auc.id, buyer, 1500)
     assert ok_bid
     ok_fin, _ = await AuctionWishlistService.admin_finalize_auction(db_session, auc.id)
     assert ok_fin

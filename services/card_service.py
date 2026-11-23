@@ -149,6 +149,16 @@ class CardService:
                 if p_card is not None and p_card.is_available and not p_card.is_deleted:
                     return p_card
 
+        from services.card_level_service import CardLevelService
+        from utils.constants import get_rarity_aliases
+
+        mults = await CardLevelService.get_drop_mults(session)
+        ranks = await SettingsService.get_value(session, "rank_definitions", [])
+        if not isinstance(ranks, list) or not ranks:
+            from utils.constants import DEFAULT_RANK_DEFINITIONS
+
+            ranks = list(DEFAULT_RANK_DEFINITIONS)
+
         res = await session.execute(
             select(Card).where(
                 Card.is_available.is_(True),
@@ -159,28 +169,40 @@ class CardService:
             )
         )
         cards = list(res.scalars().all())
-        from services.card_level_service import CardLevelService
-
-        mults = await CardLevelService.get_drop_mults(session)
-        cards = [c for c in cards if CardLevelService.rarity_mult(mults, c.rarity) > 0]
         if not cards:
             return None
 
         active_event = await CardService.get_active_event(session)
-        random.shuffle(cards)
+        eligible_by_order: dict[int, list[Card]] = {}
+        for rank in ranks:
+            try:
+                order = int(rank.get("order", 0))
+            except (TypeError, ValueError):
+                continue
+            aliases = {a.casefold() for a in get_rarity_aliases(str(rank.get("name", "")))}
+            if not aliases:
+                continue
+            rank_cards = [c for c in cards if (c.rarity or "").strip().casefold() in aliases]
+            if rank_cards and CardLevelService.mult_for(mults, order) > 0:
+                eligible_by_order[order] = rank_cards
+
+        chosen_rank = CardLevelService.choose_drop_rank(
+            ranks,
+            mults,
+            eligible_orders=set(eligible_by_order),
+            event_boosted_rarity=active_event.boosted_rarity if active_event else None,
+            event_multiplier=active_event.rarity_weight_multiplier if active_event else 1.0,
+        )
+        if chosen_rank is None:
+            return None
+        pool = list(eligible_by_order[int(chosen_rank["order"])])
+        random.shuffle(pool)
 
         def _weight(card: Card) -> float:
-            w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
-            if (
-                active_event is not None
-                and active_event.boosted_rarity
-                and card.rarity.lower() == active_event.boosted_rarity.lower()
-            ):
-                w *= max(1.0, active_event.rarity_weight_multiplier)
-            return max(0.01, w)
+            return max(0.01, float(card.drop_weight))
 
-        by_anime = {}
-        for card in cards:
+        by_anime: dict[str, list[Card]] = {}
+        for card in pool:
             akey = card.anime_id or (card.anime_name or "").strip().casefold()
             by_anime.setdefault(akey, []).append(card)
         anime_groups = list(by_anime.values())

@@ -81,6 +81,8 @@ class RankingService:
             return User.total_cards, None
         if mode == RankingMode.UNIQUE_FIRST.value:
             return User.unique_cards * 100 + User.total_cards, None
+        if mode == RankingMode.COINS.value:
+            return User.coins, None
 
         per_rarity = (
             select(
@@ -131,10 +133,15 @@ class RankingService:
         return items
 
     @staticmethod
-    async def _top(session: AsyncSession, limit: int, group_id: Optional[int]) -> List[RankEntry]:
+    async def _top(
+        session: AsyncSession,
+        limit: int,
+        group_id: Optional[int],
+        mode_override: Optional[str] = None,
+    ) -> List[RankEntry]:
         from services.admin_service import AdminService
 
-        mode = await SettingsService.get_ranking_mode(session)
+        mode = mode_override or await SettingsService.get_ranking_mode(session)
         ranks = await RankingService._live_ranks(session)
         excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
         rank_sig = tuple((str(r.get("name")), int(r.get("rank_weight", 1))) for r in ranks)
@@ -198,6 +205,16 @@ class RankingService:
     @staticmethod
     async def get_global_top(session: AsyncSession, limit: int = 10) -> List[RankEntry]:
         return await RankingService._top(session, limit, None)
+
+    @staticmethod
+    async def get_top_users(
+        session: AsyncSession,
+        mode: RankingMode,
+        limit: int = 10,
+    ) -> List[Tuple[User, int]]:
+        mode_value = mode.value if isinstance(mode, RankingMode) else str(mode)
+        entries = await RankingService._top(session, limit, None, mode_override=mode_value)
+        return [(entry.user, entry.score) for entry in entries]
 
     @staticmethod
     async def get_group_top(session: AsyncSession, group_id: int, limit: int = 10) -> List[RankEntry]:

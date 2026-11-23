@@ -11,6 +11,7 @@ from services.gameplay_service import GameplayService
 from services.pack_service import PackService
 from services.quest_service import QuestService
 from services.user_service import UserService
+from services.card_level_service import CardLevelService
 
 
 @pytest.mark.asyncio
@@ -78,19 +79,22 @@ async def test_pack_open_daily_limit_and_duplicate_cashback(db_session):
     u2 = await UserService.upsert_user(db_session, 9302, "packer2", "Packer 2")
     await UserService.credit_coins(db_session, u2.id, 5000, "test", "seed")
     cards = (await db_session.execute(select(Card))).scalars().all()
+    max_level = (await CardLevelService.get_config(db_session))["max_level"]
     for c in cards:
-        db_session.add(UserCard(user_id=u2.id, card_id=c.id, acquired_via="drop"))
+        db_session.add(UserCard(user_id=u2.id, card_id=c.id, acquired_via="drop", level=max_level))
     await db_session.flush()
 
     res_dup = await PackService.open_pack(db_session, u2.id, "bronze")
     assert res_dup.success is True
     assert res_dup.is_duplicate is True
-    assert res_dup.cashback_coins >= 250
+    assert res_dup.cashback_coins == int(res_dup.card.base_value * 0.5)
 
 
 @pytest.mark.asyncio
 async def test_coinflip_status_with_int_and_insufficient_coins(db_session):
     u = await UserService.upsert_user(db_session, 9350, "flipper", "Flipper")
+    u.coins = 100
+    await db_session.flush()
     ok, msg, _won, _delta = await GameplayService.play_coin_flip(db_session, u, "heads", 500)
     assert ok is False
     assert "yetarli" in msg.lower()
@@ -106,6 +110,9 @@ async def test_quest_counts_divine_rarity_and_new_metrics(db_session):
     divine_card = Card(
         character_name="Test Divine",
         anime_name="Test Anime",
+        anime_id="test-anime",
+        character_id="test-divine",
+        image="https://example.com/divine.png",
         rarity="Divine",
         base_value=60000,
         card_code="DIV-999",

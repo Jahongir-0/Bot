@@ -11,7 +11,6 @@ from database.seed import seed_initial_data
 from database.session import close_db, get_session, init_db
 from services.admin_service import AdminService
 from services.gameplay_service import GameplayService
-from services.welcome_bonus_service import WelcomeBonusService
 from utils.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -25,7 +24,7 @@ async def _set_bot_commands(bot) -> None:
         BotCommand(command="daily", description="Kunlik bonus"),
         BotCommand(command="pack", description="Karta paketlari (Bronze, Silver, Gold)"),
         BotCommand(command="quiz", description="Kunlik anime quizlar"),
-        BotCommand(command="game", description="Mini o‘yinlar (Coin Flip, Dice, Lucky Card)"),
+        BotCommand(command="game", description="6 ta mini o‘yin: Dice, Coin Flip, Lucky Card, Slots, Mines, Wheel"),
         BotCommand(command="auction", description="Jonli karta auksionlari"),
         BotCommand(command="wishlist", description="Sevimli kartalar ro‘yxati"),
         BotCommand(command="vip", description="VIP obunalar va ustunliklar"),
@@ -64,8 +63,6 @@ async def main() -> None:
 
     stop_event = asyncio.Event()
     scheduler_task = asyncio.create_task(run_scheduler_loop(bot, stop_event))
-    # Bir martalik: avvalgi barcha foydalanuvchilarga 40 000 coin + xabar (fonda ishlaydi)
-    bonus_task = asyncio.create_task(WelcomeBonusService.grant_legacy_users(bot))
 
     try:
         logger.info("Anime Card Collection bot is starting polling...")
@@ -73,8 +70,6 @@ async def main() -> None:
     finally:
         logger.info("Shutting down bot...")
         stop_event.set()
-        bonus_task.cancel()
-        await asyncio.gather(bonus_task, return_exceptions=True)
         await scheduler_task
         await lock_manager.close()
         await bot.session.close()

@@ -580,8 +580,6 @@ class CommunityService:
             .where(AdCampaign.id == ad.id)
             .values(views_count=AdCampaign.views_count + 1, last_shown_at=now)
         )
-        ad.views_count = int(ad.views_count or 0) + 1
-        ad.last_shown_at = now
         await session.flush()
         return ad
 
@@ -595,7 +593,6 @@ class CommunityService:
             .where(AdCampaign.id == ad_id)
             .values(clicks_count=AdCampaign.clicks_count + 1)
         )
-        ad.clicks_count = int(ad.clicks_count or 0) + 1
         await session.flush()
         return ad
 

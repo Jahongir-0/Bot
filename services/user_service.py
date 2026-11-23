@@ -1,3 +1,4 @@
+import hashlib
 from datetime import timedelta
 from typing import Optional, Tuple
 
@@ -18,6 +19,22 @@ from utils.constants import Rarity
 
 class InsufficientCoinsError(Exception):
     """Raised when a user does not have enough coins for an atomic debit."""
+
+
+def _coin_idempotency_key(
+    user_id: int,
+    tx_type: str,
+    reference_id: Optional[str],
+    request_id: Optional[str],
+) -> Optional[str]:
+    if request_id is not None:
+        identity = f"request:{request_id}"
+    elif reference_id is not None:
+        identity = f"reference:{reference_id}"
+    else:
+        return None
+    raw_key = f"{user_id}:{tx_type}:{identity}".encode("utf-8")
+    return hashlib.sha256(raw_key).hexdigest()
 
 
 class UserService:
@@ -196,30 +213,63 @@ class UserService:
         description: str,
         reference_id: Optional[str] = None,
         meta: Optional[dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> int:
         if amount <= 0:
             raise ValueError("Credit amount must be positive")
-        await session.execute(
-            update(User)
-            .where(User.id == user_id)
-            .values(coins=User.coins + amount, updated_at=utcnow())
-            .execution_options(synchronize_session=False)
-        )
-        new_balance = (
-            await session.execute(select(User.coins).where(User.id == user_id))
-        ).scalar_one()
-        session.add(
-            CoinTransaction(
-                user_id=user_id,
-                amount=amount,
-                balance_after=new_balance,
-                tx_type=tx_type,
-                description=description[:255],
-                reference_id=reference_id,
-                meta=meta or {},
+        key = _coin_idempotency_key(user_id, tx_type, reference_id, idempotency_key)
+        if key is not None:
+            existing = await session.execute(
+                select(CoinTransaction.id).where(CoinTransaction.idempotency_key == key)
             )
-        )
-        await session.flush()
+            if existing.first() is not None:
+                return int((await session.execute(select(User.coins).where(User.id == user_id))).scalar_one())
+            if idempotency_key is None and reference_id is not None:
+                legacy = await session.execute(
+                    select(CoinTransaction.id).where(
+                        CoinTransaction.user_id == user_id,
+                        CoinTransaction.tx_type == tx_type,
+                        CoinTransaction.reference_id == reference_id,
+                    )
+                )
+                if legacy.first() is not None:
+                    return int((await session.execute(select(User.coins).where(User.id == user_id))).scalar_one())
+
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(coins=User.coins + amount, updated_at=utcnow())
+                    .execution_options(synchronize_session=False)
+                )
+                new_balance = (
+                    await session.execute(select(User.coins).where(User.id == user_id))
+                ).scalar_one()
+                session.add(
+                    CoinTransaction(
+                        user_id=user_id,
+                        amount=amount,
+                        balance_after=new_balance,
+                        tx_type=tx_type,
+                        description=description[:255],
+                        reference_id=reference_id,
+                        idempotency_key=key,
+                        meta=meta or {},
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            if key is None:
+                raise
+            existing = await session.execute(
+                select(CoinTransaction.id).where(CoinTransaction.idempotency_key == key)
+            )
+            if existing.first() is None:
+                raise
+            new_balance = (
+                await session.execute(select(User.coins).where(User.id == user_id))
+            ).scalar_one()
         return int(new_balance)
 
     @staticmethod
@@ -231,32 +281,65 @@ class UserService:
         description: str,
         reference_id: Optional[str] = None,
         meta: Optional[dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> int:
         if amount <= 0:
             raise ValueError("Debit amount must be positive")
-        res = await session.execute(
-            update(User)
-            .where(User.id == user_id, User.coins >= amount)
-            .values(coins=User.coins - amount, updated_at=utcnow())
-            .execution_options(synchronize_session=False)
-        )
-        if res.rowcount != 1:
-            raise InsufficientCoinsError("Coin yetarli emas!")
-        new_balance = (
-            await session.execute(select(User.coins).where(User.id == user_id))
-        ).scalar_one()
-        session.add(
-            CoinTransaction(
-                user_id=user_id,
-                amount=-amount,
-                balance_after=new_balance,
-                tx_type=tx_type,
-                description=description[:255],
-                reference_id=reference_id,
-                meta=meta or {},
+        key = _coin_idempotency_key(user_id, tx_type, reference_id, idempotency_key)
+        if key is not None:
+            existing = await session.execute(
+                select(CoinTransaction.id).where(CoinTransaction.idempotency_key == key)
             )
-        )
-        await session.flush()
+            if existing.first() is not None:
+                return int((await session.execute(select(User.coins).where(User.id == user_id))).scalar_one())
+            if idempotency_key is None and reference_id is not None:
+                legacy = await session.execute(
+                    select(CoinTransaction.id).where(
+                        CoinTransaction.user_id == user_id,
+                        CoinTransaction.tx_type == tx_type,
+                        CoinTransaction.reference_id == reference_id,
+                    )
+                )
+                if legacy.first() is not None:
+                    return int((await session.execute(select(User.coins).where(User.id == user_id))).scalar_one())
+
+        try:
+            async with session.begin_nested():
+                res = await session.execute(
+                    update(User)
+                    .where(User.id == user_id, User.coins >= amount)
+                    .values(coins=User.coins - amount, updated_at=utcnow())
+                    .execution_options(synchronize_session=False)
+                )
+                if res.rowcount != 1:
+                    raise InsufficientCoinsError("Coin yetarli emas!")
+                new_balance = (
+                    await session.execute(select(User.coins).where(User.id == user_id))
+                ).scalar_one()
+                session.add(
+                    CoinTransaction(
+                        user_id=user_id,
+                        amount=-amount,
+                        balance_after=new_balance,
+                        tx_type=tx_type,
+                        description=description[:255],
+                        reference_id=reference_id,
+                        idempotency_key=key,
+                        meta=meta or {},
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            if key is None:
+                raise
+            existing = await session.execute(
+                select(CoinTransaction.id).where(CoinTransaction.idempotency_key == key)
+            )
+            if existing.first() is None:
+                raise
+            new_balance = (
+                await session.execute(select(User.coins).where(User.id == user_id))
+            ).scalar_one()
         return int(new_balance)
 
     @staticmethod
@@ -294,14 +377,6 @@ class UserService:
         if new_user.referred_by_id is not None or new_user.total_cards > 0:
             return None
         if new_user.created_at and (utcnow() - ensure_utc(new_user.created_at)) > timedelta(minutes=3):
-            return None
-
-        has_tx = (
-            await session.execute(
-                select(CoinTransaction.id).where(CoinTransaction.user_id == new_user.id).limit(1)
-            )
-        ).first()
-        if has_tx is not None:
             return None
 
         referrer = await UserService.get_by_telegram_id(session, referrer_tg_id)

@@ -106,3 +106,13 @@ Agar bot GitHub repository va Railway orqali deploy qilingan bo'lsa:
 Production PostgreSQL bazasini o'zgartiradigan kod yangilanishlarida avval yangi Alembic migration yarating. `AUTO_SCHEMA_UPGRADE=true` ni production'da yoqmang.
 
 Redis bir nechta Railway instance ishlatilsa tavsiya etiladi: local MemoryStorage/lock fallback faqat bitta instance uchun xavfsiz.
+
+
+## 2026-11-23 P0/P1 stability changes
+
+- Random card drops now choose the rank from the admin-configured `drop_probability` first, then choose a card inside that rank.
+- `rank_drop_mult` acts as an enable/disable gate for random drops; it no longer silently changes the configured rank probability.
+- Active event rarity boosts are applied as a temporary rank-probability multiplier and normalized.
+- New-user welcome bonus is 2,000 coins. Existing balances are not modified by this change.
+- The startup process no longer runs the old legacy mass-welcome-bonus migration.
+- `/game` documentation now lists all six implemented mini-games.

@@ -120,7 +120,10 @@ class QuizAttempt(Base, TimestampMixin):
 
 class GameSession(Base, TimestampMixin):
     __tablename__ = "game_sessions"
-    __table_args__ = (Index("ix_game_sessions_user_date", "user_id", "created_date"),)
+    __table_args__ = (
+        Index("ix_game_sessions_user_date", "user_id", "created_date"),
+        Index("uq_game_sessions_request_id", "request_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -129,6 +132,8 @@ class GameSession(Base, TimestampMixin):
     reward_coins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reward_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_date: Mapped[date] = mapped_column(Date, nullable=False)
+    request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="completed", server_default="completed")
 
 
 class Auction(Base, TimestampMixin):
