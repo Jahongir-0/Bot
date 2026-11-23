@@ -1,3 +1,4 @@
+import logging
 import urllib.parse
 
 from aiogram import F, Router
@@ -10,7 +11,9 @@ from database.session import get_session
 from keyboards.main_menu import GROUP_MENUS, back_home_kb, group_menu_kb, main_menu_kb
 from models.user import User
 from services.community_service import CommunityService
+from models.base import utcnow
 from services.drop_service import DropService
+from services.group_policy_service import GroupPolicyService
 from services.gameplay_service import GameplayService
 from services.welcome_bonus_service import NEW_USER_TEXT
 from services.ranking_service import RankingService
@@ -21,6 +24,7 @@ from utils.constants import get_rank_name_by_order, get_rarity_meta, sync_runtim
 from utils.formatting import esc, fmt_coins, format_card_block, header
 from utils.tg_helpers import append_private_ad, edit_or_answer, is_admin_user, send_card_message
 
+logger = logging.getLogger(__name__)
 router = Router(name="start")
 
 WELCOME_TEXT = (
@@ -121,6 +125,11 @@ async def cmd_start(
     await state.clear()
     ref_notice = ""
     args = (command.args or "").strip() if command else ""
+    if args.startswith("quiz_") and args[5:].isdigit():
+        from handlers.v2_features import show_quiz_intro
+
+        await show_quiz_intro(message, message.from_user.id, int(args[5:]), db_user.id)
+        return
     welcome_txt = WELCOME_TEXT
     pack_lim = 1
     fresh_user = db_user
@@ -276,7 +285,11 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
         return
     old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
+    just_added = new_status in ("member", "administrator") and old_status not in ("member", "administrator")
     reward_result = None
+    decision = None
+    stats = None
+    already_rewarded = False
     adder_tg_id = None
     group_title = event.chat.title or "Anime Group"
 
@@ -300,17 +313,48 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
         )
         if new_status in ("member", "administrator"):
             group.is_active = True
-            await DropService.refresh_member_count(event.bot, session, group, force=True)
+            # Haqiqiy (botlarsiz) a'zolar soni
+            stats = await GroupPolicyService.fetch_member_stats(event.bot, event.chat.id)
+            if stats is not None:
+                group.member_count = stats.real
+                group.member_count_updated_at = utcnow()
             await DropService.ensure_daily_schedule_for_group(session, group)
-            if old_status not in ("member", "administrator") and adder_user is not None:
-                reward_result = await UserService.reward_group_adder(session, group, adder_user)
+            if just_added:
+                already_rewarded = bool(group.add_reward_claimed)
+                if adder_user is not None and not already_rewarded:
+                    decision = await GroupPolicyService.decide_reward(session, stats.real if stats else None)
+                    if decision.eligible:
+                        reward_result = await UserService.reward_group_adder(
+                            session,
+                            group,
+                            adder_user,
+                            coins=decision.coins,
+                            give_epic_card=decision.give_epic_card,
+                        )
+                # Adminlarga: kim, qachon, qaysi guruhga qo'shdi (+ username/havola)
+                try:
+                    await GroupPolicyService.notify_admins_bot_added(
+                        event.bot,
+                        session,
+                        group=group,
+                        chat_title=group_title,
+                        chat_username=event.chat.username,
+                        adder_tg_id=adder_tg_id,
+                        adder_name=event.from_user.full_name if event.from_user else None,
+                        adder_username=event.from_user.username if event.from_user else None,
+                        stats=stats,
+                        decision=decision,
+                        already_rewarded=already_rewarded,
+                    )
+                except Exception:
+                    logger.exception("Adminlarga guruh xabari yuborilmadi")
             RankingService.invalidate_cache()
         elif new_status in ("left", "kicked"):
             group.is_active = False
             RankingService.invalidate_cache()
         await session.commit()
 
-    if new_status in ("member", "administrator") and old_status not in ("member", "administrator"):
+    if just_added:
         welcome_lines = [
             f"🎴 <b>Anime Card Collection</b> boti <b>{esc(group_title)}</b> guruhiga qo‘shildi!",
             "Har kuni tasodifiy vaqtlarda anime kartalari tashlanadi. Karta xabariga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!",
@@ -323,10 +367,13 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
                 extra = f" + {ec_meta.emoji} <b>{esc(epic_card.character_name)}</b> ({esc(ec_meta.name)})"
             else:
                 extra = ""
+            members_note = f" ({stats.real} ta a‘zo uchun)" if stats is not None else ""
             welcome_lines.append(
                 f"\n🎁 <b>{esc(event.from_user.first_name)}</b> botni qo‘shgani uchun "
-                f"<b>+{fmt_coins(coins)} 🪙</b>{extra} mukofot oldi!"
+                f"<b>+{fmt_coins(coins)} 🪙</b>{members_note}{extra} mukofot oldi!"
             )
+        elif decision is not None and not decision.eligible and decision.reason:
+            welcome_lines.append(f"\nℹ️ {esc(decision.reason)} Shunda botni qo‘shgan kishi mukofot oladi.")
         try:
             await event.bot.send_message(event.chat.id, "\n".join(welcome_lines))
         except Exception:

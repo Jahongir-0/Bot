@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from config.settings import get_settings
 from database.session import get_session
@@ -94,6 +94,69 @@ async def cmd_quiz(message: Message) -> None:
 @router.callback_query(QuizCb.filter(F.act == "v"))
 async def cb_quiz_list(callback: CallbackQuery) -> None:
     await _show_quizzes(callback, callback.from_user.id)
+
+
+async def show_quiz_intro(target, owner_id: int, quiz_id: int, user_db_id: int) -> None:
+    """Viktorina qanday o'ynalishini tushuntiradi; birinchi savol faqat «Boshlash» bosilganda beriladi."""
+    async with get_session() as session:
+        res = await GameplayService.get_quiz_with_questions(session, quiz_id)
+        answered = 0
+        if res is not None:
+            answered = int(
+                (
+                    await session.execute(
+                        select(func.count(QuizAttempt.id)).where(
+                            QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user_db_id
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+    if res is None or not res[0].is_active or res[0].status != "active" or not res[1]:
+        await edit_or_answer(
+            target,
+            "🧠 <b>VIKTORINA</b>\n\n📭 Bu viktorina tugagan yoki hozir mavjud emas.",
+            reply_markup=quiz_list_kb(owner_id, []),
+        )
+        return
+    quiz, questions = res
+    total = len(questions)
+    lines = [
+        f"🧠 <b>VIKTORINA: {esc(quiz.title)}</b>",
+        "━━━━━━━━━━━━━━━",
+        "📖 <b>Qanday o‘ynaladi?</b>",
+        "• Bot sizga savollarni <b>birma-bir</b> beradi",
+        "• Har savolda variantlardan <b>to‘g‘ri javobni tanlang</b>",
+        "• Har bir to‘g‘ri javob uchun coin va XP olasiz",
+        "• Har bir savolga faqat <b>bir marta</b> javob berish mumkin",
+        "",
+        f"🎯 Savollar: <b>{total} ta</b>",
+        f"🎁 Mukofot: <b>{int(quiz.reward_coins):,} 🪙</b> + <b>{int(quiz.reward_xp)} XP</b> (har bir to‘g‘ri javobga)",
+    ]
+    b = InlineKeyboardBuilder()
+    if answered >= total:
+        lines += ["", "✅ Siz bu viktorinadagi barcha savollarga javob bergansiz. Boshqa viktorinalarni kuting!"]
+    else:
+        if answered:
+            lines += ["", f"📊 Siz javob bergan: <b>{answered}/{total}</b> — davom ettirishingiz mumkin."]
+        else:
+            lines += ["", "Tayyor bo‘lsangiz, boshlang! 🚀"]
+        b.row(
+            InlineKeyboardButton(
+                text="▶️ Viktorinani boshlash" if not answered else "▶️ Davom etish",
+                callback_data=QuizCb(owner_id=owner_id, act="play", qid=quiz_id).pack(),
+            )
+        )
+    b.row(
+        InlineKeyboardButton(text="⬅️ Viktorinalar", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(QuizCb.filter(F.act == "intro"))
+async def cb_quiz_intro(callback: CallbackQuery, callback_data: QuizCb, db_user: User) -> None:
+    await show_quiz_intro(callback, callback.from_user.id, callback_data.qid, db_user.id)
 
 
 @router.callback_query(QuizCb.filter(F.act == "play"))
