@@ -1,5 +1,5 @@
 import math
-from typing import List, Tuple
+from typing import Optional, List, Tuple
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -337,9 +337,10 @@ def admin_groups_list_kb(
     for g in groups:
         st = "🚫" if getattr(g, "is_banned", False) else ("🟢" if (g.is_active and g.drop_enabled) else "🔴")
         members = f" · 👥{g.member_count}" if g.member_count is not None else ""
+        uname = f" @{g.username}" if getattr(g, "username", None) else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{st} {g.title[:28]}{members} ({g.daily_drop_count}/kun)"[:60],
+                text=f"{st} {g.title[:22]}{uname}{members} ({g.daily_drop_count}/kun)"[:60],
                 callback_data=AdminCb(
                     owner_id=owner_id,
                     section=section,
@@ -396,8 +397,10 @@ def admin_schedule_detail_kb(
     return builder.as_markup()
 
 
-def admin_group_settings_kb(owner_id: int, group: Group) -> InlineKeyboardMarkup:
+def admin_group_settings_kb(owner_id: int, group: Group, link: Optional[str] = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if link:
+        builder.row(InlineKeyboardButton(text="🚪 Guruhga kirish", url=link))
     toggle_text = "🔴 Dropni o‘chirish" if group.drop_enabled else "🟢 Dropni yoqish"
     builder.row(
         InlineKeyboardButton(

@@ -618,7 +618,7 @@ def quiz_list_kb(owner_id: int, quizzes: List[Quiz]) -> InlineKeyboardMarkup:
         b.row(
             InlineKeyboardButton(
                 text=f"🧠 {q.title[:30]} (+{q.reward_coins:,} 🪙)",
-                callback_data=QuizCb(owner_id=owner_id, act="play", qid=q.id).pack(),
+                callback_data=QuizCb(owner_id=owner_id, act="intro", qid=q.id).pack(),
             )
         )
     b.row(
