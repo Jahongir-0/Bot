@@ -244,8 +244,8 @@ class SettingsService:
         )
         cfg = dict(raw) if isinstance(raw, dict) else {}
         return {
-            "inviter_coins": max(0, int(cfg.get("inviter_coins", 500))),
-            "invitee_coins": max(0, int(cfg.get("invitee_coins", 250))),
+            "inviter_coins": max(0, int(cfg.get("inviter_coins", 2000))),
+            "invitee_coins": max(0, int(cfg.get("invitee_coins", 2000))),
         }
 
     @staticmethod
@@ -285,3 +285,37 @@ class SettingsService:
         await SettingsService.set_value(session, "group_add_reward_coins", val)
         return val
 
+
+    # ------------------------------------------------------------------
+    # Guruhga qo'shgani uchun mukofot sozlamalari (admin paneldan o'zgartiriladi)
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def get_group_reward_config(session: AsyncSession) -> Dict[str, Any]:
+        defaults = dict(DEFAULT_SETTINGS["group_reward_config"])  # type: ignore[arg-type]
+        stored = await SettingsService.get_value(session, "group_reward_config", None)
+        cfg = dict(defaults)
+        if isinstance(stored, dict):
+            cfg.update({k: v for k, v in stored.items() if k in defaults})
+        return {
+            "enabled": bool(cfg["enabled"]),
+            "per_member": bool(cfg["per_member"]),
+            "per_member_coins": max(0, int(cfg["per_member_coins"])),
+            "flat_coins": max(0, int(cfg["flat_coins"])),
+            "min_members": max(0, int(cfg["min_members"])),
+            "give_epic_card": bool(cfg["give_epic_card"]),
+        }
+
+    @staticmethod
+    async def set_group_reward_field(session: AsyncSession, field: str, value: Any) -> Dict[str, Any]:
+        cfg = await SettingsService.get_group_reward_config(session)
+        if field not in cfg:
+            raise ValueError("Noma’lum sozlama.")
+        if field in ("enabled", "per_member", "give_epic_card"):
+            cfg[field] = bool(value)
+        else:
+            val = int(value)
+            if not (0 <= val <= COINS_MAX):
+                raise ValueError(f"Qiymat 0 dan {COINS_MAX:,} gacha bo‘lishi kerak.")
+            cfg[field] = val
+        await SettingsService.set_value(session, "group_reward_config", cfg)
+        return cfg

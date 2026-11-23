@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import logging
 import time
 from dataclasses import dataclass
@@ -48,8 +50,12 @@ DEFAULT_LEVEL_CONFIG: Dict[str, Any] = {
     "stars_per_level": 20,     # Stars narxi = shu son x joriy daraja
     "stars_max_level": 5,      # Stars bilan faqat shu darajagacha ko'tariladi
     "bot_sell_level_bonus_pct": 10,  # Botga sotishda har bir qo'shimcha daraja uchun +foiz (o'rtacha 10%)
-    "merge_cost_4": 5,         # 4-rank (Legendary) -> 5-rank (Mythic): nechta karta kerak (0 = o'chirilgan)
-    "merge_cost_5": 10,        # 5-rank (Mythic) -> 6-rank (Divine): nechta karta kerak (0 = o'chirilgan)
+    # Birlashtirish: N-rank kartalaridan nechtasini topshirsa, (N+1)-rank karta beriladi (0 = o'chirilgan)
+    "merge_cost_1": 10,        # 1-rank -> 2-rank
+    "merge_cost_2": 8,         # 2-rank -> 3-rank
+    "merge_cost_3": 6,         # 3-rank (Epic) -> 4-rank (Legendary)
+    "merge_cost_4": 5,         # 4-rank (Legendary) -> 5-rank (Mythic)
+    "merge_cost_5": 10,        # 5-rank (Mythic) -> 6-rank (Divine)
     "base_power": {"1": 10, "2": 25, "3": 60, "4": 150, "5": 400, "6": 1000},
 }
 
@@ -86,7 +92,7 @@ class CardLevelService:
             for k, v in stored.items():
                 if k == "base_power" and isinstance(v, dict):
                     cfg["base_power"].update({str(a): int(b) for a, b in v.items()})
-                elif k in cfg:
+                elif k in cfg or re.match(r"^merge_cost_\d+$", str(k)):
                     cfg[k] = v
         cfg["max_level"] = max(2, min(50, int(cfg["max_level"])))
         return cfg
@@ -94,7 +100,7 @@ class CardLevelService:
     @staticmethod
     async def set_config_value(session: AsyncSession, key: str, value: Any) -> None:
         cfg = await CardLevelService.get_config(session)
-        if key not in cfg or key == "base_power":
+        if (key not in cfg and not re.match(r"^merge_cost_\d+$", str(key))) or key == "base_power":
             raise ValueError("Noma’lum sozlama")
         cfg[key] = value
         await SettingsService.set_value(session, CFG_KEY, cfg)
@@ -319,8 +325,16 @@ class CardLevelService:
     def merge_options(cfg: Dict[str, Any]):
         """[(manba rank tartibi, kerakli kartalar soni)] — faqat yoqilganlari."""
         out = []
-        for order in (4, 5):
-            cost = int(cfg.get(f"merge_cost_{order}", 0))
+        orders = []
+        for k in cfg:
+            m = re.match(r"^merge_cost_(\d+)$", str(k))
+            if m:
+                orders.append(int(m.group(1)))
+        for order in sorted(set(orders)):
+            try:
+                cost = int(cfg.get(f"merge_cost_{order}", 0))
+            except (TypeError, ValueError):
+                cost = 0
             if cost > 0:
                 out.append((order, cost))
         return out

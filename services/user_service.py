@@ -356,6 +356,8 @@ class UserService:
         session: AsyncSession,
         group: Group,
         adder: User,
+        coins: Optional[int] = None,
+        give_epic_card: bool = True,
     ) -> Optional[Tuple[int, Optional[Card]]]:
         """
         Botni guruhga birinchi marta qo'shgan foydalanuvchiga coin va hali guruhga tashlanmagan Epic karta beradi.
@@ -371,7 +373,9 @@ class UserService:
         group.add_reward_claimed = True
         group.added_by_user_id = adder.id
 
-        coins = await SettingsService.get_group_add_reward_coins(session)
+        if coins is None:
+            coins = await SettingsService.get_group_add_reward_coins(session)
+        coins = max(0, int(coins))
         if coins > 0:
             await UserService.credit_coins(
                 session=session,
@@ -386,7 +390,7 @@ class UserService:
 
         order3_name = get_rank_name_by_order(3, Rarity.EPIC.value)
         has_owner = exists().where(UserCard.card_id == Card.id)
-        epic_card = (
+        epic_card = None if not give_epic_card else (
             await session.execute(
                 select(Card)
                 .where(
