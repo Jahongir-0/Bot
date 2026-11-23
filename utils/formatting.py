@@ -305,7 +305,8 @@ def format_group_settings(group: Group) -> str:
         f"⚙️ <b>GURUH SOZLAMALARI</b>\n\n"
         f"🏷 Guruh: <b>{esc(group.title)}</b>\n"
         f"🆔 Chat ID: <code>{group.telegram_chat_id}</code>\n"
-        f"🛡 Holat: {ban_str}\n"
+        + (f"🔗 Username: @{esc(group.username)} — https://t.me/{esc(group.username)}\n" if getattr(group, "username", None) else "")
+        + f"🛡 Holat: {ban_str}\n"
         f"👥 A'zolar soni: <b>{group.member_count if group.member_count is not None else '—'}</b>\n"
         f"🎴 Kunlik drop: <b>{group.daily_drop_count}</b> karta/kun "
         f"({'🤖 avto' if group.auto_drop_count else '✋ qo‘lda'})\n"

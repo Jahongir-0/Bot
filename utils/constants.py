@@ -243,6 +243,7 @@ class RankingMode(str, Enum):
 
 DEFAULT_DROP_RULES: Dict[str, object] = {
     "members_per_card": 10,
+    "min_members": 10,  # guruhda shundan kam haqiqiy a'zo bo'lsa karta (drop) tushmaydi
     "min_per_day": 2,
     "max_per_day": 200,
     "window_start_hour": 0,
@@ -440,10 +441,18 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "ranking_mode": RankingMode.WEIGHTED.value,
     "offer_expiry_hours": 24,
     "referral_config": {
-        "inviter_coins": 500,
-        "invitee_coins": 250,
+        "inviter_coins": 2000,
+        "invitee_coins": 2000,
     },
     "group_add_reward_coins": 1000,
+    "group_reward_config": {
+        "enabled": True,          # guruhga qo'shgani uchun mukofot berilsinmi
+        "per_member": True,       # True: haqiqiy a'zolar soni x per_member_coins; False: qat'iy flat_coins
+        "per_member_coins": 1000,  # har bir haqiqiy a'zo uchun coin
+        "flat_coins": 1000,       # per_member o'chiq bo'lsa beriladigan qat'iy coin
+        "min_members": 5,         # shundan kam haqiqiy a'zo bo'lsa mukofot berilmaydi
+        "give_epic_card": True,   # mukofotga eksklyuziv Epic karta ham qo'shilsinmi
+    },
     "stars_packages": [
         {"id": "pack_100", "stars": 100, "coins": 10000, "label": "⭐ 100 Stars → 10,000 coins"},
         {"id": "pack_500", "stars": 500, "coins": 60000, "label": "⭐ 500 Stars → 60,000 coins"},

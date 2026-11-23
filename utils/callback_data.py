@@ -102,7 +102,7 @@ class AdmV2Cb(CallbackData, prefix="av2"):
 
 class QuizCb(CallbackData, prefix="qz"):
     owner_id: int
-    act: str = "v"  # v, play, ans, hist
+    act: str = "v"  # v, intro, play, ans, hist
     qid: int = 0
     opt: int = 0
 
