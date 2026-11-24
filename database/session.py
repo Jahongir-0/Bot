@@ -28,12 +28,12 @@ def create_engine_from_url(database_url: Optional[str] = None) -> AsyncEngine:
         "future": True,
         "pool_pre_ping": True,
         "pool_recycle": 1800,
-        "pool_timeout": settings.db_pool_timeout,
         "connect_args": connect_args,
     }
     if not is_sqlite:
         engine_kwargs["pool_size"] = settings.db_pool_size
         engine_kwargs["max_overflow"] = settings.db_max_overflow
+        engine_kwargs["pool_timeout"] = settings.db_pool_timeout
 
     eng = create_async_engine(url, **engine_kwargs)
 

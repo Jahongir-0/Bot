@@ -84,7 +84,7 @@ Eslatma: guruhda ismni yozish (FSM) uchun BotFather'da `/setprivacy` → **Disab
 ## Production / Railway
 
 - Railway PostgreSQL should be provided through `DATABASE_URL`. The application normalizes Railway's `postgresql://` URL to SQLAlchemy's asyncpg driver.
-- Deployment runs `alembic upgrade head` before starting the bot. Keep `AUTO_SCHEMA_UPGRADE=false` in production so schema changes have one source of truth: Alembic migrations.
+- Railway starts the bot with `python -m app.main`; it does not run Alembic during startup. This avoids applying or reversing database migrations as part of a bot restart.
 - For small Railway PostgreSQL plans, the default pool is intentionally conservative: `DB_POOL_SIZE=5`, `DB_MAX_OVERFLOW=10`, `DB_POOL_TIMEOUT=30`. Increase only after measuring connection usage.
 - `REDIS_URL` is recommended in production for distributed locks, cooldowns and FSM state. Without Redis the bot falls back to in-memory state/locks and should run as a single instance.
 - Never commit `.env`, bot tokens, Stars secrets or database credentials. Use Railway environment variables / GitHub Secrets.
