@@ -84,7 +84,7 @@ Eslatma: guruhda ismni yozish (FSM) uchun BotFather'da `/setprivacy` → **Disab
 ## Production / Railway
 
 - Railway PostgreSQL should be provided through `DATABASE_URL`. The application normalizes Railway's `postgresql://` URL to SQLAlchemy's asyncpg driver.
-- Deployment runs `alembic upgrade head` before starting the bot. Keep `AUTO_SCHEMA_UPGRADE=false` in production so schema changes have one source of truth: Alembic migrations.
+- The Docker entrypoint runs `python -m alembic upgrade head` before starting the bot and stops if migration fails. Keep `AUTO_SCHEMA_UPGRADE=false` in production so Alembic remains the single schema-upgrade path.
 - For small Railway PostgreSQL plans, the default pool is intentionally conservative: `DB_POOL_SIZE=5`, `DB_MAX_OVERFLOW=10`, `DB_POOL_TIMEOUT=30`. Increase only after measuring connection usage.
 - `REDIS_URL` is recommended in production for distributed locks, cooldowns and FSM state. Without Redis the bot falls back to in-memory state/locks and should run as a single instance.
 - Never commit `.env`, bot tokens, Stars secrets or database credentials. Use Railway environment variables / GitHub Secrets.
@@ -97,7 +97,7 @@ Agar bot GitHub repository va Railway orqali deploy qilingan bo'lsa:
 2. `.env` yoki Railway secretlarini GitHub'ga yuklamang. Faqat `.env.example` commit qilinadi.
 3. Commit qiling va `main`/production branch'ga push qiling.
 4. Railway GitHub repository bilan bog'langan bo'lsa, push'dan keyin yangi deployment avtomatik boshlanadi.
-5. Railway deploy komandasi `alembic upgrade head && python -m app.main` bo'lib, production schema Alembic orqali yangilanadi.
+5. Docker entrypoint avval `python -m alembic upgrade head` bajaradi, keyin `python -m app.main`ni ishga tushiradi. Railway start command app buyrug'ini ko'rsatadi; migration barcha Docker start command override'laridan oldin entrypoint orqali bajariladi.
 6. Railway Variables ichida `BOT_TOKEN`, `ADMIN_IDS`, `DATABASE_URL`, `REDIS_URL` (agar ishlatilsa) va `STARS_PAYMENT_SECRET` saqlanadi.
 7. Deploy logida `Anime Card Collection bot is starting polling...` ko'rinsa, bot pollingni boshlagan bo'ladi.
 

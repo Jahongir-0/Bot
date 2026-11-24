@@ -38,8 +38,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: >
-      sh -c "alembic upgrade head && python -m app.main"
+    command: ["python", "-m", "app.main"]
 
 volumes:
   postgres_data:
