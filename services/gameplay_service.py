@@ -557,7 +557,10 @@ class GameplayService:
     @staticmethod
     async def get_game_config(session: AsyncSession) -> Dict[str, Any]:
         raw = await SettingsService.get_value(session, "game_config", DEFAULT_GAME_CONFIG)
+        from utils.game_catalog import EXTRA_GAME_DEFAULTS
+
         cfg = dict(DEFAULT_GAME_CONFIG)
+        cfg.update(EXTRA_GAME_DEFAULTS)
         if isinstance(raw, dict):
             cfg.update(raw)
         return cfg
@@ -1288,6 +1291,8 @@ class GameplayService:
     # ------------------------------------------------------------------
     @staticmethod
     async def pick_daily_random_card(session: AsyncSession, user: User) -> Optional[Card]:
+        if not await SettingsService.get_daily_card_enabled(session):
+            return None  # admin paneldan yoqilmaguncha kunlik bonusda karta berilmaydi
         cfg = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
         if not isinstance(cfg, dict) or not cfg.get("enabled", True):
             return None

@@ -485,6 +485,12 @@ def admin_settings_kb(
     )
     builder.row(
         InlineKeyboardButton(
+            text="💸 Coin yuborish",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="cg_menu").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="🤝 Referal & Guruh",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="rewards_menu").pack(),
         ),

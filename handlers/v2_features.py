@@ -45,11 +45,13 @@ from models.user_card import UserCard
 from models.v2_features import CardTrade, QuizAttempt, QuizQuestion
 from services.auction_wishlist_service import AuctionWishlistService
 from services.community_service import CommunityService
+from services.extra_games_service import BETS as EXTRA_BETS, ExtraGamesService
 from services.gameplay_service import GameplayService
 from services.user_service import UserService
 from utils.callback_data import AchCb, AucCb, GameCb, NavCb, NotifCb, QuizCb, SupCb, TradeCb, VipCb, WishCb
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE, PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
 from utils.formatting import header, esc, fmt_coins, format_card_block
+from utils.game_catalog import ANIM_GAMES
 from utils.tg_helpers import NotCommandFilter, append_private_ad, edit_or_answer, is_admin_user, send_card_message
 
 logger = logging.getLogger(__name__)
@@ -275,52 +277,36 @@ def _user_game_lock(user_id: int) -> asyncio.Lock:
     return lock
 
 
+_EXTRA_KEYS = ("dart", "bowling", "basket", "chest")
+
+
 def _game_menu_text(st: dict) -> str:
     cfg = st["cfg"]
     coins = st["coins"]
 
-    def _row_status(en: bool, used: int, lim: int) -> str:
+    def _status(en: bool, used: int, lim: int) -> str:
         if not en:
-            return "🔴 O‘chirilgan"
+            return "🔴 o‘chirilgan"
         left = max(0, lim - used)
-        return f"🎟 Bugun qoldi: <b>{left}/{lim}</b>"
+        return f"🎟 {left}/{lim}" if left > 0 else "⏳ bugun tugadi"
 
-    s_en, s_used, s_lim = st["slots_enabled"], st["slots_used"], st["slots_limit"]
-    m_en, m_used, m_lim = st["mines_enabled"], st["mines_used"], st["mines_limit"]
-    w_en, w_used, w_lim, w_cost = st["wheel_enabled"], st["wheel_used"], st["wheel_limit"], st["wheel_cost"]
-    d_en, d_used, d_lim = st["dice_enabled"], st["dice_used"], st["dice_limit"]
-    f_en, f_used, f_lim = st["flip_enabled"], st["flip_used"], st["flip_limit"]
-    l_en, l_used, l_lim = st["lucky_enabled"], st["lucky_used"], st["lucky_limit"]
-
-    wheel_fee = f"{w_cost:,} 🪙 chipta" if w_cost > 0 else "Bepul"
-    lines = [
-        "🎮 <b>MINI O‘YINLAR MARKAZI</b>",
-        LINE_SEP,
-        f"🪙 Balansingiz: <b>{fmt_coins(coins)}</b> coin\n",
-        "🎰 <b>Slot 777</b> — 777 tushsa 10x, 3 bir xil 4x, juft 1.5x!",
-        f"   {_row_status(s_en, s_used, s_lim)}\n",
-        "💣 <b>Xazina ovi (Mines)</b> — 6 sandiqda 4 oltin, 2 bomba (4.0x gacha)",
-        f"   {_row_status(m_en, m_used, m_lim)}\n",
-        f"🎡 <b>Omad g‘ildiragi</b> — {wheel_fee}, Jackpot 500 🪙 + XP",
-        f"   {_row_status(w_en, w_used, w_lim)}\n",
-        f"🎲 <b>Tosh o‘yini</b> — 1..6 sonni toping (+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙)",
-        f"   {_row_status(d_en, d_used, d_lim)}\n",
-        "🪙 <b>Tanga tashlash</b> — gerb yoki raqam (2x yutuq)",
-        f"   {_row_status(f_en, f_used, f_lim)}\n",
-        f"🃏 <b>Omadli karta</b> — bepul omad ({cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙)",
-        f"   {_row_status(l_en, l_used, l_lim)}",
+    wheel_fee = f"{st['wheel_cost']:,} 🪙 chipta" if st["wheel_cost"] > 0 else "bepul"
+    rows = [
+        ("🎰", "Slot 777", "777 = 10x yutuq", st["slots_enabled"], st["slots_used"], st["slots_limit"]),
+        ("💣", "Xazina ovi", "bombadan qoching, 4x gacha", st["mines_enabled"], st["mines_used"], st["mines_limit"]),
+        ("🎡", "Omad g‘ildiragi", wheel_fee, st["wheel_enabled"], st["wheel_used"], st["wheel_limit"]),
+        ("📦", "Sirli sandiq", f"{int(cfg.get('chest_cost', 100)):,} 🪙 · jackpot {int(cfg.get('chest_jackpot_pct', 1000)) // 100}x", st["chest_enabled"], st["chest_used"], st["chest_limit"]),
+        ("🎯", "Dart", f"nishon markazi {int(cfg.get('dart_jackpot_pct', 400)) / 100:g}x", st["dart_enabled"], st["dart_used"], st["dart_limit"]),
+        ("🎳", "Boulling", f"strike {int(cfg.get('bowling_jackpot_pct', 400)) / 100:g}x", st["bowling_enabled"], st["bowling_used"], st["bowling_limit"]),
+        ("🏀", "Basketbol", f"toza gol {int(cfg.get('basket_jackpot_pct', 300)) / 100:g}x", st["basket_enabled"], st["basket_used"], st["basket_limit"]),
+        ("🎲", "Tosh o‘yini", f"+{fmt_coins(cfg.get('dice_jackpot_reward', 300))} 🪙", st["dice_enabled"], st["dice_used"], st["dice_limit"]),
+        ("🪙", "Tanga tashlash", "gerb yoki raqam, 2x", st["flip_enabled"], st["flip_used"], st["flip_limit"]),
+        ("🃏", "Omadli karta", f"{cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙 bepul", st["lucky_enabled"], st["lucky_used"], st["lucky_limit"]),
     ]
-    any_left = any(
-        [
-            s_en and s_used < s_lim,
-            m_en and m_used < m_lim,
-            w_en and w_used < w_lim,
-            d_en and d_used < d_lim,
-            f_en and f_used < f_lim,
-            l_en and l_used < l_lim,
-        ]
-    )
-    if not any_left:
+    lines = ["🎮 <b>MINI O‘YINLAR MARKAZI</b>", LINE_SEP, f"🪙 Balansingiz: <b>{fmt_coins(coins)}</b> coin\n"]
+    for emoji, name, desc, en, used, lim in rows:
+        lines.append(f"{emoji} <b>{name}</b> · {desc}\n      {_status(en, used, lim)}")
+    if not any(en and used < lim for _e, _n, _d, en, used, lim in rows):
         lines.append("\n⏳ <i>Bugungi barcha mini-o‘yin urinishlaringiz tugadi. Ertaga qayting!</i>")
     return "\n".join(lines)
 
@@ -335,8 +321,9 @@ async def _game_state(user_id: int) -> dict:
         s_en, s_used, s_lim = await GameplayService.get_slots_status(session, user_id)
         m_en, m_used, m_lim = await GameplayService.get_mines_status(session, user_id)
         w_en, w_used, w_lim, w_cost = await GameplayService.get_wheel_status(session, user_id)
+        extra = {k: await ExtraGamesService.status(session, user_id, k) for k in _EXTRA_KEYS}
         coins = int(user.coins or 0) if user is not None else 0
-    return {
+    st = {
         "cfg": cfg,
         "coins": coins,
         "dice_enabled": d_en,
@@ -359,6 +346,9 @@ async def _game_state(user_id: int) -> dict:
         "wheel_limit": w_lim,
         "wheel_cost": w_cost,
     }
+    for k, (en, used, lim) in extra.items():
+        st[f"{k}_enabled"], st[f"{k}_used"], st[f"{k}_limit"] = en, used, lim
+    return st
 
 
 def _games_kb_from_state(owner_id: int, st: dict) -> InlineKeyboardMarkup:
@@ -371,6 +361,10 @@ def _games_kb_from_state(owner_id: int, st: dict) -> InlineKeyboardMarkup:
         can_slots=st["slots_enabled"] and st["slots_used"] < st["slots_limit"],
         can_mines=(st["mines_enabled"] and (st["mines_used"] < st["mines_limit"] or has_active_mines)),
         can_wheel=st["wheel_enabled"] and st["wheel_used"] < st["wheel_limit"],
+        can_dart=st["dart_enabled"] and st["dart_used"] < st["dart_limit"],
+        can_bowling=st["bowling_enabled"] and st["bowling_used"] < st["bowling_limit"],
+        can_basket=st["basket_enabled"] and st["basket_used"] < st["basket_limit"],
+        can_chest=st["chest_enabled"] and st["chest_used"] < st["chest_limit"],
     )
 
 
@@ -1717,3 +1711,200 @@ async def cb_trade_cancel(callback: CallbackQuery, callback_data: TradeCb, db_us
     await callback.answer(msg[:190], show_alert=True)
     if ok:
         await edit_or_answer(callback, msg, reply_markup=back_home_kb(callback.from_user.id, "home"))
+
+
+# ===========================================================================
+# YANGI O'YINLAR: Dart / Boulling / Basketbol (animatsiyali) va Sirli sandiq
+# ===========================================================================
+def _game_result_kb(owner_id: int, again_text: str, again_cb: str, left: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    if left > 0:
+        b.row(InlineKeyboardButton(text=again_text, callback_data=again_cb))
+    b.row(
+        InlineKeyboardButton(text="🎮 O‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return b.as_markup()
+
+
+@router.callback_query(GameCb.filter(F.act == "an"))
+async def cb_game_anim_menu(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    kind = callback_data.extra
+    info = ANIM_GAMES.get(kind)
+    if info is None:
+        await callback.answer("Noma’lum o‘yin.", show_alert=True)
+        return
+    emoji, title, _jv, _wv, jackpot_lbl, win_lbl = info
+    st = await _game_state(db_user.id)
+    cfg = st["cfg"]
+    if not st[f"{kind}_enabled"]:
+        await callback.answer(f"🔴 {title} hozircha o‘chirilgan.", show_alert=True)
+        return
+    left = max(0, st[f"{kind}_limit"] - st[f"{kind}_used"])
+    if left <= 0:
+        await callback.answer(f"🎟 Bugungi {title} urinishlari tugadi.", show_alert=True)
+        return
+    jp = int(cfg.get(f"{kind}_jackpot_pct", 400)) / 100
+    wp = int(cfg.get(f"{kind}_win_pct", 150)) / 100
+    b = InlineKeyboardBuilder()
+    for bet in EXTRA_BETS:
+        b.add(
+            InlineKeyboardButton(
+                text=f"{emoji} {bet} 🪙",
+                callback_data=GameCb(owner_id=callback.from_user.id, act="an_go", val=bet, extra=kind).pack(),
+            )
+        )
+    b.adjust(2)
+    b.row(InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=GameCb(owner_id=callback.from_user.id, act="v").pack()))
+    await edit_or_answer(
+        callback,
+        (
+            f"{emoji} <b>{title.upper()}</b>\n{LINE_SEP}\n"
+            "Garov qo‘ying, bot animatsiyani yuboradi — natija o‘zi hal qiladi:\n"
+            f"🏆 {jackpot_lbl} → <b>{jp:g}x</b>\n"
+            f"✅ {win_lbl} → <b>{wp:g}x</b>\n\n"
+            f"💰 Balans: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Bugun qoldi: <b>{left}/{st[f'{kind}_limit']}</b>\n\n"
+            "👇 Garov miqdorini tanlang:"
+        ),
+        reply_markup=b.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "an_go"))
+async def cb_game_anim_go(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    kind = callback_data.extra
+    info = ANIM_GAMES.get(kind)
+    bet = int(callback_data.val)
+    if info is None:
+        await callback.answer("Noma’lum o‘yin.", show_alert=True)
+        return
+    emoji, title = info[0], info[1]
+    if uid in _PLAYING:
+        await callback.answer("⏳ O‘yin davom etmoqda, biroz kuting...")
+        return
+    _PLAYING.add(uid)
+    try:
+        st = await _game_state(uid)
+        if not st[f"{kind}_enabled"]:
+            await callback.answer(f"🔴 {title} o‘chirilgan.", show_alert=True)
+            return
+        if st[f"{kind}_used"] >= st[f"{kind}_limit"]:
+            await callback.answer("🎟 Bugungi urinishlar tugadi.", show_alert=True)
+            return
+        if st["coins"] < bet:
+            await callback.answer(f"🪙 Coinlaringiz yetarli emas ({bet:,} 🪙 kerak).", show_alert=True)
+            return
+        await callback.answer()
+        chat_id = callback.message.chat.id
+        try:
+            await callback.message.edit_text(f"{emoji} Garov: <b>{bet:,} 🪙</b>\nOmad tilaymiz...", reply_markup=None)
+        except Exception:
+            pass
+        dice_msg = await callback.bot.send_dice(chat_id, emoji=emoji)
+        value = int(dice_msg.dice.value)
+        await asyncio.sleep(3.6)
+
+        used_now, limit_now, new_coins = st[f"{kind}_used"], st[f"{kind}_limit"], st["coins"]
+        async with _user_game_lock(uid):
+            async with get_session() as session:
+                ok, msg, _payout, _net = await ExtraGamesService.play_animated(session, uid, kind, value, bet)
+                if ok:
+                    new_coins = int((await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0)
+                    await session.commit()
+                    _en, used_now, limit_now = await ExtraGamesService.status(session, uid, kind)
+                else:
+                    await session.rollback()
+        left = max(0, limit_now - used_now)
+        txt = msg + (f"\n{LINE_SEP}\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qoldi: <b>{left}/{limit_now}</b>" if ok else "")
+        kb = _game_result_kb(
+            callback.from_user.id,
+            f"{emoji} Yana o‘ynash",
+            GameCb(owner_id=callback.from_user.id, act="an", extra=kind).pack(),
+            left if ok else 0,
+        )
+        await callback.bot.send_message(chat_id, txt, reply_markup=kb)
+    except Exception:
+        logger.exception("%s o'yinida xato", kind)
+        await callback.bot.send_message(callback.message.chat.id, "⚠️ O‘yinda xatolik bo‘ldi. Qayta urinib ko‘ring.")
+    finally:
+        _PLAYING.discard(uid)
+
+
+@router.callback_query(GameCb.filter(F.act == "chest"))
+async def cb_game_chest_menu(callback: CallbackQuery, db_user: User) -> None:
+    st = await _game_state(db_user.id)
+    cfg = st["cfg"]
+    if not st["chest_enabled"]:
+        await callback.answer("🔴 Sirli sandiq hozircha o‘chirilgan.", show_alert=True)
+        return
+    left = max(0, st["chest_limit"] - st["chest_used"])
+    if left <= 0:
+        await callback.answer("🎟 Bugungi urinishlar tugadi.", show_alert=True)
+        return
+    cost = int(cfg.get("chest_cost", 100))
+    b = InlineKeyboardBuilder()
+    for n in (1, 2, 3):
+        b.add(InlineKeyboardButton(text=f"📦 {n}-sandiq", callback_data=GameCb(owner_id=callback.from_user.id, act="chest_pick", val=n).pack()))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=GameCb(owner_id=callback.from_user.id, act="v").pack()))
+    await edit_or_answer(
+        callback,
+        (
+            f"📦 <b>SIRLI SANDIQ</b>\n{LINE_SEP}\n"
+            "3 ta sandiqdan birini tanlang. Ichida nima borligi — sir!\n"
+            "💨 Bo‘sh · 🪙 Hamyon · 💰 Oltin · 💎 Qimmatbaho · 👑 Jackpot\n\n"
+            f"🎟 Bitta sandiq narxi: <b>{cost:,} 🪙</b>\n"
+            f"👑 Jackpot: <b>{int(cfg.get('chest_jackpot_pct', 1000)) / 100:g}x</b>\n"
+            f"💰 Balans: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Bugun qoldi: <b>{left}/{st['chest_limit']}</b>\n\n"
+            "👇 Sandiqni tanlang:"
+        ),
+        reply_markup=b.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "chest_pick"))
+async def cb_game_chest_pick(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    if uid in _PLAYING:
+        await callback.answer("⏳ Biroz kuting...")
+        return
+    _PLAYING.add(uid)
+    try:
+        st = await _game_state(uid)
+        if not st["chest_enabled"] or st["chest_used"] >= st["chest_limit"]:
+            await callback.answer("🎟 Sirli sandiq hozir mavjud emas yoki limit tugadi.", show_alert=True)
+            return
+        cost = int(st["cfg"].get("chest_cost", 100))
+        if st["coins"] < cost:
+            await callback.answer(f"🪙 Coinlaringiz yetarli emas ({cost:,} 🪙 kerak).", show_alert=True)
+            return
+        await callback.answer()
+        used_now, limit_now, new_coins = st["chest_used"], st["chest_limit"], st["coins"]
+        async with _user_game_lock(uid):
+            async with get_session() as session:
+                ok, msg, _payout, _net = await ExtraGamesService.play_chest(session, uid, int(callback_data.val))
+                if ok:
+                    new_coins = int((await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0)
+                    await session.commit()
+                    _en, used_now, limit_now = await ExtraGamesService.status(session, uid, "chest")
+                else:
+                    await session.rollback()
+        left = max(0, limit_now - used_now)
+        txt = msg + (f"\n{LINE_SEP}\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qoldi: <b>{left}/{limit_now}</b>" if ok else "")
+        kb = _game_result_kb(
+            callback.from_user.id,
+            "📦 Yana ochish",
+            GameCb(owner_id=callback.from_user.id, act="chest").pack(),
+            left if ok else 0,
+        )
+        await edit_or_answer(callback, txt, reply_markup=kb)
+    except Exception:
+        logger.exception("Sirli sandiq o'yinida xato")
+        await callback.message.answer("⚠️ O‘yinda xatolik bo‘ldi. Qayta urinib ko‘ring.")
+    finally:
+        _PLAYING.discard(uid)

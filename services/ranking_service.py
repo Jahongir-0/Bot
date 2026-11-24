@@ -35,6 +35,7 @@ class RankEntry:
     unique_cards: int
     legendary_cards: int
     mythic_cards: int
+    divine_cards: int = 0
 
 
 @dataclass
@@ -156,9 +157,11 @@ class RankingService:
 
         r4_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 4), get_rank_name_by_order(4, Rarity.LEGENDARY.value))
         r5_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 5), get_rank_name_by_order(5, Rarity.MYTHIC.value))
-        r4_low, r5_low = r4_name.lower(), r5_name.lower()
+        r6_name = next((str(r["name"]) for r in ranks if int(r.get("order", 0)) == 6), get_rank_name_by_order(6, "Divine"))
+        r4_low, r5_low, r6_low = r4_name.lower(), r5_name.lower(), r6_name.lower()
         r4_aliases = set(get_rarity_aliases(r4_name) or [r4_low])
         r5_aliases = set(get_rarity_aliases(r5_name) or [r5_low])
+        r6_aliases = set(get_rarity_aliases(r6_name) or [r6_low])
 
         user_ids = [r[0].id for r in rows]
         rarity_rows = (
@@ -167,7 +170,7 @@ class RankingService:
                 .join(Card, Card.id == UserCard.card_id)
                 .where(
                     UserCard.user_id.in_(user_ids),
-                    func.lower(Card.rarity).in_(list(r4_aliases | r5_aliases)),
+                    func.lower(Card.rarity).in_(list(r4_aliases | r5_aliases | r6_aliases)),
                 )
                 .group_by(UserCard.user_id, func.lower(Card.rarity))
             )
@@ -175,7 +178,9 @@ class RankingService:
         by_user: Dict[int, Dict[str, int]] = {}
         for uid, rarity_low, cnt in rarity_rows:
             r_l = str(rarity_low)
-            canonical_key = r4_low if r_l in r4_aliases else (r5_low if r_l in r5_aliases else r_l)
+            canonical_key = (
+                r4_low if r_l in r4_aliases else (r5_low if r_l in r5_aliases else (r6_low if r_l in r6_aliases else r_l))
+            )
             by_user.setdefault(uid, {})[canonical_key] = by_user.get(uid, {}).get(canonical_key, 0) + int(cnt)
 
         entries: List[RankEntry] = []
@@ -190,6 +195,7 @@ class RankingService:
                     unique_cards=user.unique_cards,
                     legendary_cards=r_map.get(r4_low, 0),
                     mythic_cards=r_map.get(r5_low, 0),
+                    divine_cards=r_map.get(r6_low, 0),
                 )
             )
         _cache_put(key, entries)

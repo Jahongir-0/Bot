@@ -22,19 +22,17 @@ def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
 
 
 def main_menu_kb(owner_id: int, is_admin: bool = False, pack_daily_limit: int = 1) -> InlineKeyboardMarkup:
-    """BOSH MENU: toza, ixcham 2-ustunli tartib."""
-    pack_lbl = f"🎁 PAKET ({pack_daily_limit}/kun)" if pack_daily_limit > 0 else "🎁 PAKETLAR"
+    """BOSH MENU: toza, tartibli 2-ustunli tartib (Paketlar endi O‘yinlar bo‘limida)."""
     b = InlineKeyboardBuilder()
-    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, pack_lbl, "packs"))
     b.row(
+        _nav(owner_id, "👤 PROFILIM", "profile"),
         _nav(owner_id, "🛒 BOZOR", "market"),
-        InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
     )
     b.row(
+        InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
         InlineKeyboardButton(text="🤝 ALMASHISH", callback_data=TradeCb(owner_id=owner_id, act="v").pack()),
-        _nav(owner_id, "🔍 QIDIRUV", "search"),
     )
-    b.row(_nav(owner_id, "🎁 SOVG‘A BERISH", "give"))
+    b.row(_nav(owner_id, "🔍 QIDIRUV", "search"), _nav(owner_id, "🎁 SOVG‘A BERISH", "give"))
     b.row(_nav(owner_id, "🎮 O‘YINLAR", "grp_play"), _nav(owner_id, "🏆 REYTING", "ranking"))
     b.row(
         _nav(owner_id, "❓ QO‘LLANMA", "help"),
@@ -70,7 +68,7 @@ def group_menu_kb(owner_id: int, group: str, pack_daily_limit: int = 1) -> Inlin
             InlineKeyboardButton(text="🧠 VIKTORINA", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
         )
         b.row(_nav(owner_id, "🎯 EVENTLAR", "event"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
-        b.row(_nav(owner_id, pack_lbl, "packs"))
+        b.row(_nav(owner_id, pack_lbl, "packs"), _nav(owner_id, "🎁 KUNLIK BONUS", "daily"))
     b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
     return b.as_markup()
 

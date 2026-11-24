@@ -649,30 +649,45 @@ def games_menu_kb(
     can_slots: bool = True,
     can_mines: bool = True,
     can_wheel: bool = True,
+    can_dart: bool = True,
+    can_bowling: bool = True,
+    can_basket: bool = True,
+    can_chest: bool = True,
 ) -> InlineKeyboardMarkup:
+    """O‘yinlar menyusi: 2 ustunli tartib (ochiq o‘yinlar ketma-ket joylashadi)."""
     b = InlineKeyboardBuilder()
-    row1 = []
+
+    def _g(act: str, text: str, extra: str = "") -> InlineKeyboardButton:
+        return InlineKeyboardButton(text=text, callback_data=GameCb(owner_id=owner_id, act=act, extra=extra).pack())
+
+    buttons = []
     if can_slots:
-        row1.append(InlineKeyboardButton(text="🎰 Slot 777", callback_data=GameCb(owner_id=owner_id, act="slots").pack()))
+        buttons.append(_g("slots", "🎰 Slot 777"))
     if can_mines:
-        row1.append(InlineKeyboardButton(text="💣 Xazina ovi", callback_data=GameCb(owner_id=owner_id, act="mines").pack()))
-    if row1:
-        b.row(*row1)
-    row2 = []
+        buttons.append(_g("mines", "💣 Xazina ovi"))
     if can_wheel:
-        row2.append(InlineKeyboardButton(text="🎡 Omad g‘ildiragi", callback_data=GameCb(owner_id=owner_id, act="wheel").pack()))
+        buttons.append(_g("wheel", "🎡 Omad g‘ildiragi"))
+    if can_chest:
+        buttons.append(_g("chest", "📦 Sirli sandiq"))
+    if can_dart:
+        buttons.append(_g("an", "🎯 Dart", "dart"))
+    if can_bowling:
+        buttons.append(_g("an", "🎳 Boulling", "bowling"))
+    if can_basket:
+        buttons.append(_g("an", "🏀 Basketbol", "basket"))
     if can_dice:
-        row2.append(InlineKeyboardButton(text="🎲 Tosh o‘yini", callback_data=GameCb(owner_id=owner_id, act="dice").pack()))
-    if row2:
-        b.row(*row2)
-    row3 = []
+        buttons.append(_g("dice", "🎲 Tosh o‘yini"))
     if can_flip:
-        row3.append(InlineKeyboardButton(text="🪙 Tanga (2x)", callback_data=GameCb(owner_id=owner_id, act="flip").pack()))
+        buttons.append(_g("flip", "🪙 Tanga (2x)"))
     if can_lucky:
-        row3.append(InlineKeyboardButton(text="🃏 Omadli karta", callback_data=GameCb(owner_id=owner_id, act="lucky").pack()))
-    if row3:
-        b.row(*row3)
-    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+        buttons.append(_g("lucky", "🃏 Omadli karta"))
+    if buttons:
+        b.add(*buttons)
+        b.adjust(2)
+    b.row(
+        InlineKeyboardButton(text="🎁 Paketlar", callback_data=NavCb(owner_id=owner_id, target="packs").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
     return b.as_markup()
 
 

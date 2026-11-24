@@ -8,7 +8,7 @@ from typing import Optional, Union
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import BaseFilter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User as TgUser
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message, User as TgUser
 
 from config.settings import get_settings
 
@@ -113,9 +113,11 @@ async def edit_or_answer(
     target: Union[Message, CallbackQuery],
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
+    disable_web_page_preview: bool = False,
 ) -> None:
+    lpo = LinkPreviewOptions(is_disabled=True) if disable_web_page_preview else None
     if isinstance(target, Message):
-        await target.answer(text, reply_markup=reply_markup)
+        await target.answer(text, reply_markup=reply_markup, link_preview_options=lpo)
         return
 
     msg = target.message
@@ -135,9 +137,9 @@ async def edit_or_answer(
     try:
         if msg.photo:
             await msg.delete()
-            await msg.answer(text, reply_markup=reply_markup)
+            await msg.answer(text, reply_markup=reply_markup, link_preview_options=lpo)
         else:
-            await msg.edit_text(text, reply_markup=reply_markup)
+            await msg.edit_text(text, reply_markup=reply_markup, link_preview_options=lpo)
     except TelegramRetryAfter as exc:
         note_flood(msg.chat.id, exc.retry_after)
         try:
@@ -150,7 +152,7 @@ async def edit_or_answer(
             pass
         else:
             try:
-                await msg.answer(text, reply_markup=reply_markup)
+                await msg.answer(text, reply_markup=reply_markup, link_preview_options=lpo)
             except TelegramRetryAfter as exc2:
                 note_flood(msg.chat.id, exc2.retry_after)
                 return

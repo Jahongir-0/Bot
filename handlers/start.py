@@ -320,6 +320,8 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
                 group.member_count_updated_at = utcnow()
             await DropService.ensure_daily_schedule_for_group(session, group)
             if just_added:
+                if adder_user is not None and group.added_by_user_id is None:
+                    group.added_by_user_id = adder_user.id  # kim qo'shgani admin kartochkasida ko'rinadi
                 already_rewarded = bool(group.add_reward_claimed)
                 if adder_user is not None and not already_rewarded:
                     decision = await GroupPolicyService.decide_reward(session, stats.real if stats else None)

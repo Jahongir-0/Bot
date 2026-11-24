@@ -109,7 +109,7 @@ class QuizCb(CallbackData, prefix="qz"):
 
 class GameCb(CallbackData, prefix="gm"):
     owner_id: int
-    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick, slots, slots_go, mines, mines_go, mines_open, mines_cash, wheel, wheel_go
+    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick, slots, slots_go, mines, mines_go, mines_open, mines_cash, wheel, wheel_go, an, an_go, chest, chest_pick
     val: int = 0
     extra: str = ""
 

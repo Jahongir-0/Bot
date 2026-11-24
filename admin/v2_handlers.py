@@ -42,6 +42,7 @@ from keyboards.v2 import (
 )
 from models.admin import AdminAction
 from models.base import ensure_utc, utcnow
+from utils.game_catalog import ADMIN_GAMES, FIELD_META, TOGGLE_KEYS
 from utils.timeutils import fmt_tashkent, to_tashkent
 from models.card import Card
 from models.group import Group
@@ -2388,97 +2389,77 @@ async def fsm_v2_quiz_clone_coins(message: Message, state: FSMContext) -> None:
 # ===========================================================================
 # 7. GAMES & PACKS (sec="games", Zero-pipe per-field edit)
 # ===========================================================================
-_GAME_FIELD_LABELS = {
-    "dice_jackpot_reward": "🎲 Tosh yutug‘i (coin)",
-    "dice_daily_limit": "🎲 Tosh kunlik limiti",
-    "dice_cooldown_minutes": "🎲 Tosh kutish vaqti (daqiqa, 0=yo‘q)",
-    "coinflip_daily_limit": "🪙 Tanga tashlash kunlik limiti",
-    "lucky_daily_limit": "🃏 Omadli karta kunlik limiti",
-    "lucky_min_reward": "🃏 Omadli karta minimal yutuq (coin)",
-    "lucky_max_reward": "🃏 Omadli karta maksimal yutuq (coin)",
-    "slots_daily_limit": "🎰 Slot 777 kunlik limiti",
-    "mines_daily_limit": "💣 Xazina ovi kunlik limiti",
-    "wheel_daily_limit": "🎡 Omad g‘ildiragi kunlik limiti",
-    "wheel_ticket_cost": "🎡 Omad g‘ildiragi chipta narxi (0=bepul)",
-    "pack_daily_limit": "🎁 Paket (/pack) kunlik limiti",
-}
-
-_GAME_TOGGLE_KEYS = (
-    "dice_enabled",
-    "coinflip_enabled",
-    "lucky_enabled",
-    "slots_enabled",
-    "mines_enabled",
-    "wheel_enabled",
-    "pack_enabled",
-)
-
-_GAME_ZERO_ALLOWED = ("dice_cooldown_minutes", "pack_daily_limit", "wheel_ticket_cost")
+def _gm_on(cfg: dict, toggle: str) -> bool:
+    return bool(cfg.get(toggle, True))
 
 
 async def _show_games_home(target, owner_id: int) -> None:
+    """O‘yinlar ro‘yxati: har bir o‘yin tugmasi o‘zining sozlamalar sahifasini ochadi."""
     async with get_session() as session:
         cfg = await GameplayService.get_game_config(session)
-    d_on = "🟢" if cfg.get("dice_enabled", True) else "🔴"
-    f_on = "🟢" if cfg.get("coinflip_enabled", True) else "🔴"
-    l_on = "🟢" if cfg.get("lucky_enabled", True) else "🔴"
-    s_on = "🟢" if cfg.get("slots_enabled", True) else "🔴"
-    m_on = "🟢" if cfg.get("mines_enabled", True) else "🔴"
-    w_on = "🟢" if cfg.get("wheel_enabled", True) else "🔴"
-    pack_lim = max(0, int(cfg.get("pack_daily_limit", 1)))
-    p_on = "🟢" if (cfg.get("pack_enabled", True) and pack_lim > 0) else "🔴"
-    txt = (
-        "🎮 <b>MINI O‘YINLAR VA PAKETLAR SOZLAMASI</b>\n"
-        "━━━━━━━━━━━━━━━\n"
-        f"{s_on} <b>Slot 777:</b> kuniga {cfg.get('slots_daily_limit', 5)} ta (10x/4x/1.5x)\n"
-        f"{m_on} <b>Xazina ovi:</b> kuniga {cfg.get('mines_daily_limit', 5)} ta (4.0x gacha)\n"
-        f"{w_on} <b>Omad g‘ildiragi:</b> kuniga {cfg.get('wheel_daily_limit', 3)} ta · chipta {cfg.get('wheel_ticket_cost', 100)} 🪙\n"
-        f"{d_on} <b>Tosh o‘yini:</b> kuniga {cfg.get('dice_daily_limit', 3)} ta · "
-        f"yutuq {cfg.get('dice_jackpot_reward', 300)} 🪙 · kutish {cfg.get('dice_cooldown_minutes', 0)} daq.\n"
-        f"{f_on} <b>Tanga tashlash:</b> kuniga {cfg.get('coinflip_daily_limit', 5)} ta (2x garov)\n"
-        f"{l_on} <b>Omadli karta:</b> kuniga {cfg.get('lucky_daily_limit', 3)} ta "
-        f"({cfg.get('lucky_min_reward', 60)}–{cfg.get('lucky_max_reward', 350)} 🪙)\n"
-        f"{p_on} <b>Karta paketlari (/pack):</b> kuniga <b>{pack_lim}</b> marta\n"
-        "   <i>(Dublikat karta tushsa 50% coin keshbek qaytadi)</i>"
-    )
+    lines = [
+        "🎮 <b>O‘YINLAR BOSHQARUVI</b>",
+        "━━━━━━━━━━━━━━━",
+        "O‘yinni tanlang — yoqish/o‘chirish, kunlik limit va yutuqlarni o‘zgartirasiz.\n",
+    ]
+    b = InlineKeyboardBuilder()
+    buttons = []
+    for g in ADMIN_GAMES:
+        on = _gm_on(cfg, g["toggle"])
+        limit_key = g["fields"][0][0]
+        lim = int(cfg.get(limit_key, 0))
+        if g["key"] == "pack" and lim <= 0:
+            on = False
+        mark = "🟢" if on else "🔴"
+        lines.append(f"{mark} {g['emoji']} <b>{g['name']}</b> — kuniga {lim} ta")
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"{mark} {g['emoji']} {g['name']}",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="g", ext=g["key"]).pack(),
+            )
+        )
+    b.add(*buttons)
+    b.adjust(2)
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+def _game_by_key(key: str):
+    return next((g for g in ADMIN_GAMES if g["key"] == key), None)
+
+
+async def _show_game_page(target, owner_id: int, gkey: str) -> None:
+    g = _game_by_key(gkey)
+    if g is None:
+        await _show_games_home(target, owner_id)
+        return
+    async with get_session() as session:
+        cfg = await GameplayService.get_game_config(session)
+    on = _gm_on(cfg, g["toggle"])
+    lines = [
+        f"{g['emoji']} <b>{g['name'].upper()}</b>",
+        "━━━━━━━━━━━━━━━",
+        f"<i>{g['hint']}</i>\n",
+        f"Holat: <b>{'🟢 Yoqilgan' if on else '🔴 O‘chirilgan'}</b>",
+    ]
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text=f"{s_on} Slot 777", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="slots_enabled").pack()),
-        InlineKeyboardButton(text=f"{m_on} Xazina", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="mines_enabled").pack()),
-        InlineKeyboardButton(text=f"{w_on} G‘ildirak", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="wheel_enabled").pack()),
+        InlineKeyboardButton(
+            text="🔴 O‘chirish" if on else "🟢 Yoqish",
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext=g["toggle"]).pack(),
+        )
     )
-    b.row(
-        InlineKeyboardButton(text=f"{d_on} Tosh", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="dice_enabled").pack()),
-        InlineKeyboardButton(text=f"{f_on} Tanga", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="coinflip_enabled").pack()),
-        InlineKeyboardButton(text=f"{l_on} Omadli", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="lucky_enabled").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🎰 Slot limiti", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="slots_daily_limit").pack()),
-        InlineKeyboardButton(text="💣 Xazina limiti", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="mines_daily_limit").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🎡 G‘ildirak limiti", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="wheel_daily_limit").pack()),
-        InlineKeyboardButton(text="🎡 Chipta narxi", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="wheel_ticket_cost").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text=f"{p_on} Paket holati", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="tog", ext="pack_enabled").pack()),
-        InlineKeyboardButton(text=f"🎁 Paket limiti ({pack_lim}/kun)", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="pack_daily_limit").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🎲 Tosh yutug‘i", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_jackpot_reward").pack()),
-        InlineKeyboardButton(text="🎲 Tosh limiti", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_daily_limit").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🪙 Tanga limiti", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="coinflip_daily_limit").pack()),
-        InlineKeyboardButton(text="🃏 Omadli limiti", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="lucky_daily_limit").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🃏 Min coin", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="lucky_min_reward").pack()),
-        InlineKeyboardButton(text="🃏 Max coin", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="lucky_max_reward").pack()),
-    )
-    b.row(InlineKeyboardButton(text="⏳ Tosh kutish vaqti (daq.)", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext="dice_cooldown_minutes").pack()))
-    b.row(_back_home_btn(owner_id))
-    await edit_or_answer(target, txt, reply_markup=b.as_markup())
+    for field, label, _zero, _mn, _mx in g["fields"]:
+        val = cfg.get(field, 0)
+        lines.append(f"• {label}: <b>{int(val):,}</b>")
+        b.row(
+            InlineKeyboardButton(
+                text=f"✏️ {label}: {int(val):,}"[:60],
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="ed", ext=field).pack(),
+            )
+        )
+    b.row(InlineKeyboardButton(text="⬅️ Barcha o‘yinlar", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="v").pack()))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
 @router.callback_query(AdmV2Cb.filter(F.sec == "games"))
@@ -2486,26 +2467,44 @@ async def cb_v2_games(callback: CallbackQuery, callback_data: AdmV2Cb, state: FS
     if await _deny_if_no_perm(callback, admin_perms, "games"):
         return
     owner_id = callback.from_user.id
-    if callback_data.act == "ed":
-        field = callback_data.ext or "dice_daily_limit"
-        label = _GAME_FIELD_LABELS.get(field, field)
+    act = callback_data.act
+    if act == "g":
+        await state.clear()
+        await _show_game_page(callback, owner_id, callback_data.ext)
+        return
+    if act == "ed":
+        field = callback_data.ext
+        meta = FIELD_META.get(field)
+        if meta is None:
+            await callback.answer("Noma’lum sozlama", show_alert=True)
+            return
         await state.set_state(AdminV2States.waiting_games_field)
         await state.update_data(owner_tg_id=owner_id, g_field=field)
-        min_note = "0 (o‘chirish/bepul) yoki musbat son" if field in _GAME_ZERO_ALLOWED else "kamida 1 butun son"
+        lo = 0 if meta["zero"] else max(1, meta["min"])
+        back = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=owner_id, sec="games", act="g", ext=meta["game"]).pack())]]
+        )
         await edit_or_answer(
             callback,
-            f"🎮 <b>{esc(label)}</b>\n\nYangi qiymatni kiriting ({min_note}):",
-            reply_markup=_cancel_kb(owner_id, "games", "v"),
+            f"🎮 <b>{esc(meta['label'])}</b>\n\nYangi qiymatni kiriting ({lo:,} dan {meta['max']:,} gacha butun son):",
+            reply_markup=back,
         )
         return
-    if callback_data.act == "tog":
-        tog_key = callback_data.ext if callback_data.ext in _GAME_TOGGLE_KEYS else "dice_enabled"
+    if act == "tog":
+        tog_key = callback_data.ext if callback_data.ext in TOGGLE_KEYS else None
+        if tog_key is None:
+            await callback.answer("Noma’lum sozlama", show_alert=True)
+            return
         async with get_session() as session:
             cfg = await GameplayService.get_game_config(session)
             cfg[tog_key] = not bool(cfg.get(tog_key, True))
             await SettingsService.set_value(session, "game_config", cfg)
             await session.commit()
         await callback.answer("✅ Yangilandi!")
+        game = next((g for g in ADMIN_GAMES if g["toggle"] == tog_key), None)
+        await state.clear()
+        await _show_game_page(callback, owner_id, game["key"] if game else "")
+        return
     await state.clear()
     await _show_games_home(callback, owner_id)
 
@@ -2517,20 +2516,30 @@ async def fsm_v2_games_field(message: Message, state: FSMContext) -> None:
         return
     raw = (message.text or "").strip().replace(",", "").replace(" ", "")
     field = data["g_field"]
-    min_val = 0 if field in _GAME_ZERO_ALLOWED else 1
-    if not raw.isdigit() or int(raw) < min_val or (field == "pack_daily_limit" and int(raw) > 100):
-        note = "0–100 oralig‘ida" if field == "pack_daily_limit" else f"kamida {min_val}"
-        await message.answer(f"⚠️ {note} butun son kiriting.")
+    meta = FIELD_META.get(field)
+    if meta is None:
+        await state.clear()
         return
-    await state.clear()
+    lo = 0 if meta["zero"] else max(1, meta["min"])
+    if not raw.isdigit() or not (lo <= int(raw) <= meta["max"]):
+        await message.answer(f"⚠️ {lo:,} dan {meta['max']:,} gacha butun son kiriting.")
+        return
+    val = int(raw)
     async with get_session() as session:
         cfg = await GameplayService.get_game_config(session)
-        cfg[field] = int(raw)
+        if field == "lucky_min_reward" and val > int(cfg.get("lucky_max_reward", val)):
+            await message.answer("⚠️ Minimal yutuq maksimaldan katta bo‘lmasligi kerak.")
+            return
+        if field == "lucky_max_reward" and val < int(cfg.get("lucky_min_reward", val)):
+            await message.answer("⚠️ Maksimal yutuq minimaldan kichik bo‘lmasligi kerak.")
+            return
+        cfg[field] = val
         if field == "pack_daily_limit":
-            cfg["pack_enabled"] = int(raw) > 0
+            cfg["pack_enabled"] = val > 0
         await SettingsService.set_value(session, "game_config", cfg)
         await session.commit()
-    await _show_games_home(message, message.from_user.id)
+    await state.clear()
+    await _show_game_page(message, message.from_user.id, meta["game"])
 
 
 # ===========================================================================

@@ -51,6 +51,7 @@ from models.schedule import ActiveDrop
 from models.user import User
 from models.v2_features import SecurityIncident, SupportTicket
 from services.admin_service import AdminService
+from services.coin_gift_service import CoinGiftService
 from services.auction_wishlist_service import AuctionWishlistService
 from services.card_service import CardService
 from services.community_service import CommunityService
@@ -142,6 +143,7 @@ class AdminStates(StatesGroup):
     edit_ref_invitee = State()
     edit_group_reward = State()
     edit_group_cfg_field = State()
+    edit_coin_gift_field = State()
     edit_daily_field = State()
     edit_drop_rule_field = State()
     edit_welcome_text = State()
@@ -858,11 +860,17 @@ async def _render_group_detail(target, owner_id: int, group_id: int) -> None:
         link = await GroupPolicyService.resolve_link(
             getattr(target, "bot", None), session, group.telegram_chat_id, group.username, try_create=False
         )
+        adder = await session.get(User, group.added_by_user_id) if group.added_by_user_id else None
         await session.commit()
+    adder_line = (
+        f"👤 Botni qo‘shgan: <b>{esc(adder.display_name)}</b> · <code>{adder.telegram_id}</code>\n"
+        if adder is not None
+        else "👤 Botni qo‘shgan: noma’lum\n"
+    )
     link_line = "" if group.username else (f"🔗 Havola: {esc(link)}\n" if link else "🔗 Havola: yo‘q (yopiq guruh)\n")
     text = (
         f"{format_group_settings(group)}\n"
-        f"{link_line}"
+        f"{adder_line}{link_line}"
         f"👤 Faol a’zolar (bazada): <b>{analytics['active_members']}</b>\n"
         f"📦 Jami droplar: <b>{analytics['total_drops']}</b> (Olingani: <b>{analytics['claimed_drops']}</b>)\n"
         f"🔌 Bot holati: <b>{'🟢 Faol' if group.is_active else '🔴 Nofaol'}</b>"
@@ -1117,6 +1125,14 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
             await edit_or_answer(target, "❌ Foydalanuvchi topilmadi.", reply_markup=admin_users_menu_kb(admin_tg_id))
             return
         groups = await AdminService.get_user_groups(session, user.id)
+        added_groups = (
+            await session.execute(
+                select(Group).where(Group.added_by_user_id == user.id).order_by(Group.id.desc()).limit(8)
+            )
+        ).scalars().all()
+        added_total = int(
+            (await session.execute(select(func.count(Group.id)).where(Group.added_by_user_id == user.id))).scalar_one() or 0
+        )
 
     if user.is_banned:
         if user.ban_until:
@@ -1127,6 +1143,12 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         ban_str = "🟢 Active"
     vip_str = f"💎 {esc(user.vip_tier)}" if CommunityService.is_vip_active(user) else "▫️ Oddiy"
     groups_str = ", ".join(esc(g) for g in groups[:5]) if groups else "—"
+    added_groups_str = ""
+    for g in added_groups:
+        title = esc(g.title)
+        added_groups_str += (
+            f"   • <a href=\"https://t.me/{esc(g.username)}\">{title}</a>\n" if g.username else f"   • {title}\n"
+        )
     text = (
         f"👤 <b>USER BOSHQARUVI</b>\n\n"
         f"🆔 Telegram ID: <code>{user.telegram_id}</code>\n"
@@ -1136,6 +1158,8 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         f"⚡ Level: <b>{user.level}</b> ({user.xp} XP)\n"
         f"🎴 Cards: <b>{user.total_cards}</b> (Unique: <b>{user.unique_cards}</b>)\n"
         f"👥 Guruhlar: {groups_str}\n"
+        f"🏰 Botni qo‘shgan guruhlari: <b>{added_total}</b> ta\n"
+        f"{added_groups_str}"
         f"📌 Holat: <b>{ban_str}</b>\n"
         f"🕒 Oxirgi faollik: <code>{fmt_tashkent(user.last_activity, '%Y-%m-%d %H:%M')}</code>"
     )
@@ -1580,12 +1604,25 @@ async def _render_settings_home(target, owner_id: int) -> None:
 async def _render_daily_menu(target, owner_id: int) -> None:
     async with get_session() as session:
         dcfg = await SettingsService.get_daily_config(session)
+        card_on = await SettingsService.get_daily_card_enabled(session)
     b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(
+            text="🎴 Kunlik bonusda karta: " + ("✅ Beriladi" if card_on else "❌ Berilmaydi"),
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_card_tog").pack(),
+        )
+    )
     b.row(InlineKeyboardButton(text=f"🪙 Asosiy coin: {dcfg['base_coins']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="base_coins").pack()))
     b.row(InlineKeyboardButton(text=f"🔥 Streak qadam: +{dcfg['streak_step']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="streak_step").pack()))
     b.row(InlineKeyboardButton(text=f"🏆 Max streak bonus: {dcfg['max_streak_bonus']}", callback_data=AdminCb(owner_id=owner_id, section="settings", action="daily_ed", extra="max_streak_bonus").pack()))
     b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
-    await edit_or_answer(target, "🎁 <b>KUNLIK BONUS SOZLAMALARI</b>", reply_markup=b.as_markup())
+    await edit_or_answer(
+        target,
+        "🎁 <b>KUNLIK BONUS SOZLAMALARI</b>\n━━━━━━━━━━━━━━━\n"
+        f"🎴 Tasodifiy karta: <b>{'✅ beriladi' if card_on else '❌ berilmaydi'}</b>\n"
+        f"🪙 Asosiy coin: <b>{dcfg['base_coins']:,}</b> · 🔥 Streak qadam: <b>+{dcfg['streak_step']:,}</b> · 🏆 Max: <b>{dcfg['max_streak_bonus']:,}</b>",
+        reply_markup=b.as_markup(),
+    )
 
 
 async def _render_drop_rules(target, owner_id: int) -> None:
@@ -1682,6 +1719,47 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
             f"🏰 <b>{esc(_GRP_CFG_LABELS[field])}</b>\n\nYangi qiymatni kiriting (butun son, 0 ham mumkin):",
             reply_markup=_settings_cancel_kb(owner_id, "rewards_menu"),
         )
+        return
+
+    if act == "cg_menu":
+        await state.clear()
+        text, kb = await _coin_gift_menu_text_and_kb(owner_id)
+        await edit_or_answer(callback, text, reply_markup=kb)
+        return
+
+    if act == "cg_tog":
+        async with get_session() as session:
+            cfg = await CoinGiftService.get_config(session)
+            await CoinGiftService.set_field(session, "enabled", not cfg["enabled"])
+            await AdminService.log_action(session, owner_id, "toggle_coin_gift", "settings", "enabled", {"value": not cfg["enabled"]})
+            await session.commit()
+        await callback.answer("✅ Yangilandi!")
+        text, kb = await _coin_gift_menu_text_and_kb(owner_id)
+        await edit_or_answer(callback, text, reply_markup=kb)
+        return
+
+    if act == "cg_ed":
+        field = callback_data.extra
+        if field not in _CG_LABELS:
+            await callback.answer("Noma’lum sozlama", show_alert=True)
+            return
+        await state.set_state(AdminStates.edit_coin_gift_field)
+        await state.update_data(owner_tg_id=owner_id, field=field)
+        await edit_or_answer(
+            callback,
+            f"💸 <b>{esc(_CG_LABELS[field])}</b>\n\nYangi qiymatni kiriting (butun son):",
+            reply_markup=_settings_cancel_kb(owner_id, "cg_menu"),
+        )
+        return
+
+    if act == "daily_card_tog":
+        async with get_session() as session:
+            cur = await SettingsService.get_daily_card_enabled(session)
+            await SettingsService.set_daily_card_enabled(session, not cur)
+            await AdminService.log_action(session, owner_id, "toggle_daily_card", "settings", "daily_card_enabled", {"value": not cur})
+            await session.commit()
+        await callback.answer("✅ Yangilandi!")
+        await _render_daily_menu(callback, owner_id)
         return
 
     if act == "daily_menu":
@@ -1919,6 +1997,38 @@ async def fsm_edit_vip_price(message: Message, state: FSMContext) -> None:
     await _render_vip_menu(message, message.from_user.id)
 
 
+_CG_LABELS = {
+    "min_amount": "🔻 Minimal miqdor (coin)",
+    "daily_limit": "📅 Kunlik limit (jami coin, 0 = cheklovsiz)",
+    "fee_percent": "💸 Komissiya (%, 0–90)",
+}
+
+
+async def _coin_gift_menu_text_and_kb(owner_id: int):
+    async with get_session() as session:
+        cfg = await CoinGiftService.get_config(session)
+    on = "✅ Yoqilgan" if cfg["enabled"] else "❌ O‘chiq"
+    limit_txt = "cheklovsiz" if not cfg["daily_limit"] else format(cfg["daily_limit"], ",") + " 🪙"
+    text = (
+        "💸 <b>COIN YUBORISH SOZLAMALARI</b>\n━━━━━━━━━━━━━━━\n"
+        f"Holat: <b>{on}</b>\n"
+        f"🔻 Minimal miqdor: <b>{cfg['min_amount']:,} 🪙</b>\n"
+        f"📅 Kunlik limit: <b>{limit_txt}</b>\n"
+        f"💸 Komissiya: <b>{cfg['fee_percent']}%</b>\n\n"
+        "<i>Foydalanuvchi yuborgan coin undan ayriladi, qabul qiluvchiga (komissiyasiz qismi) qo‘shiladi.</i>"
+    )
+    cb = lambda action, extra="": AdminCb(owner_id=owner_id, section="settings", action=action, extra=extra).pack()  # noqa: E731
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text=f"Coin yuborish: {on}", callback_data=cb("cg_tog")))
+    b.row(
+        InlineKeyboardButton(text=f"🔻 Min: {cfg['min_amount']:,}", callback_data=cb("cg_ed", "min_amount")),
+        InlineKeyboardButton(text=f"📅 Limit: {cfg['daily_limit']:,}", callback_data=cb("cg_ed", "daily_limit")),
+    )
+    b.row(InlineKeyboardButton(text=f"💸 Komissiya: {cfg['fee_percent']}%", callback_data=cb("cg_ed", "fee_percent")))
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings", action="view").pack()))
+    return text, b.as_markup()
+
+
 _GRP_CFG_LABELS = {
     "per_member_coins": "👥 Har bir a’zo uchun coin",
     "flat_coins": "🪙 Qat’iy mukofot (a’zo soniga bog‘liq bo‘lmasa)",
@@ -2022,6 +2132,29 @@ async def fsm_edit_ref_invitee(message: Message, state: FSMContext) -> None:
 @router.message(AdminStates.edit_group_reward, NotCommandFilter())
 async def fsm_edit_group_reward(message: Message, state: FSMContext) -> None:
     await _save_reward_coin_setting(message, state, "group")
+
+
+@router.message(AdminStates.edit_coin_gift_field, NotCommandFilter())
+async def fsm_edit_coin_gift_field(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") is not None and data.get("owner_tg_id") != message.from_user.id:
+        return
+    field = str(data.get("field", ""))
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Faqat butun son kiriting.")
+        return
+    try:
+        async with get_session() as session:
+            await CoinGiftService.set_field(session, field, int(raw))
+            await AdminService.log_action(session, message.from_user.id, "edit_coin_gift", "settings", field, {"value": int(raw)})
+            await session.commit()
+    except ValueError as exc:
+        await message.answer(f"⚠️ {esc(str(exc))}")
+        return
+    await state.clear()
+    text, kb = await _coin_gift_menu_text_and_kb(message.from_user.id)
+    await message.answer("✅ Saqlandi!\n\n" + text, reply_markup=kb)
 
 
 @router.message(AdminStates.edit_group_cfg_field, NotCommandFilter())

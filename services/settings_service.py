@@ -18,6 +18,15 @@ STARS_MIN = 1
 STARS_MAX = 100_000
 COINS_MAX = 1_000_000_000
 
+GROUP_REWARD_DEFAULTS: Dict[str, Any] = {
+    "enabled": True,
+    "per_member": True,
+    "per_member_coins": 1000,
+    "flat_coins": 1000,
+    "min_members": 5,
+    "give_epic_card": True,
+}
+
 
 class SettingsService:
     @staticmethod
@@ -95,6 +104,7 @@ class SettingsService:
     async def get_drop_rules(session: AsyncSession) -> Dict[str, Any]:
         stored = await SettingsService.get_value(session, "drop_rules", None)
         rules = dict(DEFAULT_DROP_RULES)
+        rules.setdefault("min_members", 10)  # eski constants.py bilan ham ishlashi uchun
         if isinstance(stored, dict):
             rules.update({k: v for k, v in stored.items() if k in rules})
         return rules
@@ -291,7 +301,8 @@ class SettingsService:
     # ------------------------------------------------------------------
     @staticmethod
     async def get_group_reward_config(session: AsyncSession) -> Dict[str, Any]:
-        defaults = dict(DEFAULT_SETTINGS["group_reward_config"])  # type: ignore[arg-type]
+        defaults = dict(GROUP_REWARD_DEFAULTS)
+        defaults.update(DEFAULT_SETTINGS.get("group_reward_config", {}))  # type: ignore[arg-type]
         stored = await SettingsService.get_value(session, "group_reward_config", None)
         cfg = dict(defaults)
         if isinstance(stored, dict):
@@ -319,3 +330,14 @@ class SettingsService:
             cfg[field] = val
         await SettingsService.set_value(session, "group_reward_config", cfg)
         return cfg
+
+    # ------------------------------------------------------------------
+    # Kunlik bonusda tasodifiy karta berilsinmi (admin paneldan; standart: berilmaydi)
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def get_daily_card_enabled(session: AsyncSession) -> bool:
+        return bool(await SettingsService.get_value(session, "daily_card_enabled", False))
+
+    @staticmethod
+    async def set_daily_card_enabled(session: AsyncSession, value: bool) -> None:
+        await SettingsService.set_value(session, "daily_card_enabled", bool(value))

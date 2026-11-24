@@ -47,6 +47,46 @@ def _prefix(rank: int) -> str:
     return MEDALS.get(rank, f"<b>{rank}.</b>")
 
 
+def _row(rank: int, name: str, full: str, short: str, me: bool = False) -> str:
+    """Reyting qatori: 1-o'rin alohida ajralib turadi, 2-3 oddiyroq, qolganlari bir xil ixcham."""
+    tag = "  👈 <b>Siz</b>" if me else ""
+    if rank == 1:
+        return (
+            f"<blockquote>👑 <b>1-O‘RIN</b> 👑\n"
+            f"✨ <b>{name}</b> ✨{tag}\n"
+            f"{full}</blockquote>"
+        )
+    if rank == 2:
+        return f"🥈 <b>2.</b> <b>{name}</b>{tag}\n      {full}\n"
+    if rank == 3:
+        return f"🥉 <b>3.</b> <b>{name}</b>{tag}\n      {full}\n"
+    return f"<b>{rank}.</b> {name} — {short}{tag}"
+
+
+def _join_rows(rows: list[str]) -> str:
+    out: list[str] = []
+    for i, r in enumerate(rows):
+        out.append(r)
+    return "\n".join(out)
+
+
+def _group_title_html(g: Group) -> str:
+    title = esc(g.title)
+    if getattr(g, "username", None):
+        return f'<a href="https://t.me/{esc(g.username)}">{title}</a>'
+    return title
+
+
+def _footer_rank(mine: Optional[int]) -> str:
+    if mine == 0:
+        return "\n📍 Siz: 🛡 <b>Admin (reytingdan tashqari)</b>"
+    if mine is None:
+        return ""
+    if mine == 1:
+        return "\n📍 Siz hozir <b>1-o‘rindasiz</b> 👑 — o‘rningizni saqlab qoling!"
+    return f"\n📍 Sizning o‘rningiz: <b>#{mine}</b>\n🚀 1-o‘ringa chiqish uchun harakat qiling!"
+
+
 async def _show_ranking(
     target,
     owner_id: int,
@@ -75,13 +115,18 @@ async def _show_ranking(
         if not grp_entries:
             lines.append("📭 Hozircha faol guruhlar yo‘q.")
         else:
-            lines.append("<i>Faol a’zolar va olingan kartalar bo‘yicha</i>\n")
+            lines.append("<i>Faol a’zolar va olingan kartalar bo‘yicha. Guruh nomini bossangiz, guruhga o‘tasiz.</i>\n")
+            rows = []
             for g in grp_entries:
-                lines.append(f"{_prefix(g.rank)} <b>{esc(g.group.title)}</b>")
-                lines.append(f"      👤 {g.active_users} faol · 🎴 {g.claimed_cards} karta · ⭐ {g.score}")
+                name = _group_title_html(g.group)
+                full = f"👤 <b>{g.active_users}</b> faol · 🎴 <b>{g.claimed_cards}</b> karta · ⭐ <b>{g.score}</b>"
+                short = f"👤 {g.active_users} · 🎴 {g.claimed_cards} · ⭐ {g.score}"
+                is_me = db_group is not None and g.group.id == db_group.id
+                rows.append(_row(g.rank, name, full, short, is_me))
+            lines.append(_join_rows(rows))
             if standing is not None and standing.rank > 10:
                 lines.append(f"\n📍 Sizning guruhingiz: <b>#{standing.rank}</b> · ⭐ {standing.score}")
-        await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
+        await edit_or_answer(target, "\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
         return
 
     # ---------- eng kuchli kolleksiya ----------
@@ -89,14 +134,16 @@ async def _show_ranking(
         from services.card_level_service import CardLevelService
 
         async with get_session() as session:
-            rows = await CardLevelService.top_power(session, limit=10)
+            rows_p = await CardLevelService.top_power(session, limit=10)
         lines = ["💪 <b>ENG KUCHLI KOLLEKSIYA</b>", f"{LINE}\n<i>Kartalarning rank va darajasi bo‘yicha umumiy kuch</i>\n"]
-        if not rows:
+        if not rows_p:
             lines.append("📭 Hozircha ma’lumot yo‘q.")
         else:
-            for idx, (u, val) in enumerate(rows, start=1):
-                me = " 👈" if db_user is not None and u.id == db_user.id else ""
-                lines.append(f"{_prefix(idx)} {esc(u.display_name)} — <b>{fmt_coins(val)}</b> 💪{me}")
+            rows = []
+            for idx, (u, val) in enumerate(rows_p, start=1):
+                is_me = db_user is not None and u.id == db_user.id
+                rows.append(_row(idx, esc(u.display_name), f"💪 <b>{fmt_coins(val)}</b> kuch", f"💪 {fmt_coins(val)}", is_me))
+            lines.append(_join_rows(rows))
         await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
         return
 
@@ -104,14 +151,24 @@ async def _show_ranking(
     if scope in titles:
         hdr, unit = titles[scope]
         async with get_session() as session:
-            rows = await RankingService.get_extended_top(session, scope, period=period, limit=10)
+            rows_e = await RankingService.get_extended_top(session, scope, period=period, limit=10)
         lines = [f"<b>{hdr}</b>", f"{LINE}\n🗓 {PERIOD_LABELS.get(period, period)}\n"]
-        if not rows:
+        if not rows_e:
             lines.append("📭 Hozircha ma’lumot yo‘q.")
         else:
-            for idx, (u, val) in enumerate(rows, start=1):
-                me = " 👈" if db_user is not None and u.id == db_user.id else ""
-                lines.append(f"{_prefix(idx)} {esc(u.display_name)} — <b>{fmt_coins(val)}</b> {unit}{me}")
+            rows = []
+            for idx, (u, val) in enumerate(rows_e, start=1):
+                is_me = db_user is not None and u.id == db_user.id
+                if scope == "coins":
+                    full, short = f"🪙 <b>{fmt_coins(val)}</b> coin", f"🪙 {fmt_coins(val)}"
+                elif scope == "xp":
+                    lvl = max(1, int(getattr(u, "level", 1) or 1))
+                    full = f"⚡ <b>Lv.{lvl}</b> · {fmt_coins(val)} XP"
+                    short = f"⚡ Lv.{lvl} · {fmt_coins(val)} XP"
+                else:
+                    full, short = f"<b>{fmt_coins(val)}</b> {unit}", f"{fmt_coins(val)} {unit}"
+                rows.append(_row(idx, esc(u.display_name), full, short, is_me))
+            lines.append(_join_rows(rows))
         await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
         return
 
@@ -119,7 +176,7 @@ async def _show_ranking(
     async with get_session() as session:
         if scope == "group" and db_group is not None:
             entries = await RankingService.get_group_top(session, db_group.id, limit=10)
-            header = f"👥 <b>GURUH REYTINGI</b>\n🏷 {esc(db_group.title)}"
+            header = f"👥 <b>GURUH REYTINGI</b>\n🏷 {_group_title_html(db_group)}"
         else:
             entries = await RankingService.get_global_top(session, limit=10)
             header = "🌍 <b>GLOBAL REYTING</b>"
@@ -129,27 +186,29 @@ async def _show_ranking(
                 session=session, user_id=db_user.id, group_id=db_group.id if db_group else None
             )
 
-    r4_meta = get_rarity_meta(get_rank_name_by_order(4, "Legend"))
-    r5_meta = get_rarity_meta(get_rank_name_by_order(5, "Mythic"))
+    r5_name = get_rank_name_by_order(5, "Mythic")
+    r6_name = get_rank_name_by_order(6, "Divine")
+    m5 = get_rarity_meta(r5_name)
+    m6 = get_rarity_meta(r6_name)
 
     lines = [header, LINE]
     if not entries:
         lines.append("📭 Hozircha reyting ma’lumotlari yo‘q.")
     else:
-        lines.append("<i>Noyob kartalar soni bo‘yicha</i>\n")
+        lines.append(f"<i>🏅 Kollektsiya qiymati bo‘yicha</i>\n🎴 jami karta · {m5.emoji} {esc(r5_name)} · {m6.emoji} {esc(r6_name)}\n")
+        rows = []
         for e in entries:
-            me = " 👈" if db_user is not None and e.user.id == db_user.id else ""
-            lines.append(f"{_prefix(e.rank)} <b>{esc(e.user.display_name)}</b>{me}")
-            lines.append(
-                f"      ✨ {e.unique_cards} noyob · 🎴 {e.total_cards} jami · "
-                f"{r4_meta.emoji} {e.legendary_cards} · {r5_meta.emoji} {e.mythic_cards}"
+            is_me = db_user is not None and e.user.id == db_user.id
+            full = (
+                f"🎴 <b>{e.total_cards}</b> karta · {m5.emoji} <b>{e.mythic_cards}</b> {esc(r5_name)} · "
+                f"{m6.emoji} <b>{e.divine_cards}</b> {esc(r6_name)}"
             )
+            short = f"🎴 {e.total_cards} · {m5.emoji} {e.mythic_cards} · {m6.emoji} {e.divine_cards}"
+            rows.append(_row(e.rank, esc(e.user.display_name), full, short, is_me))
+        lines.append(_join_rows(rows))
     mine = my_group if scope == "group" else my_global
-    if mine == 0:
-        lines.append("\n📍 Siz: 🛡 <b>Admin (reytingdan tashqari)</b>")
-    elif mine is not None:
-        lines.append(f"\n📍 Sizning o‘riningiz: <b>#{mine}</b>")
-    await edit_or_answer(target, "\n".join(lines), reply_markup=kb)
+    lines.append(_footer_rank(mine))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
 
 
 @router.message(Command("top"))
