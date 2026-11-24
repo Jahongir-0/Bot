@@ -344,6 +344,7 @@ class DropService:
         )
         if upd.rowcount != 1:
             return None
+        card.dropped_count = int(card.dropped_count or 0) + 1
 
         reward = await DropService.calculate_drop_reward(session, card, group)
         drop = ActiveDrop(
@@ -414,16 +415,11 @@ class DropService:
         ]
 
         from services.card_level_service import CardLevelService
-        from utils.constants import get_rarity_aliases
 
         mults = await CardLevelService.get_drop_mults(session)
         active_event = await CardService.get_active_event(session)
-        ranks = await SettingsService.get_value(session, "rank_definitions", [])
-        if not isinstance(ranks, list) or not ranks:
-            from utils.constants import DEFAULT_RANK_DEFINITIONS
 
-            ranks = list(DEFAULT_RANK_DEFINITIONS)
-
+        # Oxirgi tashlangan animeni olamiz — ketma-ket bir xil animedan tashlamaslik uchun
         last_anime_row = (
             await session.execute(
                 select(Card.anime_id, Card.anime_name)
@@ -439,45 +435,37 @@ class DropService:
             else None
         )
 
+        def _card_weight(card: Card) -> float:
+            w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
+            if (
+                active_event is not None
+                and active_event.boosted_rarity
+                and card.rarity.lower() == active_event.boosted_rarity.lower()
+            ):
+                w *= max(1.0, active_event.rarity_weight_multiplier)
+            return max(0.01, w)
+
         for cond in tiers:
             cards = list((await session.execute(select(Card).where(cond))).scalars().all())
+            # Tasodifiy dropdan chiqarilgan ranklar (masalan Mythic/Divine) tushmaydi
+            cards = [c for c in cards if CardLevelService.rarity_mult(mults, c.rarity) > 0]
             if not cards:
                 continue
 
-            eligible_by_order: Dict[int, List[Card]] = {}
-            for rank in ranks:
-                try:
-                    order = int(rank.get("order", 0))
-                except (TypeError, ValueError):
-                    continue
-                aliases = {a.casefold() for a in get_rarity_aliases(str(rank.get("name", "")))}
-                rank_cards = [c for c in cards if (c.rarity or "").strip().casefold() in aliases]
-                if rank_cards and CardLevelService.mult_for(mults, order) > 0:
-                    eligible_by_order[order] = rank_cards
+            # DB qo'shilgan tartib (id) ta'sir qilmasligi uchun avval aralashtiramiz
+            random.shuffle(cards)
 
-            chosen_rank = CardLevelService.choose_drop_rank(
-                ranks,
-                mults,
-                eligible_orders=set(eligible_by_order),
-                event_boosted_rarity=active_event.boosted_rarity if active_event else None,
-                event_multiplier=active_event.rarity_weight_multiplier if active_event else 1.0,
-            )
-            if chosen_rank is None:
-                continue
-
-            pool = list(eligible_by_order[int(chosen_rank["order"])])
-            random.shuffle(pool)
+            # Boshqa animelardan karta bo'lsa, ketma-ket bir xil animedan tashlamaymiz
+            pool = cards
             if last_anime_key:
                 other_anime_cards = [
-                    c for c in pool
+                    c for c in cards
                     if (c.anime_id or (c.anime_name or "").strip().casefold()) != last_anime_key
                 ]
                 if other_anime_cards:
                     pool = other_anime_cards
 
-            def _card_weight(card: Card) -> float:
-                return max(0.01, float(card.drop_weight))
-
+            # Har bir anime bo'yicha tengroq aralashtirish (ko'p kartali anime birinchi tugab ketmasin)
             by_anime: Dict[str, List[Card]] = {}
             for card in pool:
                 akey = card.anime_id or (card.anime_name or "").strip().casefold()
@@ -491,7 +479,8 @@ class DropService:
             ]
             chosen_group = random.choices(anime_groups, weights=anime_weights, k=1)[0]
             random.shuffle(chosen_group)
-            return random.choices(chosen_group, weights=[_card_weight(c) for c in chosen_group], k=1)[0], False
+            card_weights = [_card_weight(c) for c in chosen_group]
+            return random.choices(chosen_group, weights=card_weights, k=1)[0], False
         return None, False
 
     @staticmethod

@@ -453,7 +453,7 @@ async def cb_game_pick(callback: CallbackQuery, callback_data: GameCb, db_user: 
         limit_now = st["dice_limit"]
         async with get_session() as session:
             ok, msg, _roll, _coins = await GameplayService.play_dice_game(
-                session, uid, dice_value=value, guessed_number=guess, request_id=callback.id
+                session, uid, dice_value=value, guessed_number=guess
             )
             if ok:
                 await session.commit()
@@ -506,11 +506,7 @@ async def cb_game_flip_go(callback: CallbackQuery, callback_data: GameCb, db_use
     async with _user_game_lock(uid):
         async with get_session() as session:
             ok, msg, _won, _delta = await GameplayService.play_coin_flip(
-                session,
-                uid,
-                choice=callback_data.extra,
-                bet=callback_data.val,
-                request_id=callback.id,
+                session, uid, choice=callback_data.extra, bet=callback_data.val
             )
             if ok:
                 new_coins = int(
@@ -571,7 +567,7 @@ async def cb_game_lucky_pick(callback: CallbackQuery, callback_data: GameCb, db_
     async with _user_game_lock(uid):
         async with get_session() as session:
             ok, msg, _coins = await GameplayService.play_lucky_card(
-                session, uid, picked_slot=callback_data.val, request_id=callback.id
+                session, uid, picked_slot=callback_data.val
             )
             if ok:
                 new_coins = int(
@@ -668,7 +664,7 @@ async def cb_game_slots_go(callback: CallbackQuery, callback_data: GameCb, db_us
         async with _user_game_lock(uid):
             async with get_session() as session:
                 ok, msg, _payout, _net = await GameplayService.play_slots_game(
-                    session, uid, dice_value=value, bet=bet, request_id=callback.id
+                    session, uid, dice_value=value, bet=bet
                 )
                 if ok:
                     new_coins = int(
@@ -754,9 +750,7 @@ async def cb_game_mines_go(callback: CallbackQuery, callback_data: GameCb, db_us
             await callback.answer("⚠️ Avval tugallanmagan Xazina ovi o‘yinini yakunlang!", show_alert=True)
             return
         async with get_session() as session:
-            ok, msg, state_obj = await GameplayService.start_mines_game(
-                session, uid, callback_data.val, request_id=callback.id
-            )
+            ok, msg, state_obj = await GameplayService.start_mines_game(session, uid, callback_data.val)
             if ok and state_obj is not None:
                 await session.commit()
                 _MINES_ACTIVE[uid] = state_obj
@@ -898,9 +892,7 @@ async def cb_game_wheel_go(callback: CallbackQuery, db_user: User) -> None:
     new_coins = 0
     async with _user_game_lock(uid):
         async with get_session() as session:
-            ok, msg, _coins = await GameplayService.play_wheel_game(
-                session, uid, request_id=callback.id
-            )
+            ok, msg, _coins = await GameplayService.play_wheel_game(session, uid)
             if ok:
                 new_coins = int(
                     (await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0

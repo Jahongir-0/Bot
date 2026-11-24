@@ -16,7 +16,6 @@ from services.ranking_service import RankingService
 from services.search_service import SearchService
 from services.transfer_service import TransferService
 from services.user_service import InsufficientCoinsError, UserService
-from services.welcome_bonus_service import WELCOME_BONUS_COINS
 from utils.tg_helpers import is_admin_user
 
 
@@ -75,8 +74,8 @@ async def test_market_purchase_self_buy_and_double_purchase(db_session):
     await db_session.refresh(seller)
     assert uc.user_id == buyer.id
     assert not uc.is_locked
-    assert buyer.coins == WELCOME_BONUS_COINS + 5000 - 1500
-    assert seller.coins == WELCOME_BONUS_COINS + 1500
+    assert buyer.coins == 100 + 5000 - 1500
+    assert seller.coins == 100 + 1500
 
 
 @pytest.mark.asyncio
@@ -119,64 +118,22 @@ async def test_offer_escrow_and_accept_reject(db_session):
     res = await OfferService.create_offer(db_session, buyer.id, uc.id, 2000)
     assert res.success
     await db_session.refresh(buyer)
-    assert buyer.coins == WELCOME_BONUS_COINS + 3000 - 2000
+    assert buyer.coins == 1100  # 100 + 3000 - 2000 escrowed
 
     acc = await OfferService.accept_offer(db_session, res.offer.id, owner.id)
     assert acc.success
     await db_session.refresh(owner)
     await db_session.refresh(uc)
-    assert owner.coins == WELCOME_BONUS_COINS + 2000
+    assert owner.coins == 2100
     assert uc.user_id == buyer.id
 
 
 @pytest.mark.asyncio
 async def test_coin_transaction_negative_protection(db_session):
     u = await UserService.upsert_user(db_session, 5001, "rich", "Rich")
-    assert u.coins == WELCOME_BONUS_COINS
-    u.coins = 100
-    await db_session.flush()
+    assert u.coins == 100
     with pytest.raises(InsufficientCoinsError):
         await UserService.debit_coins(db_session, u.id, 500, "test", "overdraft")
-
-
-@pytest.mark.asyncio
-async def test_referral_rewards_work_with_welcome_transaction_and_are_idempotent(db_session):
-    referrer = await UserService.upsert_user(db_session, 5002, "inviter", "Inviter")
-    invitee = await UserService.upsert_user(db_session, 5003, "invitee", "Invitee")
-    inviter_before = referrer.coins
-    invitee_before = invitee.coins
-
-    reward = await UserService.apply_referral(db_session, invitee, referrer.telegram_id)
-    assert reward is not None
-    inviter_coins, invitee_coins = reward[1:]
-    await db_session.refresh(referrer)
-    await db_session.refresh(invitee)
-    assert referrer.coins == inviter_before + inviter_coins
-    assert invitee.coins == invitee_before + invitee_coins
-    duplicate = await UserService.apply_referral(db_session, invitee, referrer.telegram_id)
-    assert duplicate is None
-    await db_session.refresh(referrer)
-    await db_session.refresh(invitee)
-    assert referrer.coins == inviter_before + inviter_coins
-    assert invitee.coins == invitee_before + invitee_coins
-
-
-@pytest.mark.asyncio
-async def test_admin_coin_adjustments_are_request_idempotent_but_later_actions_apply(db_session):
-    user = await UserService.upsert_user(db_session, 5004, "admin_adjusted", "Adjusted")
-    initial = user.coins
-    args = (db_session, 999999, user.id, 100)
-
-    first = await AdminService.adjust_user_coins(*args, request_id="chat:msg-1")
-    repeated = await AdminService.adjust_user_coins(*args, request_id="chat:msg-1")
-    assert first[0] and repeated[0]
-    await db_session.refresh(user)
-    assert user.coins == initial + 100
-
-    next_action = await AdminService.adjust_user_coins(*args, request_id="chat:msg-2")
-    assert next_action[0]
-    await db_session.refresh(user)
-    assert user.coins == initial + 200
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,3 @@
-import uuid
 from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -88,12 +87,9 @@ class AdminService:
         admin_telegram_id: int,
         user_id: int,
         delta: int,
-        request_id: Optional[str] = None,
     ) -> Tuple[bool, str, int]:
         if delta == 0:
             return False, "Miqdor 0 bo‘lishi mumkin emas.", 0
-        operation_id = request_id or uuid.uuid4().hex
-        reference_id = f"admin:{admin_telegram_id}:{operation_id}"
         if delta > 0:
             new_bal = await UserService.credit_coins(
                 session=session,
@@ -101,8 +97,7 @@ class AdminService:
                 amount=delta,
                 tx_type="admin_grant",
                 description=f"Admin +{delta} coins",
-                reference_id=reference_id,
-                idempotency_key=operation_id,
+                reference_id=f"admin:{admin_telegram_id}",
             )
         else:
             try:
@@ -112,8 +107,7 @@ class AdminService:
                     amount=abs(delta),
                     tx_type="admin_deduct",
                     description=f"Admin {delta} coins",
-                    reference_id=reference_id,
-                    idempotency_key=operation_id,
+                    reference_id=f"admin:{admin_telegram_id}",
                 )
             except InsufficientCoinsError:
                 return False, "Foydalanuvchida buncha coin yo‘q (manfiy balansga ruxsat yo‘q).", 0
@@ -326,7 +320,6 @@ class AdminService:
         for off in pending:
             off.status = "cancelled"
             off.resolved_at = now
-            off.user_card_id = None
             await UserService.credit_coins(
                 session=session,
                 user_id=off.buyer_id,

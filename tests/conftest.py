@@ -15,7 +15,7 @@ if str(BOT_ROOT) not in sys.path:
 
 os.environ.setdefault("BOT_TOKEN", "123456:TEST_TOKEN_DO_NOT_USE")
 os.environ.setdefault("ADMIN_IDS", "999999")
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "")
 
 from database.seed import seed_initial_data  # noqa: E402

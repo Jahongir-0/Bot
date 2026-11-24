@@ -22,8 +22,8 @@ from utils.image_check import validate_image_url
 
 async def _user(session, tg_id, coins=0):
     u = await UserService.upsert_user(session, tg_id, f"u{tg_id}", f"U{tg_id}")
-    u.coins = coins
-    await session.flush()
+    if coins:
+        await UserService.credit_coins(session, u.id, coins, "test", "seed", f"seed:{tg_id}")
     return u
 
 
@@ -105,15 +105,11 @@ async def test_same_card_is_not_dropped_twice_in_a_row_to_same_group(db_session)
     owner = await _user(db_session, 8301)
     g1 = await _group(db_session, -100831, owner)
     cards = (await db_session.execute(select(Card).order_by(Card.id))).scalars().all()
-    a = await CardService.create_card(
-        db_session, "Cooldown A", "Cooldown Anime", "https://x/cooldown-a.png", "Basic", 1000, drop_limit=2
-    )
-    b = await CardService.create_card(
-        db_session, "Cooldown B", "Cooldown Anime", "https://x/cooldown-b.png", "Basic", 1000, drop_limit=2
-    )
-    for c in cards:
+    a, b = cards[0], cards[1]
+    for c in cards[2:]:
         c.is_available = False
-    a.drop_weight = b.drop_weight = 100
+    for c in (a, b):
+        c.drop_limit = 2
     await db_session.flush()
 
     assert await DropService.create_active_drop(db_session, g1, a) is not None
@@ -244,12 +240,11 @@ async def test_event_sells_exactly_the_given_number_of_copies(db_session):
 @pytest.mark.asyncio
 async def test_event_not_enough_coins_rolls_back(db_session):
     ev, card = await _event(db_session, copies=3, coins=900)
-    event_id = ev.id
     poor = await _user(db_session, 8801, coins=10)
     res = await EventService.buy_with_coins(db_session, ev.id, poor)
     assert not res.success and res.code == "funds"
     await db_session.rollback()
-    row = (await db_session.execute(select(LimitedEvent).where(LimitedEvent.id == event_id))).scalar_one()
+    row = (await db_session.execute(select(LimitedEvent).where(LimitedEvent.id == ev.id))).scalar_one()
     assert row.sold_count == 0
 
 
@@ -267,7 +262,7 @@ async def test_event_stars_purchase_gives_card_and_is_idempotent(db_session):
     assert done.success
     await db_session.commit()
     assert await UserService.owns_card(db_session, buyer.id, card.id)
-    assert await _coins(db_session, 8901) == 0  # Stars xaridida coin berilmaydi
+    assert await _coins(db_session, 8901) == 100  # coin berilmadi (boshlang'ich 100)
 
     dup = await EventService.complete_stars_purchase(db_session, payload, buyer, "XTR", 50, "chg-1")
     assert dup.code == "duplicate"
@@ -280,9 +275,7 @@ async def test_event_stars_purchase_gives_card_and_is_idempotent(db_session):
 @pytest.mark.asyncio
 async def test_event_stars_refund_when_sold_out_meanwhile(db_session):
     ev, card = await _event(db_session, copies=1, coins=100, stars=40)
-    card_id = card.id
     late = await _user(db_session, 9001)
-    late_id = late.id
     res, payload = await EventService.create_stars_order(db_session, ev.id, late)
     await db_session.commit()
 
@@ -293,7 +286,7 @@ async def test_event_stars_refund_when_sold_out_meanwhile(db_session):
     done = await EventService.complete_stars_purchase(db_session, payload, late, "XTR", 40, "chg-late")
     assert not done.success and done.code == "refund"  # Stars qaytariladi
     await db_session.rollback()
-    assert not await UserService.owns_card(db_session, late_id, card_id)
+    assert not await UserService.owns_card(db_session, late.id, card.id)
 
 
 @pytest.mark.asyncio

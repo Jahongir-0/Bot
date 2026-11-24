@@ -2,7 +2,7 @@ import logging
 from datetime import timedelta
 from typing import List, Optional, Tuple
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -224,11 +224,7 @@ class AuctionWishlistService:
     async def cancel_user_auction(
         session: AsyncSession, auction_id: int, user_id: int
     ) -> Tuple[bool, str]:
-        auc = (
-            await session.execute(
-                select(Auction).where(Auction.id == auction_id).with_for_update()
-            )
-        ).scalar_one_or_none()
+        auc = await session.get(Auction, auction_id)
         if auc is None or auc.seller_user_id != user_id:
             return False, "Auksion topilmadi yoki sizga tegishli emas."
         if auc.status != "active":
@@ -281,45 +277,29 @@ class AuctionWishlistService:
                 return False, f"Eng kam stavka: {min_allowed:,} 🪙"
 
             # Balansni atomik tekshirish va band qilish
-            bid_number = int(auc.bid_count) + 1
-            try:
-                await UserService.debit_coins(
-                    session,
-                    bidder.id,
-                    int(amount),
-                    "auction_bid_escrow",
-                    f"Auction #{auc.id} bid",
-                    reference_id=f"auction:{auc.id}:bid:{bid_number}:{bidder.id}",
-                )
-            except InsufficientCoinsError:
-                return False, f"Coinlaringiz yetarli emas ({amount:,} 🪙 kerak)."
-            await session.execute(
+            upd_bidder = await session.execute(
                 update(User)
-                .where(User.id == bidder.id)
-                .values(locked_coins=User.locked_coins + int(amount), updated_at=utcnow())
+                .where(User.id == bidder.id, User.coins >= int(amount))
+                .values(
+                    coins=User.coins - int(amount),
+                    locked_coins=User.locked_coins + int(amount),
+                    updated_at=utcnow(),
+                )
             )
+            if upd_bidder.rowcount != 1:
+                return False, f"Coinlaringiz yetarli emas ({amount:,} 🪙 kerak)."
 
             prev_bidder_id = auc.highest_bidder_id
             prev_amount = auc.current_price
 
             # Oldingi liderga coinlarni qaytarish
             if prev_bidder_id is not None and auc.bid_count > 0:
-                await UserService.credit_coins(
-                    session,
-                    prev_bidder_id,
-                    prev_amount,
-                    "auction_bid_refund",
-                    f"Auction #{auc.id} outbid refund",
-                    reference_id=f"auction:{auc.id}:refund:{bid_number}:{prev_bidder_id}",
-                )
                 await session.execute(
                     update(User)
                     .where(User.id == prev_bidder_id)
                     .values(
-                        locked_coins=case(
-                            (User.locked_coins > prev_amount, User.locked_coins - prev_amount),
-                            else_=0,
-                        ),
+                        coins=User.coins + prev_amount,
+                        locked_coins=func.greatest(0, User.locked_coins - prev_amount),
                         updated_at=utcnow(),
                     )
                 )
@@ -344,22 +324,11 @@ class AuctionWishlistService:
             return True, f"✅ Stavka qabul qilindi: {amount:,} 🪙!"
 
     @staticmethod
-    async def _finalize_single_auction(session: AsyncSession, auc: Auction) -> bool:
-        claimed = await session.execute(
-            update(Auction)
-            .where(
-                Auction.id == auc.id,
-                Auction.status == "active",
-                Auction.finalized.is_(False),
-            )
-            .values(finalized=True, updated_at=utcnow())
-        )
-        if claimed.rowcount != 1:
-            return False
-        auc.finalized = True
+    async def _finalize_single_auction(session: AsyncSession, auc: Auction) -> None:
         card = await session.get(Card, auc.card_id)
         if auc.highest_bidder_id is None or auc.bid_count == 0:
             auc.status = "no_bids"
+            auc.finalized = True
             if auc.user_card_id:
                 uc = await session.get(UserCard, auc.user_card_id)
                 if uc:
@@ -367,7 +336,7 @@ class AuctionWishlistService:
                     uc.card_state = "OWNED"
             elif card:
                 card.card_state = "AVAILABLE"
-            return True
+            return
 
         winner_id = auc.highest_bidder_id
         price = int(auc.current_price)
@@ -375,10 +344,7 @@ class AuctionWishlistService:
             update(User)
             .where(User.id == winner_id)
             .values(
-                locked_coins=case(
-                    (User.locked_coins > price, User.locked_coins - price),
-                    else_=0,
-                ),
+                locked_coins=func.greatest(0, User.locked_coins - price),
                 auction_wins=User.auction_wins + 1,
                 updated_at=utcnow(),
             )
@@ -489,7 +455,6 @@ class AuctionWishlistService:
             "🏆 Auksionda g‘olib bo‘ldingiz!",
             f"Siz {card.character_name if card else 'karta'} ni {price:,} 🪙 ga yutib oldingiz!",
         )
-        return True
 
     @staticmethod
     async def finalize_expired_auctions(session: AsyncSession) -> int:
@@ -505,8 +470,8 @@ class AuctionWishlistService:
         )
         done = 0
         for auc in due:
-            if await AuctionWishlistService._finalize_single_auction(session, auc):
-                done += 1
+            await AuctionWishlistService._finalize_single_auction(session, auc)
+            done += 1
         await session.flush()
         return done
 
@@ -515,10 +480,8 @@ class AuctionWishlistService:
         auc = await session.get(Auction, auction_id)
         if auc is None or auc.status != "active":
             return False, "Faol auksion topilmadi."
-        finalized = await AuctionWishlistService._finalize_single_auction(session, auc)
+        await AuctionWishlistService._finalize_single_auction(session, auc)
         await session.flush()
-        if not finalized:
-            return False, "Auksion allaqachon yakunlanmoqda yoki yakunlangan."
         return True, "🏁 Auksion muddatidan oldin yakunlandi!"
 
     @staticmethod
@@ -526,35 +489,14 @@ class AuctionWishlistService:
         auc = await session.get(Auction, auction_id)
         if auc is None or auc.status != "active":
             return False, "Faol auksion topilmadi."
-        claimed = await session.execute(
-            update(Auction)
-            .where(
-                Auction.id == auc.id,
-                Auction.status == "active",
-                Auction.finalized.is_(False),
-            )
-            .values(finalized=True, updated_at=utcnow())
-        )
-        if claimed.rowcount != 1:
-            return False, "Auksion allaqachon yakunlanmoqda yoki yakunlangan."
         if auc.highest_bidder_id and auc.bid_count > 0:
             refund_amt = int(auc.current_price)
-            await UserService.credit_coins(
-                session,
-                auc.highest_bidder_id,
-                refund_amt,
-                "auction_cancel_refund",
-                f"Auction #{auc.id} cancelled",
-                reference_id=f"auction:{auc.id}:cancel_refund",
-            )
             await session.execute(
                 update(User)
                 .where(User.id == auc.highest_bidder_id)
                 .values(
-                    locked_coins=case(
-                        (User.locked_coins > refund_amt, User.locked_coins - refund_amt),
-                        else_=0,
-                    ),
+                    coins=User.coins + refund_amt,
+                    locked_coins=func.greatest(0, User.locked_coins - refund_amt),
                     updated_at=utcnow(),
                 )
             )

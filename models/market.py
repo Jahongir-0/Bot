@@ -16,10 +16,10 @@ class CardListing(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_card_id: Mapped[Optional[int]] = mapped_column(
+    user_card_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("user_cards.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
     card_id: Mapped[int] = mapped_column(
@@ -53,10 +53,10 @@ class Offer(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_card_id: Mapped[Optional[int]] = mapped_column(
+    user_card_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("user_cards.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
     card_id: Mapped[int] = mapped_column(

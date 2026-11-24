@@ -204,7 +204,6 @@ class MarketService:
             for off in pending_offers:
                 off.status = "cancelled"
                 off.resolved_at = now
-                off.user_card_id = None
                 await UserService.credit_coins(
                     session=session,
                     user_id=off.buyer_id,

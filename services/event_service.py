@@ -258,8 +258,7 @@ class EventService:
     # Coin bilan sotib olish
     # ------------------------------------------------------------------
     @staticmethod
-    async def buy_with_coins(session: AsyncSession, event_id: int, user: User | int) -> EventResult:
-        user_id = user if isinstance(user, int) else user.id
+    async def buy_with_coins(session: AsyncSession, event_id: int, user: User) -> EventResult:
         pair = await EventService.get_event_with_card(session, event_id)
         if pair is None:
             return EventResult(False, "Event topilmadi.", "invalid")
@@ -268,19 +267,19 @@ class EventService:
             return EventResult(False, "Bu event kartasi coin bilan sotilmaydi. ⭐ Stars bilan oling.", "no_price")
 
         fresh_coins = int(
-            (await session.execute(select(User.coins).where(User.id == user_id))).scalar_one_or_none() or 0
+            (await session.execute(select(User.coins).where(User.id == user.id))).scalar_one_or_none() or 0
         )
         if fresh_coins < int(event.price_coins):
             return EventResult(False, "❌ Coinlaringiz yetarli emas!", "funds", event=event, card=card)
 
         try:
             async with session.begin_nested():
-                res = await EventService._allocate(session, event, card, user_id)
+                res = await EventService._allocate(session, event, card, user.id)
                 if not res.success:
                     return res
                 await UserService.debit_coins(
                     session=session,
-                    user_id=user_id,
+                    user_id=user.id,
                     amount=int(event.price_coins),
                     tx_type="event_buy",
                     description=f"Event card: {card.character_name}",
@@ -293,7 +292,7 @@ class EventService:
             EventPurchase(
                 order_uid=uuid.uuid4().hex,
                 event_id=event.id,
-                user_id=user_id,
+                user_id=user.id,
                 method="coins",
                 price=int(event.price_coins),
                 status="paid",
@@ -343,9 +342,7 @@ class EventService:
         if currency != "XTR" or order_uid is None:
             return False, "To‘lovni tasdiqlab bo‘lmadi."
         order = (
-            await session.execute(
-                select(EventPurchase).where(EventPurchase.order_uid == order_uid).with_for_update()
-            )
+            await session.execute(select(EventPurchase).where(EventPurchase.order_uid == order_uid))
         ).scalar_one_or_none()
         if order is None or order.user_id != user.id or order.status != "pending" or order.price != total_amount:
             return False, "Buyurtma topilmadi yoki allaqachon ishlatilgan."

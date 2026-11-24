@@ -13,10 +13,10 @@ from services.settings_service import SettingsService
 
 logger = logging.getLogger(__name__)
 
-WELCOME_BONUS_COINS = 2_000
+WELCOME_BONUS_COINS = 40_000
 TX_NEW = "welcome_bonus"
 TX_LEGACY = "welcome_bonus_legacy"
-DONE_KEY = "welcome_bonus_legacy_migration_disabled"
+DONE_KEY = "welcome_bonus_40k_legacy_done"
 BATCH_SIZE = 300
 SEND_DELAY = 0.05  # ~20 xabar/soniya (Telegram limitidan past)
 
@@ -44,8 +44,8 @@ async def _send(bot: Bot, tg_id: int, text: str) -> bool:
             await asyncio.sleep(float(exc.retry_after) + 0.5)
         except (TelegramForbiddenError, TelegramBadRequest):
             return False  # bot bloklangan / chat yo'q
-        except Exception:
-            logger.exception("welcome bonus xabari yuborilmadi (%s)", tg_id)
+        except Exception as exc:
+            logger.warning("welcome bonus xabari yuborilmadi (%s): %s", tg_id, exc)
             return False
     return False
 

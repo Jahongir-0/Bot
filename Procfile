@@ -1,1 +1,1 @@
-web: sh docker-entrypoint.sh python -m app.main
+web: python -m app.main

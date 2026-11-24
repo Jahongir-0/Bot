@@ -157,8 +157,6 @@ class OfferService:
             if offer.owner_id != actor_owner_id:
                 return OfferResult(False, "Faqat karta egasi taklifni qabul qila oladi.")
 
-            if offer.user_card_id is None:
-                return OfferResult(False, "Taklif kartasi topilmadi yoki bekor qilingan.")
             uc = await session.get(UserCard, offer.user_card_id)
             if uc is None or uc.user_id != actor_owner_id or uc.is_locked:
                 return OfferResult(False, "Karta hozir boshqa tranzaksiyada band yoki sizga tegishli emas.")
