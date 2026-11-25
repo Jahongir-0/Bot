@@ -40,18 +40,16 @@ HELP_TEXT = (
     "Botni guruhga qo‘shing. Guruhda yashirin ismli karta rasmi tashlanadi. "
     "Xabarga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!\n\n"
     "<b>2️⃣ Bosh menyu bo‘limlari</b>\n"
-    "👤 <b>Profilim</b> — balans, daraja, VIP, yutuqlar, bezak\n"
-    "🎴 <b>Kartalarim</b> — kolleksiya, daraja oshirish, birlashtirish\n"
-    "🛒 <b>Savdo markazi</b> — bozor, auksion, almashish, sovg‘a, qidiruv, istaklar\n"
-    "🎮 <b>O‘yinlar</b> — mini o‘yinlar, viktorina, eventlar, vazifalar, paketlar\n"
-    "🎁 <b>Kunlik bonus</b> — har kuni bepul coin\n"
-    "🏆 <b>Reyting</b> — eng kuchli kolleksiyalar, boylik va daraja\n"
-    "👥 <b>Do‘stlar</b> — taklif qiling, ikkalangiz ham coin oling\n\n"
+    "👤 <b>Profilim</b> — kartalarim, istaklar, yutuqlar, vazifalar, do‘stlar, sozlamalar\n"
+    "🛒 <b>Savdo</b> — market, bot do‘koni, auksion, event, almashish, sovg‘a\n"
+    "🎮 <b>O‘yinlar</b> — mini o‘yinlar, viktorina, paketlar\n"
+    "🎁 <b>Bonus</b> — har kuni bepul coin va karta\n"
+    "🏆 <b>Reyting</b> — eng kuchli kolleksiyalar, boylik va daraja\n\n"
     "<b>3️⃣ Tezkor buyruqlar</b>\n"
     "/menu — bosh menyu · /me — profil · /cards — kartalarim\n"
     "/savdo — savdo markazi · /game — o‘yinlar · /daily — kunlik bonus\n"
-    "/givecoin @user 500 — coin yuborish · /top — reyting\n\n"
-    "💬 Savol yoki taklif bo‘lsa, <b>ALOQA</b> tugmasi orqali adminga yozing."
+    "/search — qidiruv · /givecoin @user 500 — coin yuborish · /top — reyting\n\n"
+    "💬 Savol yoki taklif bo‘lsa, <b>Aloqa</b> tugmasi orqali adminga yozing."
 )
 
 
@@ -63,8 +61,7 @@ def _home_text(db_user: User, welcome: str = WELCOME_TEXT) -> str:
         f"🪙 <b>{fmt_coins(db_user.coins)}</b> coin  ·  ⚡ <b>{db_user.level}</b>-daraja  ·  🎴 <b>{db_user.total_cards}</b> karta\n"
         "━━━━━━━━━━━━━━━\n"
         f"{welcome}\n\n"
-        "👇 <b>Bo‘limni tanlang:</b>\n"
-        "🎴 Kartalarim · 🛒 Savdo (bozor, auksion, almashish, sovg‘a) · 🎮 O‘yinlar · 🏆 Reyting"
+        "👇 <b>Bo‘limni tanlang:</b>"
     )
 
 
@@ -310,6 +307,9 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
         )
         if new_status in ("member", "administrator"):
             group.is_active = True
+            group.bot_status = "active"
+            group.left_at = None
+            group.status_reason = None
             # Haqiqiy (botlarsiz) a'zolar soni
             stats = await GroupPolicyService.fetch_member_stats(event.bot, event.chat.id)
             if stats is not None:
@@ -350,6 +350,14 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
             RankingService.invalidate_cache()
         elif new_status in ("left", "kicked"):
             group.is_active = False
+            group.bot_status = "kicked" if new_status == "kicked" else "left"
+            group.left_at = utcnow()
+            actor = event.from_user.full_name if event.from_user else "noma'lum"
+            group.status_reason = (
+                f"Bot guruhdan chiqarildi ({actor})"
+                if new_status == "kicked"
+                else f"Bot guruhdan chiqdi ({actor})"
+            )[:255]
             RankingService.invalidate_cache()
         await session.commit()
 

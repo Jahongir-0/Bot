@@ -331,11 +331,31 @@ def admin_groups_list_kb(
     page: int = 1,
     total: int = 0,
     page_size: int = 20,
+    filter_mode: str = "active",
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if section == "groups":
+        opts = [("active", "🟢 Faol"), ("left", "🗑 O‘chgan"), ("all", "📋 Hammasi")]
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=("✅ " if filter_mode == k else "") + lbl,
+                    callback_data=AdminCb(owner_id=owner_id, section="groups", action="list", extra=k, page=1).pack(),
+                )
+                for k, lbl in opts
+            ]
+        )
     total = total or len(groups)
     for g in groups:
-        st = "🚫" if getattr(g, "is_banned", False) else ("🟢" if (g.is_active and g.drop_enabled) else "🔴")
+        bot_st = getattr(g, "bot_status", "active")
+        if getattr(g, "is_banned", False):
+            st = "🚫"
+        elif bot_st in ("left", "kicked") or not g.is_active:
+            st = "🗑"
+        elif g.drop_enabled:
+            st = "🟢"
+        else:
+            st = "🔴"
         members = f" · 👥{g.member_count}" if g.member_count is not None else ""
         uname = f" @{g.username}" if getattr(g, "username", None) else ""
         builder.row(
@@ -354,11 +374,12 @@ def admin_groups_list_kb(
     if total_pages > 1:
         nav = []
         act_list = "list" if section == "groups" else "groups"
+        ext_val = filter_mode if section == "groups" else ""
         if page > 1:
-            nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, page=page - 1).pack()))
-        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, page=page).pack()))
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, extra=ext_val, page=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, extra=ext_val, page=page).pack()))
         if page < total_pages:
-            nav.append(InlineKeyboardButton(text="➡️", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, page=page + 1).pack()))
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, extra=ext_val, page=page + 1).pack()))
         builder.row(*nav)
     builder.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
@@ -487,6 +508,20 @@ def admin_settings_kb(
         InlineKeyboardButton(
             text="💸 Coin yuborish",
             callback_data=AdminCb(owner_id=owner_id, section="settings", action="cg_menu").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🏛 Bot Do‘koni",
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="bs").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="💸 Komissiyalar",
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="comm").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🔮 Birlashtirish",
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="crules", act="v").pack(),
         ),
     )
     builder.row(

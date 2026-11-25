@@ -7,9 +7,21 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from models.card import Card
 from models.market import Offer
 from models.user import User
+from models.user_card import UserCard
 from services.market_service import BotSellQuote, ListingView
 from services.search_service import GlobalCardSearchItem
-from utils.callback_data import MarketCb, NavCb, OfferCb, RankingCb, SearchCb, StarsCb, TransferCb, WishCb
+from utils.callback_data import (
+    BotStoreCb,
+    CollectionCb,
+    MarketCb,
+    NavCb,
+    OfferCb,
+    RankingCb,
+    SearchCb,
+    StarsCb,
+    TransferCb,
+    WishCb,
+)
 from utils.constants import get_rank_name_by_order, get_rarity_meta, list_rarities
 
 
@@ -61,7 +73,7 @@ def market_list_kb(
         )
     builder.row(*nav)
 
-    toggle_text = "🌐 BARCHA E'LONLAR" if my_only else "📦 MENING SOTUVLARIM"
+    toggle_text = "🌐 BARCHA E‘LONLAR" if my_only else "📦 MENING E‘LONLARIM"
     toggle_action = "list" if my_only else "my_listings"
     builder.row(
         InlineKeyboardButton(
@@ -69,13 +81,23 @@ def market_list_kb(
             callback_data=MarketCb(owner_id=owner_id, action=toggle_action, page=1).pack(),
         ),
         InlineKeyboardButton(
-            text="🤖 BOTGA SOTISH",
-            callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=1).pack(),
+            text="📩 MENING TAKLIFLARIM",
+            callback_data=OfferCb(owner_id=owner_id, action="mine", page=1).pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="⬅️ SAVDO MARKAZI",
+            text="🏛 BOT DO‘KONI",
+            callback_data=BotStoreCb(owner_id=owner_id, act="v").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🤖 BOTGA SOTISH",
+            callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=1).pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ SAVDO",
             callback_data=NavCb(owner_id=owner_id, target="savdo").pack(),
         ),
         InlineKeyboardButton(
@@ -178,6 +200,7 @@ def listing_detail_kb(
     listing_id: int,
     is_seller: bool,
     page: int = 1,
+    user_card_id: int = 0,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if is_seller:
@@ -193,17 +216,29 @@ def listing_detail_kb(
             )
         )
     else:
-        builder.row(
+        row_btns = [
             InlineKeyboardButton(
                 text="🛒 SOTIB OLISH",
                 callback_data=MarketCb(
                     owner_id=owner_id,
-                    action="buy",
+                    action="buy_ask",
                     listing_id=listing_id,
                     page=page,
                 ).pack(),
             )
-        )
+        ]
+        if user_card_id > 0:
+            row_btns.append(
+                InlineKeyboardButton(
+                    text="💰 TAKLIF BERISH",
+                    callback_data=OfferCb(
+                        owner_id=owner_id,
+                        action="prompt",
+                        user_card_id=user_card_id,
+                    ).pack(),
+                )
+            )
+        builder.row(*row_btns)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ ORQAGA",
@@ -217,8 +252,35 @@ def listing_detail_kb(
     return builder.as_markup()
 
 
+def listing_buy_confirm_kb(owner_id: int, listing_id: int, page: int = 1) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ TASDIQLASH VA OLISH",
+            callback_data=MarketCb(owner_id=owner_id, action="buy", listing_id=listing_id, page=page).pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ BEKOR QILISH",
+            callback_data=MarketCb(owner_id=owner_id, action="view", listing_id=listing_id, page=page).pack(),
+        )
+    )
+    return builder.as_markup()
+
+
 def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🎴 O‘zimni kartalarim",
+            callback_data=CollectionCb(owner_id=owner_id, action="my_search").pack(),
+        ),
+        InlineKeyboardButton(
+            text="📖 Hali hech kimda yo‘q",
+            callback_data=SearchCb(owner_id=owner_id, action="mode", mode="unowned").pack(),
+        ),
+    )
     builder.row(
         InlineKeyboardButton(
             text="🔍 Personaj ismi",
@@ -235,7 +297,7 @@ def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="rarity").pack(),
         ),
         InlineKeyboardButton(
-            text="🎴 Karta kodi (ID)",
+            text="🎴 Karta ID / Kod",
             callback_data=SearchCb(owner_id=owner_id, action="mode", mode="card_id").pack(),
         ),
     )
@@ -246,10 +308,6 @@ def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
         )
     )
     builder.row(
-        InlineKeyboardButton(
-            text="⬅️ ORQAGA",
-            callback_data=NavCb(owner_id=owner_id, target="home").pack(),
-        ),
         InlineKeyboardButton(
             text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
@@ -540,6 +598,7 @@ def search_catalog_inspect_kb(
     query: str,
     page: int,
     card_id: int = 0,
+    notify_on: bool = False,
 ) -> InlineKeyboardMarkup:
     q_short = _cb_q(query)
     builder = InlineKeyboardBuilder()
@@ -548,6 +607,13 @@ def search_catalog_inspect_kb(
             InlineKeyboardButton(
                 text="💖 ISTAKLARGA QO‘SHISH",
                 callback_data=WishCb(owner_id=owner_id, act="add", cid=card_id).pack(),
+            )
+        )
+        notif_txt = "🔕 Xabarnoma YOQILGAN (o‘chirish)" if notify_on else "🔔 Sotuv/Drop xabarnomasi"
+        builder.row(
+            InlineKeyboardButton(
+                text=notif_txt,
+                callback_data=WishCb(owner_id=owner_id, act="notif", cid=card_id).pack(),
             )
         )
     builder.row(
@@ -569,6 +635,82 @@ def search_catalog_inspect_kb(
     return builder.as_markup()
 
 
+def offer_type_kb(owner_id: int, target_uc_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🪙 Coin taklif qilish",
+            callback_data=OfferCb(owner_id=owner_id, action="coin_ask", user_card_id=target_uc_id).pack(),
+        ),
+        InlineKeyboardButton(
+            text="🎴 Karta taklif qilish",
+            callback_data=OfferCb(owner_id=owner_id, action="card_pick", offer_id=target_uc_id, page=1).pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Qidiruv", callback_data=SearchCb(owner_id=owner_id, action="menu").pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return builder.as_markup()
+
+
+def offer_card_pick_kb(
+    owner_id: int,
+    target_uc_id: int,
+    rows: List[tuple[UserCard, Card]],
+    page: int,
+    total: int,
+    page_size: int = 5,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for uc, card in rows:
+        meta = get_rarity_meta(card.rarity)
+        lv = f" L{uc.level}" if int(getattr(uc, "level", 1) or 1) > 1 else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{meta.emoji} {card.character_name[:22]}{lv} ({card.card_code})"[:60],
+                callback_data=OfferCb(
+                    owner_id=owner_id,
+                    action="card_send",
+                    offer_id=target_uc_id,
+                    user_card_id=uc.id,
+                    page=page,
+                ).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=OfferCb(owner_id=owner_id, action="card_pick", offer_id=target_uc_id, page=page - 1).pack(),
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=OfferCb(owner_id=owner_id, action="card_pick", offer_id=target_uc_id, page=page).pack(),
+            )
+        )
+        if page < total_pages:
+            nav.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=OfferCb(owner_id=owner_id, action="card_pick", offer_id=target_uc_id, page=page + 1).pack(),
+                )
+            )
+        builder.row(*nav)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Orqaga",
+            callback_data=OfferCb(owner_id=owner_id, action="prompt", user_card_id=target_uc_id).pack(),
+        ),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return builder.as_markup()
+
 
 def offer_decision_kb(owner_id: int, offer_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -588,9 +730,10 @@ def offer_decision_kb(owner_id: int, offer_id: int) -> InlineKeyboardMarkup:
 def incoming_offers_kb(owner_id: int, offers: List[tuple[Offer, Card, User]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for off, card, buyer in offers[:8]:
+        val_txt = "🎴 Karta almashuv" if getattr(off, "offer_type", "coins") == "card" else f"{off.amount:,} 🪙"
         builder.row(
             InlineKeyboardButton(
-                text=f"✅ {card.character_name} ({off.amount:,} 🪙)",
+                text=f"✅ {card.character_name[:18]} ({val_txt})"[:42],
                 callback_data=OfferCb(owner_id=owner_id, action="accept", offer_id=off.id).pack(),
             ),
             InlineKeyboardButton(
@@ -600,13 +743,39 @@ def incoming_offers_kb(owner_id: int, offers: List[tuple[Offer, Card, User]]) ->
         )
     builder.row(
         InlineKeyboardButton(
-            text="⬅️ ORQAGA",
-            callback_data=NavCb(owner_id=owner_id, target="cards").pack(),
+            text="📤 Yuborgan takliflarim",
+            callback_data=OfferCb(owner_id=owner_id, action="mine", page=1).pack(),
         ),
         InlineKeyboardButton(
             text="🏠 BOSH MENU",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
+    )
+    return builder.as_markup()
+
+
+def outgoing_offers_kb(owner_id: int, offers: List[tuple[Offer, Card, User]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for off, card, owner in offers[:8]:
+        val_txt = "🎴 Karta" if getattr(off, "offer_type", "coins") == "card" else f"{off.amount:,} 🪙"
+        builder.row(
+            InlineKeyboardButton(
+                text=f"❌ Bekor: {card.character_name[:18]} ({val_txt})"[:58],
+                callback_data=OfferCb(owner_id=owner_id, action="cancel", offer_id=off.id).pack(),
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="📩 Kelgan takliflar",
+            callback_data=OfferCb(owner_id=owner_id, action="incoming", page=1).pack(),
+        ),
+        InlineKeyboardButton(
+            text="🛒 Bozor",
+            callback_data=MarketCb(owner_id=owner_id, action="list", page=1).pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=owner_id, target="home").pack())
     )
     return builder.as_markup()
 

@@ -129,6 +129,14 @@ class EventService:
         )
         session.add(event)
         await session.flush()
+        from services.auction_wishlist_service import AuctionWishlistService
+
+        await AuctionWishlistService.notify_wishlist_watchers(
+            session,
+            card.id,
+            "event",
+            f"🎯 {card.character_name} limitli Eventga qo‘yildi! /event orqali ko‘ring.",
+        )
         return EventResult(True, "Event yaratildi.", "ok", event=event, card=card)
 
     @staticmethod
@@ -187,7 +195,14 @@ class EventService:
     # Karta berish (umumiy atomik qism)
     # ------------------------------------------------------------------
     @staticmethod
-    async def _allocate(session: AsyncSession, event: LimitedEvent, card: Card, user_id: int) -> EventResult:
+    async def _allocate(
+        session: AsyncSession,
+        event: LimitedEvent,
+        card: Card,
+        user_id: int,
+        price_coins: int = 0,
+        price_stars: int = 0,
+    ) -> EventResult:
         """Nusxani atomik band qiladi va userga beradi. Coin reward BERILMAYDI (event karta)."""
         if await UserService.owns_card(session, user_id, card.id):
             return EventResult(False, OWN_MSG, "owned", event=event, card=card)
@@ -224,6 +239,8 @@ class EventService:
                 acquired_via="event",
                 card_state="OWNED",
                 level=target_lvl,
+                acquired_price_coins=max(0, int(price_coins or 0)),
+                acquired_price_stars=max(0, int(price_stars or 0)),
             )
             session.add(uc)
             await session.flush()
@@ -274,7 +291,9 @@ class EventService:
 
         try:
             async with session.begin_nested():
-                res = await EventService._allocate(session, event, card, user.id)
+                res = await EventService._allocate(
+                    session, event, card, user.id, price_coins=int(event.price_coins)
+                )
                 if not res.success:
                     return res
                 await UserService.debit_coins(
@@ -392,7 +411,9 @@ class EventService:
             return EventResult(False, "Event topilmadi.", "refund")
         event, card = pair
 
-        res = await EventService._allocate(session, event, card, user.id)
+        res = await EventService._allocate(
+            session, event, card, user.id, price_stars=int(event.price_stars or total_amount)
+        )
         if not res.success:
             res.code = "refund"
             return res

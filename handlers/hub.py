@@ -16,13 +16,13 @@ SAVDO_TEXT = (
     "🛒 <b>SAVDO MARKAZI</b>\n"
     "━━━━━━━━━━━━━━━\n"
     "Kartalaringiz bilan nima qilmoqchisiz?\n\n"
-    "🛒 <b>Bozor</b> — kartalarni belgilangan narxda sotib oling yoki soting\n"
-    "🔨 <b>Auksion</b> — eng yuqori taklif bergan karta egasi bo‘ladi\n"
+    "🛒 <b>Market</b> — foydalanuvchilar bilan karta sotib oling yoki soting\n"
+    "🏛 <b>Bot Do‘koni</b> — kartani botga soting yoki bot zaxirasidan sotib oling\n"
+    "🔨 <b>Auksion</b> — eng yuqori stavka bergan karta egasi bo‘ladi\n"
+    "🎯 <b>Event</b> — cheklangan maxsus kartalar\n"
     "🤝 <b>Almashish</b> — do‘stingiz bilan karta kartaga almashing\n"
-    "🎁 <b>Sovg‘a berish</b> — do‘stga karta yoki coin yuboring\n"
-    "🔍 <b>Qidiruv</b> — kerakli kartani nomi bo‘yicha toping\n"
-    "💖 <b>Istaklar</b> — yig‘moqchi bo‘lgan kartalar ro‘yxati\n\n"
-    "💡 <i>Kartangizni sotish yoki auksionga qo‘yish: 🎴 Kartalarim → kartani tanlang.</i>"
+    "🎁 <b>Sovg‘a berish</b> — do‘stga karta yoki coin yuboring\n\n"
+    "💡 <i>O‘z kartangizni sotish/auksionga qo‘yish: 👤 Profilim → 🎴 Kartalarim.</i>"
 )
 
 

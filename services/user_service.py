@@ -95,6 +95,9 @@ class UserService:
                 title=clean_title,
                 username=username,
                 is_active=True,
+                bot_status="active",
+                left_at=None,
+                status_reason=None,
             )
             try:
                 # SAVEPOINT: bir guruhdan ikki xabar bir vaqtda kelsa, unique xatosi butun sessiyani buzmasin
@@ -110,12 +113,18 @@ class UserService:
                     group.title = clean_title
                 group.username = username
                 group.is_active = True
+                group.bot_status = "active"
+                group.left_at = None
+                group.status_reason = None
                 await session.flush()
         else:
             if title:
                 group.title = clean_title
             group.username = username
             group.is_active = True
+            group.bot_status = "active"
+            group.left_at = None
+            group.status_reason = None
             await session.flush()
 
         if user_id is not None:
@@ -188,6 +197,39 @@ class UserService:
             .limit(1)
         )
         return res.scalar_one_or_none()
+
+    @staticmethod
+    async def search_users_list(
+        session: AsyncSession,
+        query: str,
+        exclude_user_id: Optional[int] = None,
+        limit: int = 8,
+    ) -> list[User]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        conds = [User.is_banned.is_(False)]
+        if exclude_user_id is not None:
+            conds.append(User.id != exclude_user_id)
+        if q.isdigit():
+            conds.append(User.telegram_id == int(q))
+        else:
+            uname = q.lstrip("@").lower()
+            conds.append(
+                or_(
+                    func.lower(User.username).ilike(f"%{uname}%"),
+                    User.first_name.ilike(f"%{q}%"),
+                )
+            )
+        rows = (
+            await session.execute(
+                select(User)
+                .where(*conds)
+                .order_by(User.last_activity.desc(), User.id.asc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        return list(rows)
 
     @staticmethod
     async def credit_coins(
@@ -295,12 +337,17 @@ class UserService:
             return None
         if new_user.referred_by_id is not None or new_user.total_cards > 0:
             return None
-        if new_user.created_at and (utcnow() - ensure_utc(new_user.created_at)) > timedelta(minutes=3):
+        if new_user.created_at and (utcnow() - ensure_utc(new_user.created_at)) > timedelta(minutes=10):
             return None
 
         has_tx = (
             await session.execute(
-                select(CoinTransaction.id).where(CoinTransaction.user_id == new_user.id).limit(1)
+                select(CoinTransaction.id)
+                .where(
+                    CoinTransaction.user_id == new_user.id,
+                    CoinTransaction.tx_type != TX_NEW,
+                )
+                .limit(1)
             )
         ).first()
         if has_tx is not None:
@@ -416,15 +463,20 @@ class UserService:
             if upd_card.rowcount == 1:
                 epic_card.drop_limit = 0
                 epic_card.drop_weight = 0
-                session.add(
-                    UserCard(
-                        user_id=adder.id,
-                        card_id=epic_card.id,
-                        acquired_via="group_reward",
-                        acquired_group_id=group.id,
-                    )
+                from services.card_level_service import CardLevelService
+
+                rcfg = await SettingsService.get_rarity_config(session)
+                rank_val = CardLevelService.rank_value_for_card(epic_card, rcfg)
+                new_uc = UserCard(
+                    user_id=adder.id,
+                    card_id=epic_card.id,
+                    acquired_via="group_reward",
+                    acquired_group_id=group.id,
+                    acquired_price_coins=rank_val,
                 )
+                session.add(new_uc)
                 await session.flush()
+                new_uc.serial_number = 10000 + new_uc.id
                 await UserService.recompute_card_counts(session, adder.id, add_xp=50)
             else:
                 epic_card = None

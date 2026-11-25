@@ -46,6 +46,9 @@ class Group(Base, TimestampMixin):
     is_banned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     ban_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ban_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    bot_status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active", index=True)
+    left_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
 class GroupMember(Base, TimestampMixin):

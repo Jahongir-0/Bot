@@ -5,20 +5,25 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from models.card import Card
+from models.group import Group
 from models.user import User
 from models.user_card import UserCard
-from models.v2_features import AdminRole, Auction, Quiz, QuizQuestion, SupportTicket
+from models.v2_features import Achievement, AdminRole, Auction, BotStoreListing, Quiz, QuizQuestion, SupportTicket
+from services.market_service import BotSellQuote
 from utils.callback_data import (
     AchCb,
     AdmV2Cb,
     AdminCb,
     AucCb,
+    BotStoreCb,
     GameCb,
     NavCb,
     NotifCb,
     PackCb,
     QuizCb,
+    SuggestCb,
     SupCb,
+    TradeCb,
     VipCb,
     WishCb,
 )
@@ -80,6 +85,33 @@ def admin_v2_hub_kb(owner_id: int, cat_key: str, allowed_sections: Set[str]) -> 
                     callback_data=_admin_section_cb(owner_id, sec_key),
                 )
             )
+    if cat_key == "cards_evt" and "cards" in allowed_sections:
+        btns.append(
+            InlineKeyboardButton(
+                text="💡 Karta takliflari",
+                callback_data=SuggestCb(owner_id=owner_id, act="adm", p=1).pack(),
+            )
+        )
+    if cat_key == "gameplay" and "settings" in allowed_sections:
+        btns.append(
+            InlineKeyboardButton(
+                text="🏛 Bot Do‘koni",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="bs").pack(),
+            )
+        )
+        btns.append(
+            InlineKeyboardButton(
+                text="💸 Komissiyalar",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="comm").pack(),
+            )
+        )
+    if cat_key == "system" and "settings" in allowed_sections:
+        btns.append(
+            InlineKeyboardButton(
+                text="💸 Komissiyalar",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="comm").pack(),
+            )
+        )
     for i in range(0, len(btns), 2):
         builder.row(*btns[i : i + 2])
     builder.row(
@@ -108,6 +140,9 @@ def admin_v2_cards_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="♻️ O‘chirilganlar", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext="deleted", p=1).pack()),
     )
     b.row(
+        InlineKeyboardButton(text="💡 Karta takliflari", callback_data=SuggestCb(owner_id=owner_id, act="adm", p=1).pack()),
+    )
+    b.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
@@ -124,6 +159,9 @@ def admin_v2_add_choice_kb(owner_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📦 ZIP yuklash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="zip").pack()),
     )
     b.row(
+        InlineKeyboardButton(text="📋 Matn / CSV / JSON (ZIP-siz)", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="batch").pack()),
+    )
+    b.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()),
     )
     return b.as_markup()
@@ -133,6 +171,8 @@ def _view_tabs_rows(builder: InlineKeyboardBuilder, owner_id: int, active_tab: s
     tabs = [
         ("sent_group", "Tushganlar"),
         ("not_sent", "Tushmaganlar"),
+        ("owned", "Userda bor"),
+        ("in_auction", "Auksionda"),
         ("anime", "Anime"),
         ("manga", "Manga"),
         ("movie", "Kino"),
@@ -301,33 +341,25 @@ def admin_v2_card_detail_kb(owner_id: int, card: Card, tab: str = "all", page: i
     if card.dropped_count == 0 and not card.is_event_card and not card.is_deleted:
         preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
         b.row(
-            InlineKeyboardButton(
-                text="⬇️ Lvl -1",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="lvl_dec", tid=card.id, ext=tab, p=page).pack(),
-            ),
-            InlineKeyboardButton(
-                text=f"⭐ Lvl {preset_lvl}",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="lvl_info", tid=card.id, ext=tab, p=page).pack(),
-            ),
-            InlineKeyboardButton(
-                text="⬆️ Lvl +1",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="lvl_inc", tid=card.id, ext=tab, p=page).pack(),
-            ),
-        )
-        b.row(
-            InlineKeyboardButton(
-                text="🎯 Eventga",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="evt_go", tid=card.id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="🎁 Userga berish",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card.id, ext=tab, p=1).pack(),
-            ),
+            InlineKeyboardButton(text="➖ Lvl", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="lvl_dec", tid=card.id, ext=tab, p=page).pack()),
+            InlineKeyboardButton(text=f"⭐ Lvl {preset_lvl}", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="lvl_info", tid=card.id).pack()),
+            InlineKeyboardButton(text="➕ Lvl", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="lvl_inc", tid=card.id, ext=tab, p=page).pack()),
         )
         b.row(
             InlineKeyboardButton(
                 text="📤 Guruhga tashlash",
                 callback_data=AdminCb(owner_id=owner_id, section="cards", action="drop_pick_grp", target_id=card.id, page=page).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🎯 Event",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="evt_go", tid=card.id).pack(),
+            ),
+        )
+    if not card.is_deleted:
+        b.row(
+            InlineKeyboardButton(
+                text="🎁 Userga berish",
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card.id, ext=tab, p=1).pack(),
             )
         )
     b.row(
@@ -340,61 +372,6 @@ def admin_v2_card_detail_kb(owner_id: int, card: Card, tab: str = "all", page: i
         )
     b.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext=tab, p=page).pack()),
-        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
-    )
-    return b.as_markup()
-
-
-def admin_card_give_users_kb(
-    owner_id: int,
-    card_id: int,
-    users: List[User],
-    page: int,
-    total: int,
-    current_admin_tg_id: int,
-    back_tab: str = "all",
-    page_size: int = 12,
-    query: str = "",
-) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.row(
-        InlineKeyboardButton(
-            text="🔍 Qidirish (ID / @user / ism)",
-            callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_us", tid=card_id, ext=back_tab).pack(),
-        )
-    )
-    for u in users:
-        if u.telegram_id == current_admin_tg_id:
-            lbl = f"👑 {u.display_name[:22]} (Men / O‘zim)"
-        else:
-            lbl = f"👤 {u.display_name[:26]} ({u.telegram_id})"
-        b.row(
-            InlineKeyboardButton(
-                text=lbl[:60],
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_go", tid=card_id, ext=str(u.id), p=page).pack(),
-            )
-        )
-    if not query:
-        total_pages = max(1, math.ceil(total / page_size))
-        nav = []
-        if page > 1:
-            nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=page - 1).pack()))
-        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=page).pack()))
-        if page < total_pages:
-            nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=page + 1).pack()))
-        b.row(*nav)
-    else:
-        b.row(
-            InlineKeyboardButton(
-                text="📋 Barcha userlar",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=1).pack(),
-            )
-        )
-    b.row(
-        InlineKeyboardButton(
-            text="⬅️ Karta",
-            callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="card_det", tid=card_id, ext=back_tab, p=1).pack(),
-        ),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
     return b.as_markup()
@@ -616,7 +593,7 @@ def quiz_list_kb(owner_id: int, quizzes: List[Quiz]) -> InlineKeyboardMarkup:
         b.row(
             InlineKeyboardButton(
                 text=f"🧠 {q.title[:30]} (+{q.reward_coins:,} 🪙)",
-                callback_data=QuizCb(owner_id=owner_id, act="intro", qid=q.id).pack(),
+                callback_data=QuizCb(owner_id=owner_id, act="play", qid=q.id).pack(),
             )
         )
     b.row(
@@ -651,41 +628,62 @@ def games_menu_kb(
     can_bowling: bool = True,
     can_basket: bool = True,
     can_chest: bool = True,
+    can_seq: bool = True,
 ) -> InlineKeyboardMarkup:
-    """O‘yinlar menyusi: 2 ustunli tartib (ochiq o‘yinlar ketma-ket joylashadi)."""
     b = InlineKeyboardBuilder()
-
-    def _g(act: str, text: str, extra: str = "") -> InlineKeyboardButton:
-        return InlineKeyboardButton(text=text, callback_data=GameCb(owner_id=owner_id, act=act, extra=extra).pack())
-
-    buttons = []
+    btns: List[InlineKeyboardButton] = []
+    if can_seq:
+        btns.append(InlineKeyboardButton(text="🧠 Xotira Zanjiri", callback_data=GameCb(owner_id=owner_id, act="seq").pack()))
     if can_slots:
-        buttons.append(_g("slots", "🎰 Slot 777"))
+        btns.append(InlineKeyboardButton(text="🎰 Slot 777", callback_data=GameCb(owner_id=owner_id, act="slots").pack()))
     if can_mines:
-        buttons.append(_g("mines", "💣 Xazina ovi"))
+        btns.append(InlineKeyboardButton(text="💣 Xazina ovi", callback_data=GameCb(owner_id=owner_id, act="mines").pack()))
     if can_wheel:
-        buttons.append(_g("wheel", "🎡 Omad g‘ildiragi"))
+        btns.append(InlineKeyboardButton(text="🎡 Omad g‘ildiragi", callback_data=GameCb(owner_id=owner_id, act="wheel").pack()))
     if can_chest:
-        buttons.append(_g("chest", "📦 Sirli sandiq"))
+        btns.append(InlineKeyboardButton(text="📦 Sirli sandiq", callback_data=GameCb(owner_id=owner_id, act="chest").pack()))
     if can_dart:
-        buttons.append(_g("an", "🎯 Dart", "dart"))
+        btns.append(InlineKeyboardButton(text="🎯 Dart", callback_data=GameCb(owner_id=owner_id, act="an", extra="dart").pack()))
     if can_bowling:
-        buttons.append(_g("an", "🎳 Boulling", "bowling"))
+        btns.append(InlineKeyboardButton(text="🎳 Boulling", callback_data=GameCb(owner_id=owner_id, act="an", extra="bowling").pack()))
     if can_basket:
-        buttons.append(_g("an", "🏀 Basketbol", "basket"))
+        btns.append(InlineKeyboardButton(text="🏀 Basketbol", callback_data=GameCb(owner_id=owner_id, act="an", extra="basket").pack()))
     if can_dice:
-        buttons.append(_g("dice", "🎲 Tosh o‘yini"))
+        btns.append(InlineKeyboardButton(text="🎲 Tosh o‘yini", callback_data=GameCb(owner_id=owner_id, act="dice").pack()))
     if can_flip:
-        buttons.append(_g("flip", "🪙 Tanga (2x)"))
+        btns.append(InlineKeyboardButton(text="🪙 Tanga (2x)", callback_data=GameCb(owner_id=owner_id, act="flip").pack()))
     if can_lucky:
-        buttons.append(_g("lucky", "🃏 Omadli karta"))
-    if buttons:
-        b.add(*buttons)
-        b.adjust(2)
-    b.row(
-        InlineKeyboardButton(text="🎁 Paketlar", callback_data=NavCb(owner_id=owner_id, target="packs").pack()),
-        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
-    )
+        btns.append(InlineKeyboardButton(text="🃏 Omadli karta", callback_data=GameCb(owner_id=owner_id, act="lucky").pack()))
+    for i in range(0, len(btns), 2):
+        b.row(*btns[i : i + 2])
+    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    return b.as_markup()
+
+
+def seq_bet_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for bet in (50, 100, 250, 500):
+        b.add(
+            InlineKeyboardButton(
+                text=f"🧠 {bet} 🪙",
+                callback_data=GameCb(owner_id=owner_id, act="seq_go", val=bet).pack(),
+            )
+        )
+    b.adjust(2)
+    b.row(InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    return b.as_markup()
+
+
+def seq_pad_kb(owner_id: int, runes: tuple[str, ...]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for idx, sym in enumerate(runes):
+        b.add(
+            InlineKeyboardButton(
+                text=sym,
+                callback_data=GameCb(owner_id=owner_id, act="seq_tap", val=idx).pack(),
+            )
+        )
+    b.adjust(3)
     return b.as_markup()
 
 
@@ -828,10 +826,7 @@ def packs_menu_kb(owner_id: int, can_open: bool = True) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎮 Mini o‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
             InlineKeyboardButton(text="🛒 Bozor", callback_data=NavCb(owner_id=owner_id, target="market").pack()),
         )
-    b.row(
-        InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=NavCb(owner_id=owner_id, target="grp_play").pack()),
-        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
-    )
+    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
     return b.as_markup()
 
 
@@ -842,8 +837,24 @@ def auctions_list_kb(
     total: int = 0,
     page_size: int = 10,
     my_only: bool = False,
+    owner_filter: str = "all",
 ) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
+    if not my_only:
+        b.row(
+            InlineKeyboardButton(
+                text=("✅ " if owner_filter == "all" else "") + "Hammasi",
+                callback_data=AucCb(owner_id=owner_id, act="v", p=1).pack(),
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if owner_filter == "users" else "") + "👤 Userlar",
+                callback_data=AucCb(owner_id=owner_id, act="f_usr", p=1).pack(),
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if owner_filter == "admin" else "") + "🏛 Adminlar",
+                callback_data=AucCb(owner_id=owner_id, act="f_adm", p=1).pack(),
+            ),
+        )
     for auc, card in items:
         meta = get_rarity_meta(card.rarity)
         b.row(
@@ -854,7 +865,11 @@ def auctions_list_kb(
         )
     total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
     if total_pages > 1:
-        list_act = "mine" if my_only else "v"
+        list_act = (
+            "mine"
+            if my_only
+            else ("f_usr" if owner_filter == "users" else ("f_adm" if owner_filter == "admin" else "v"))
+        )
         nav = []
         if page > 1:
             nav.append(InlineKeyboardButton(text="⬅️", callback_data=AucCb(owner_id=owner_id, act=list_act, p=page - 1).pack()))
@@ -870,7 +885,7 @@ def auctions_list_kb(
         ),
     )
     b.row(
-        InlineKeyboardButton(text="⬅️ Savdo markazi", callback_data=NavCb(owner_id=owner_id, target="savdo").pack()),
+        InlineKeyboardButton(text="⬅️ Savdo", callback_data=NavCb(owner_id=owner_id, target="savdo").pack()),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
     return b.as_markup()
@@ -957,19 +972,96 @@ def auction_detail_kb(owner_id: int, auc: Auction, is_seller: bool = False) -> I
     return b.as_markup()
 
 
-def wishlist_kb(owner_id: int, cards: List[Card]) -> InlineKeyboardMarkup:
+def wishlist_kb(
+    owner_id: int,
+    cards: List[Card],
+    page: int = 1,
+    total: int = 0,
+    page_size: int = 5,
+) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for c in cards[:15]:
+    for c in cards:
         meta = get_rarity_meta(c.rarity)
         b.row(
             InlineKeyboardButton(
-                text=f"💔 {meta.emoji} {c.character_name[:28]} ({c.card_code})",
-                callback_data=WishCb(owner_id=owner_id, act="del", cid=c.id).pack(),
+                text=f"💔 {meta.emoji} {c.character_name[:26]} ({c.card_code})"[:60],
+                callback_data=WishCb(owner_id=owner_id, act="del", cid=c.id, p=page).pack(),
             )
         )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=WishCb(owner_id=owner_id, act="v", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=WishCb(owner_id=owner_id, act="v", p=page).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=WishCb(owner_id=owner_id, act="v", p=page + 1).pack()))
+        b.row(*nav)
     b.row(
-        InlineKeyboardButton(text="🔥 Eng ko‘p izlanayotganlar", callback_data=WishCb(owner_id=owner_id, act="top").pack()),
-        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+        InlineKeyboardButton(text="➕ Karta qo‘shish taklifi", callback_data=SuggestCb(owner_id=owner_id, act="new").pack()),
+        InlineKeyboardButton(text="🔥 Eng ko‘p izlangan", callback_data=WishCb(owner_id=owner_id, act="top", p=1).pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text="⬅️ Profilim", callback_data=NavCb(owner_id=owner_id, target="profile").pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return b.as_markup()
+
+
+def wishlist_top_kb(
+    owner_id: int,
+    items: List[Tuple[Card, int]],
+    page: int = 1,
+    total: int = 0,
+    page_size: int = 5,
+) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for c, cnt in items:
+        meta = get_rarity_meta(c.rarity)
+        b.row(
+            InlineKeyboardButton(
+                text=f"💖 {meta.emoji} {c.character_name[:22]} — {cnt} ta"[:60],
+                callback_data=WishCb(owner_id=owner_id, act="add", cid=c.id, p=page).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=WishCb(owner_id=owner_id, act="top", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=WishCb(owner_id=owner_id, act="top", p=page).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=WishCb(owner_id=owner_id, act="top", p=page + 1).pack()))
+        b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="⬅️ Istaklarim", callback_data=WishCb(owner_id=owner_id, act="v", p=1).pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return b.as_markup()
+
+
+def suggest_media_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    types = ["Anime", "Manga", "Manhwa", "Kino", "Game", "Boshqa"]
+    for i in range(0, len(types), 2):
+        b.row(
+            *[
+                InlineKeyboardButton(
+                    text=mt,
+                    callback_data=SuggestCb(owner_id=owner_id, act="med", ext=mt).pack(),
+                )
+                for mt in types[i : i + 2]
+            ]
+        )
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=WishCb(owner_id=owner_id, act="v", p=1).pack()))
+    return b.as_markup()
+
+
+def suggest_note_skip_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="⏭ Izohsiz yuborish", callback_data=SuggestCb(owner_id=owner_id, act="skip").pack()),
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data=WishCb(owner_id=owner_id, act="v", p=1).pack()),
     )
     return b.as_markup()
 
@@ -1044,7 +1136,23 @@ def support_menu_kb(owner_id: int, tickets: List[SupportTicket]) -> InlineKeyboa
                 callback_data=SupCb(owner_id=owner_id, act="view", tid=t.id).pack(),
             )
         )
-    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    b.row(InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    return b.as_markup()
+
+
+def support_ticket_detail_kb(owner_id: int, ticket: SupportTicket) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    if ticket.status != "closed":
+        b.row(
+            InlineKeyboardButton(
+                text="💬 Yana yozish / Media yuborish",
+                callback_data=SupCb(owner_id=owner_id, act="reply", tid=ticket.id).pack(),
+            )
+        )
+    b.row(
+        InlineKeyboardButton(text="⬅️ Murojaatlar", callback_data=SupCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
     return b.as_markup()
 
 
@@ -1055,3 +1163,162 @@ def notifications_kb(owner_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
     return b.as_markup()
+
+
+def bot_store_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🛒 Do‘kondan olish", callback_data=BotStoreCb(owner_id=owner_id, act="buy_list", p=1).pack()),
+        InlineKeyboardButton(text="🤖 Botga sotish", callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=1).pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text="⬅️ Savdo", callback_data=NavCb(owner_id=owner_id, target="savdo").pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return b.as_markup()
+
+
+def bot_store_list_kb(
+    owner_id: int,
+    items: List[Tuple[BotStoreListing, Card]],
+    page: int = 1,
+    total: int = 0,
+    page_size: int = 5,
+) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for listing, card in items:
+        meta = get_rarity_meta(card.rarity)
+        lv = f" L{listing.card_level}" if int(listing.card_level or 1) > 1 else ""
+        b.row(
+            InlineKeyboardButton(
+                text=f"{meta.emoji} {card.character_name[:22]}{lv} — {listing.price_coins:,} 🪙"[:60],
+                callback_data=BotStoreCb(owner_id=owner_id, act="buy_det", lid=listing.id, p=page).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=BotStoreCb(owner_id=owner_id, act="buy_list", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=BotStoreCb(owner_id=owner_id, act="buy_list", p=page).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=BotStoreCb(owner_id=owner_id, act="buy_list", p=page + 1).pack()))
+        b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="🤖 Botga sotish", callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=1).pack()),
+        InlineKeyboardButton(text="⬅️ Bot Do‘koni", callback_data=BotStoreCb(owner_id=owner_id, act="v").pack()),
+    )
+    b.row(InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    return b.as_markup()
+
+
+def bot_store_detail_kb(owner_id: int, listing: BotStoreListing, page: int = 1) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(
+            text=f"🛒 SOTIB OLISH ({listing.price_coins:,} 🪙)",
+            callback_data=BotStoreCb(owner_id=owner_id, act="buy_go", lid=listing.id, p=page).pack(),
+        )
+    )
+    b.row(
+        InlineKeyboardButton(text="⬅️ Ro‘yxat", callback_data=BotStoreCb(owner_id=owner_id, act="buy_list", p=page).pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return b.as_markup()
+
+
+def bot_store_sell_list_kb(
+    owner_id: int,
+    quotes: List[BotSellQuote],
+    page: int = 1,
+    total: int = 0,
+    page_size: int = 5,
+) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for q in quotes:
+        meta = get_rarity_meta(q.card.rarity)
+        fav = "❤️ " if q.is_favorite else ""
+        lv = f" L{q.level}" if q.level > 1 else ""
+        b.row(
+            InlineKeyboardButton(
+                text=f"{fav}{meta.emoji} {q.card.character_name[:20]}{lv} — {q.total_price:,} 🪙"[:60],
+                callback_data=BotStoreCb(owner_id=owner_id, act="sell_det", lid=q.user_card_id, p=page).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=page).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=page + 1).pack()))
+        b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="🛒 Do‘kondan olish", callback_data=BotStoreCb(owner_id=owner_id, act="buy_list", p=1).pack()),
+        InlineKeyboardButton(text="⬅️ Bot Do‘koni", callback_data=BotStoreCb(owner_id=owner_id, act="v").pack()),
+    )
+    b.row(InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    return b.as_markup()
+
+
+def bot_store_sell_confirm_kb(
+    owner_id: int,
+    user_card_id: int,
+    total_price: int,
+    page: int = 1,
+) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(
+            text=f"✅ SOTISH (+{total_price:,} 🪙)",
+            callback_data=BotStoreCb(owner_id=owner_id, act="sell_go", lid=user_card_id, p=page).pack(),
+        )
+    )
+    b.row(
+        InlineKeyboardButton(text="❌ BEKOR QILISH", callback_data=BotStoreCb(owner_id=owner_id, act="sell_list", p=page).pack()),
+    )
+    return b.as_markup()
+
+
+def admin_card_give_users_kb(
+    owner_id: int,
+    card_id: int,
+    users: List[User],
+    page: int = 1,
+    total: int = 0,
+    current_admin_tg_id: int = 0,
+    back_tab: str = "all",
+    page_size: int = 12,
+    query: str = "",
+) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(
+            text="🔍 User qidirish (ID / @user)",
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_us", tid=card_id, ext=back_tab, p=1).pack(),
+        )
+    )
+    for u in users:
+        self_tag = "👑 (O‘zingiz) " if current_admin_tg_id and u.telegram_id == current_admin_tg_id else "👤 "
+        b.row(
+            InlineKeyboardButton(
+                text=f"{self_tag}{u.display_name[:26]} ({u.telegram_id})"[:60],
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_go", tid=card_id, ext=str(u.id), p=page).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1 and not query:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=page).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="give_u", tid=card_id, ext=back_tab, p=page + 1).pack()))
+        b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="⬅️ Kartaga qaytish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="card_det", tid=card_id, ext=back_tab, p=1).pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
+    return b.as_markup()
+

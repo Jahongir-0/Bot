@@ -164,8 +164,24 @@ def admin_evt_duration_kb(owner_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def admin_evt_confirm_kb(owner_id: int) -> InlineKeyboardMarkup:
+def admin_evt_confirm_kb(owner_id: int, target: str = "all") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    opts = [
+        ("groups", "🏰 Guruhlarga"),
+        ("users", "👤 Userlarga"),
+        ("all", "🌍 Ikkalasiga"),
+        ("none", "🔇 E’lonsiz"),
+    ]
+    for i in range(0, len(opts), 2):
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=("✅ " if target == k else "") + lbl,
+                    callback_data=AdminCb(owner_id=owner_id, section="evt", action="etgt", extra=k).pack(),
+                )
+                for k, lbl in opts[i : i + 2]
+            ]
+        )
     builder.row(
         InlineKeyboardButton(
             text="✅ EVENTNI BOSHLASH",

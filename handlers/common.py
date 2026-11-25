@@ -12,3 +12,7 @@ class V2UserStates(StatesGroup):
     waiting_support_body = State()
     waiting_support_reply = State()
     waiting_trade_partner = State()
+    waiting_suggest_anime = State()
+    waiting_suggest_char = State()
+    waiting_suggest_note = State()
+

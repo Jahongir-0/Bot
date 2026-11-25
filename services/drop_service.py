@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy import and_, delete, exists, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,12 +75,14 @@ class DropService:
             and (now - ensure_utc(updated)) < timedelta(hours=max_age_hours)
         ):
             return group.member_count
-        from services.group_policy_service import GroupPolicyService
-
-        stats = await GroupPolicyService.fetch_member_stats(bot, group.telegram_chat_id)
-        if stats is None:
+        try:
+            count = int(await bot.get_chat_member_count(group.telegram_chat_id))
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            logger.warning("get_chat_member_count failed for %s: %s", group.telegram_chat_id, exc)
             return group.member_count
-        count = stats.real  # botlarsiz, haqiqiy odamlar
+        except Exception as exc:  # tarmoq xatolari
+            logger.warning("get_chat_member_count error for %s: %s", group.telegram_chat_id, exc)
+            return group.member_count
         group.member_count = count
         group.member_count_updated_at = now
         return count
@@ -194,11 +197,6 @@ class DropService:
             group.daily_drop_count = count  # admin panelida ko'rinadigan joriy kunlik son
         else:
             count = max(0, int(group.daily_drop_count))
-
-        # Guruhda a'zolar admin belgilagan minimumdan kam bo'lsa karta tushmaydi
-        min_members = max(0, int(rules.get("min_members", 0)))
-        if min_members and group.member_count is not None and int(group.member_count) < min_members:
-            count = 0
 
         if force_regenerate:
             # Bugun allaqachon tashlangan kartalar sonini jami kunlik sondan ayiramiz
@@ -356,6 +354,14 @@ class DropService:
         )
         session.add(drop)
         await session.flush()
+        from services.auction_wishlist_service import AuctionWishlistService
+
+        await AuctionWishlistService.notify_wishlist_watchers(
+            session,
+            card.id,
+            "drop",
+            f"🎴 Istagan kartangiz ({card.character_name}) hozirgina guruhlardan biriga drop bo‘ldi!",
+        )
         return drop
 
     @staticmethod
@@ -536,6 +542,7 @@ class DropService:
                         acquired_via="drop",
                         acquired_group_id=drop.group_id,
                         card_state="OWNED",
+                        acquired_price_coins=0,
                     )
                     session.add(uc)
                     await session.flush()

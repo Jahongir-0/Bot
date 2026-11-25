@@ -11,6 +11,7 @@ from models.card import Card
 from models.market import Offer, PendingTransfer
 from models.user import User
 from models.user_card import UserCard
+from services.settings_service import SettingsService
 from services.user_service import InsufficientCoinsError, UserService
 
 
@@ -22,6 +23,8 @@ class TransferResult:
     card: Optional[Card] = None
     from_user: Optional[User] = None
     to_user: Optional[User] = None
+    fee_coins: int = 0
+    fee_pct: int = 0
     is_duplicate: bool = False
     level_before: int = 0
     level_after: int = 0
@@ -55,7 +58,7 @@ class TransferService:
                     UserCard.user_id == from_user_id,
                     UserCard.is_locked.is_(False),
                 )
-                .values(is_locked=True, updated_at=utcnow())
+                .values(is_locked=True, card_state="TRANSFER", updated_at=utcnow())
             )
             if upd.rowcount != 1:
                 return TransferResult(
@@ -102,7 +105,7 @@ class TransferService:
             if trf is None or trf.status != "pending":
                 return TransferResult(False, "Transfer topilmadi yoki allaqachon yakunlangan.")
 
-            # For paid transfers, recipient must confirm (pays coins); for free gifts, sender confirms
+            # For paid transfers, recipient must confirm (pays coins); for free gifts, sender OR recipient if needed -> keep expected_actor
             expected_actor = trf.to_user_id if trf.price > 0 else trf.from_user_id
             if actor_user_id != expected_actor:
                 return TransferResult(False, "Bu transferni tasdiqlash huquqingiz yo‘q.")
@@ -131,7 +134,11 @@ class TransferService:
             from_user = await session.get(User, trf.from_user_id)
             to_user = await session.get(User, trf.to_user_id)
 
+            fee_coins, fee_pct = 0, 0
             if trf.price > 0:
+                comm_cfg = await SettingsService.get_commission_config(session)
+                fee_coins, fee_pct = SettingsService.compute_commission(trf.price, comm_cfg, "card_gift")
+                seller_payout = max(1, int(trf.price) - fee_coins)
                 try:
                     await UserService.debit_coins(
                         session=session,
@@ -147,13 +154,15 @@ class TransferService:
                 await UserService.credit_coins(
                     session=session,
                     user_id=trf.from_user_id,
-                    amount=trf.price,
+                    amount=seller_payout,
                     tx_type="paid_transfer_sell",
-                    description=f"Paid transfer received for {card.character_name}",
+                    description=f"Paid transfer received for {card.character_name}"
+                    + (f" (-{fee_pct}% komissiya)" if fee_coins else ""),
                     reference_id=f"trf:{trf.id}",
+                    meta={"commission": fee_coins, "pct": fee_pct},
                 )
 
-            # Refund any open offers on this card instance BEFORE possible deletion (FK CASCADE)
+            # Refund/unlock any open offers on this card instance BEFORE possible deletion (FK CASCADE)
             pending_offers = (
                 await session.execute(
                     select(Offer).where(Offer.user_card_id == trf.user_card_id, Offer.status == "pending")
@@ -162,14 +171,21 @@ class TransferService:
             for off in pending_offers:
                 off.status = "cancelled"
                 off.resolved_at = now
-                await UserService.credit_coins(
-                    session=session,
-                    user_id=off.buyer_id,
-                    amount=off.amount,
-                    tx_type="offer_refund",
-                    description="Card transferred - offer refunded",
-                    reference_id=f"offer:{off.id}",
-                )
+                if getattr(off, "offer_type", "coins") == "card" and getattr(off, "offered_user_card_id", None):
+                    await session.execute(
+                        update(UserCard)
+                        .where(UserCard.id == off.offered_user_card_id)
+                        .values(is_locked=False, card_state="OWNED", updated_at=now)
+                    )
+                elif int(off.amount or 0) > 0:
+                    await UserService.credit_coins(
+                        session=session,
+                        user_id=off.buyer_id,
+                        amount=off.amount,
+                        tx_type="offer_refund",
+                        description="Card transferred - offer refunded",
+                        reference_id=f"offer:{off.id}",
+                    )
 
             dup = None
             if await UserService.owns_card(session, trf.to_user_id, card.id):
@@ -180,6 +196,7 @@ class TransferService:
                     await session.delete(uc)
                     await session.flush()
             else:
+                new_price_coins = int(trf.price) if trf.price > 0 else int(getattr(uc, "acquired_price_coins", 0) or 0)
                 await session.execute(
                     update(UserCard)
                     .where(UserCard.id == trf.user_card_id)
@@ -189,7 +206,8 @@ class TransferService:
                         is_favorite=False,
                         is_showcased=False,
                         card_state="OWNED",
-                        acquired_via="transfer",
+                        acquired_via="transfer" if trf.price > 0 else "gift",
+                        acquired_price_coins=new_price_coins,
                         updated_at=now,
                     )
                 )
@@ -205,6 +223,8 @@ class TransferService:
                 card=card,
                 from_user=from_user,
                 to_user=to_user,
+                fee_coins=fee_coins,
+                fee_pct=fee_pct,
                 is_duplicate=dup is not None,
                 level_before=dup.level_before if dup else 1,
                 level_after=dup.level_after if dup else 1,
@@ -213,16 +233,16 @@ class TransferService:
             )
 
     @staticmethod
-    async def expire_stale_transfers(session: AsyncSession, user_id: Optional[int] = None) -> int:
-        """Muddati tugagan transferlarni yopadi va band qilingan (locked) kartalarni qaytarib ochadi."""
+    async def expire_stale_transfers(session: AsyncSession) -> int:
         now = utcnow()
-        conds = [
-            PendingTransfer.status == "pending",
-            PendingTransfer.expires_at < now,
-        ]
-        if user_id is not None:
-            conds.append((PendingTransfer.from_user_id == user_id) | (PendingTransfer.to_user_id == user_id))
-        stale = (await session.execute(select(PendingTransfer).where(*conds))).scalars().all()
+        stale = (
+            await session.execute(
+                select(PendingTransfer).where(
+                    PendingTransfer.status == "pending",
+                    PendingTransfer.expires_at < now,
+                )
+            )
+        ).scalars().all()
         count = 0
         for trf in stale:
             upd = await session.execute(
@@ -265,41 +285,17 @@ class TransferService:
                 .where(UserCard.id == trf.user_card_id)
                 .values(is_locked=False, card_state="OWNED", updated_at=now)
             )
+            uc = await session.get(UserCard, trf.user_card_id)
+            card = await session.get(Card, uc.card_id) if uc else None
+            from_user = await session.get(User, trf.from_user_id)
+            to_user = await session.get(User, trf.to_user_id)
             await session.flush()
-            return TransferResult(True, "Transfer bekor qilindi.", transfer=trf)
-        return TransferResult(False, "Transfer allaqachon yopilgan.")
-
-    @staticmethod
-    async def cancel_or_unlock_for_user(
-        session: AsyncSession,
-        user_id: int,
-        user_card_id: int,
-    ) -> TransferResult:
-        """Foydalanuvchining kartasidagi kutilayotgan transferni bekor qiladi yoki yetim bandlikni yechadi."""
-        from services.collection_service import CollectionService
-
-        await CollectionService.reconcile_user_card_locks(session, user_id)
-        uc = await session.get(UserCard, user_card_id)
-        if uc is None or uc.user_id != user_id:
-            return TransferResult(False, "Karta topilmadi.")
-        if not uc.is_locked:
-            return TransferResult(True, "Karta bandligi yechildi — endi yuborishingiz mumkin!")
-
-        trf = (
-            await session.execute(
-                select(PendingTransfer)
-                .where(
-                    PendingTransfer.user_card_id == uc.id,
-                    PendingTransfer.from_user_id == user_id,
-                    PendingTransfer.status == "pending",
-                )
-                .order_by(PendingTransfer.id.desc())
-                .limit(1)
+            return TransferResult(
+                True,
+                "Transfer bekor qilindi.",
+                transfer=trf,
+                card=card,
+                from_user=from_user,
+                to_user=to_user,
             )
-        ).scalar_one_or_none()
-        if trf is not None:
-            res = await TransferService.cancel_transfer(session, trf.id, user_id)
-            if res.success:
-                return TransferResult(True, f"Transfer #{trf.id} bekor qilindi va karta bo‘shatildi!", transfer=trf)
-            return res
-        return TransferResult(False, "Karta boshqa bo‘limda (market/auksion/almashuv) band.")
+        return TransferResult(False, "Transfer allaqachon yopilgan.")

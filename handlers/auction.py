@@ -35,38 +35,49 @@ async def _show_auctions(
     page: int = 1,
     my_only: bool = False,
     db_user: Optional[User] = None,
+    owner_filter: str = "all",
 ) -> None:
     page = max(1, int(page))
     async with get_session() as session:
         if my_only and db_user is not None:
             items, total = await AuctionWishlistService.list_user_created_auctions(session, db_user.id, page=page, page_size=10)
         else:
-            items, total = await AuctionWishlistService.list_active_auctions(session, page=page, page_size=10)
-    title_hdr = "📦 <b>MENING AUKSIONLARIM</b>" if my_only else "🔨 <b>AUKSION</b>"
+            items, total = await AuctionWishlistService.list_active_auctions(
+                session, page=page, page_size=10, owner_filter=owner_filter
+            )
+    title_hdr = (
+        "📦 <b>MENING AUKSIONLARIM</b>"
+        if my_only
+        else (
+            "🔨 <b>USERLAR AUKSIONLARI</b>"
+            if owner_filter == "users"
+            else ("🔨 <b>ADMIN AUKSIONLARI</b>" if owner_filter == "admin" else "🔨 <b>AUKSION</b>")
+        )
+    )
     if not items:
         empty_msg = (
             f"{header(title_hdr)}\n📭 Sizda hozircha faol auksion yo‘q.\n\n"
             "💡 «➕ Auksionga qo‘yish» tugmasi orqali o‘z kartangizni kim oshdi savdosiga qo‘yishingiz mumkin."
             if my_only
-            else f"{header(title_hdr)}\n📭 Hozircha faol auksion yo‘q.\n\n💡 Istasangiz «➕ Auksionga qo‘yish» orqali birinchi bo‘lib kartangizni qo‘ying!"
+            else f"{header(title_hdr)}\n📭 Bu bo‘limda hozircha faol auksion yo‘q.\n\n💡 «➕ Auksionga qo‘yish» orqali o‘z kartangizni qo‘yishingiz mumkin!"
         )
         await edit_or_answer(
             target,
             empty_msg,
-            reply_markup=auctions_list_kb(owner_id, [], page=1, total=0, my_only=my_only),
+            reply_markup=auctions_list_kb(owner_id, [], page=1, total=0, my_only=my_only, owner_filter=owner_filter),
         )
         return
     lines = [header(title_hdr), f"🟢 Faol auksionlar: <b>{total}</b> ta\n"]
     for auc, card in items:
         meta = get_rarity_meta(card.rarity)
-        tag = " 👤" if auc.seller_user_id else ""
+        tag = " 👤" if auc.seller_user_id else " 🏛"
         lines.append(f"{meta.emoji} <b>{esc(card.character_name)}</b>{tag}")
         lines.append(f"      💰 {fmt_coins(auc.current_price)} 🪙 · 📈 {auc.bid_count} stavka")
     lines.append("\n👇 Auksionni tanlang:")
     await edit_or_answer(
         target,
         "\n".join(lines),
-        reply_markup=auctions_list_kb(owner_id, items, page=page, total=total, my_only=my_only),
+        reply_markup=auctions_list_kb(owner_id, items, page=page, total=total, my_only=my_only, owner_filter=owner_filter),
     )
 
 
@@ -78,7 +89,21 @@ async def cmd_auction(message: Message) -> None:
 @router.callback_query(AucCb.filter(F.act == "v"))
 async def cb_auction_list(callback: CallbackQuery, callback_data: AucCb, state: FSMContext) -> None:
     await state.clear()
-    await _show_auctions(callback, callback.from_user.id, page=max(1, callback_data.p))
+    await _show_auctions(callback, callback.from_user.id, page=max(1, callback_data.p), owner_filter="all")
+    await callback.answer()
+
+
+@router.callback_query(AucCb.filter(F.act == "f_usr"))
+async def cb_auction_filter_users(callback: CallbackQuery, callback_data: AucCb, state: FSMContext) -> None:
+    await state.clear()
+    await _show_auctions(callback, callback.from_user.id, page=max(1, callback_data.p), owner_filter="users")
+    await callback.answer()
+
+
+@router.callback_query(AucCb.filter(F.act == "f_adm"))
+async def cb_auction_filter_admin(callback: CallbackQuery, callback_data: AucCb, state: FSMContext) -> None:
+    await state.clear()
+    await _show_auctions(callback, callback.from_user.id, page=max(1, callback_data.p), owner_filter="admin")
     await callback.answer()
 
 
@@ -240,6 +265,11 @@ async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb, db_us
     leader_name = esc(leader.display_name) if leader else "Hali yo‘q"
     is_seller = bool(auc.seller_user_id and auc.seller_user_id == db_user.id)
     lvl_line = f"⚡ Daraja: <b>Lv.{uc_level}</b>\n" if uc_level > 1 else ""
+    last_bid_line = (
+        f"🕒 Oxirgi stavka: <b>{fmt_tashkent(auc.last_bid_at)}</b>\n"
+        if getattr(auc, "last_bid_at", None) is not None
+        else ""
+    )
     txt = (
         f"{header(f'🔨 <b>AUKSION #{auc.id}</b>')}\n"
         f"{format_card_block(card)}\n"
@@ -249,7 +279,9 @@ async def cb_auction_detail(callback: CallbackQuery, callback_data: AucCb, db_us
         f"💰 Joriy narx: <b>{fmt_coins(auc.current_price)} 🪙</b>\n"
         f"📈 Eng kam qadam: <b>+{fmt_coins(auc.min_step)}</b> 🪙\n"
         f"👑 Yetakchi: <b>{leader_name}</b> · {auc.bid_count} stavka\n"
-        f"⏳ Tugaydi: <b>{fmt_tashkent(auc.ends_at)}</b> (Toshkent vaqti)"
+        f"{last_bid_line}"
+        f"⏳ Tugaydi: <b>{fmt_tashkent(auc.ends_at)}</b> (Toshkent vaqti)\n"
+        f"🛡 <i>Anti-Snipe: har yangi stavka kamida 20 daqiqa sokin oynani kafolatlaydi.</i>"
     )
     if callback.message:
         await send_card_message(

@@ -219,6 +219,7 @@ class PackService:
                         card_id=card.id,
                         acquired_via=f"pack_{tier}",
                         card_state="OWNED",
+                        acquired_price_coins=price,
                     )
                     session.add(uc)
                     await session.flush()

@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base, TimestampMixin
@@ -29,3 +29,5 @@ class UserCard(Base, TimestampMixin):
     is_showcased: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     card_state: Mapped[str] = mapped_column(String(24), nullable=False, default="OWNED")
     level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    acquired_price_coins: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    acquired_price_stars: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

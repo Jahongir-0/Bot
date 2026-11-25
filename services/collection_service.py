@@ -51,7 +51,7 @@ class CollectionService:
         session: AsyncSession,
         user_id: int,
         page: int = 1,
-        page_size: int = 6,
+        page_size: int = 5,
     ) -> Tuple[List[AnimeSection], int]:
         """Foydalanuvchi kartalarini anime bo'yicha guruhlaydi (bir xil nomli anime = bitta bo'lim)."""
         rows = (
@@ -81,7 +81,7 @@ class CollectionService:
         user_id: int,
         anime_rep_card_id: int,
         page: int = 1,
-        page_size: int = 6,
+        page_size: int = 5,
     ) -> Optional[Tuple[str, List[CharacterSection], int]]:
         """Bitta anime ichidagi personajlar (bir xil personajning hamma kartalari birlashtirilgan)."""
         a_key = await get_anime_key_of(session, anime_rep_card_id)
@@ -179,6 +179,57 @@ class CollectionService:
             )
         ).all()
         return [(r[0], r[1]) for r in rows]
+
+    @staticmethod
+    async def search_user_cards(
+        session: AsyncSession,
+        user_id: int,
+        query: str,
+        page: int = 1,
+        page_size: int = 5,
+    ) -> Tuple[List[Tuple[UserCard, Card]], int]:
+        """Foydalanuvchining o'z kolleksiyasi ichidan qidirish (ID, kod, personaj, anime/manga/kino, rank, alias)."""
+        q = (query or "").strip()
+        if not q:
+            return [], 0
+        q_low = q.lower()
+        rows = (
+            await session.execute(
+                select(UserCard, Card)
+                .join(Card, Card.id == UserCard.card_id)
+                .where(UserCard.user_id == user_id, Card.is_deleted.is_(False))
+                .order_by(Card.base_value.desc(), UserCard.id.desc())
+            )
+        ).all()
+        aliases_for_rank = set(get_rarity_aliases(q))
+        num_q = int(q) if q.isdigit() else None
+        matched: List[Tuple[UserCard, Card]] = []
+        for uc, card in rows:
+            if num_q is not None:
+                code_digits = "".join(ch for ch in (card.card_code or "") if ch.isdigit())
+                code_num = int(code_digits) if code_digits else None
+                if card.id == num_q or uc.id == num_q or uc.serial_number == num_q or code_num == num_q:
+                    matched.append((uc, card))
+                    continue
+            code_low = (card.card_code or "").lower()
+            if code_low == q_low or q_low in code_low:
+                matched.append((uc, card))
+                continue
+            if q_low in (card.character_name or "").lower() or q_low in (card.anime_name or "").lower():
+                matched.append((uc, card))
+                continue
+            if q_low in (getattr(card, "media_type", "") or "").lower():
+                matched.append((uc, card))
+                continue
+            if (card.rarity or "").strip().lower() in aliases_for_rank:
+                matched.append((uc, card))
+                continue
+            card_aliases = [str(a).lower() for a in (getattr(card, "aliases", None) or [])]
+            if any(q_low in a for a in card_aliases):
+                matched.append((uc, card))
+        total = len(matched)
+        start = (max(1, page) - 1) * page_size
+        return matched[start : start + page_size], total
 
     @staticmethod
     async def get_card_group_reps(session: AsyncSession, card_id: int) -> Optional[Tuple[int, int]]:
@@ -431,7 +482,7 @@ class CollectionService:
     async def reconcile_user_card_locks(session: AsyncSession, user_id: int) -> int:
         """Muddati tugagan transfer/almashuvlarni yopadi va yetim is_locked=True nusxalarni yechadi."""
         from models.base import utcnow
-        from models.market import CardListing, PendingTransfer
+        from models.market import CardListing, Offer, PendingTransfer
         from models.v2_features import Auction, CardTrade
         from sqlalchemy import update
 
@@ -509,8 +560,17 @@ class CollectionService:
                     ).limit(1)
                 )
             ).scalar_one_or_none()
+            has_offer = (
+                await session.execute(
+                    select(Offer.id).where(
+                        Offer.offered_user_card_id == uc.id,
+                        Offer.status == "pending",
+                        Offer.offer_type == "card",
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
 
-            if not (has_listing or has_auction or has_transfer or has_trade):
+            if not (has_listing or has_auction or has_transfer or has_trade or has_offer):
                 uc.is_locked = False
                 uc.card_state = "OWNED"
                 uc.updated_at = now
@@ -522,8 +582,8 @@ class CollectionService:
 
     @staticmethod
     async def get_card_lock_info(session: AsyncSession, user_card_id: int) -> Tuple[str, int, str]:
-        """Qaytaradi: (kind, entity_id, human_label). kind in ('market','auction','transfer','trade','none')."""
-        from models.market import CardListing, PendingTransfer
+        """Qaytaradi: (kind, entity_id, human_label). kind in ('market','auction','transfer','trade','offer','none')."""
+        from models.market import CardListing, Offer, PendingTransfer
         from models.v2_features import Auction, CardTrade
 
         listing_id = (
@@ -561,13 +621,25 @@ class CollectionService:
         if tr_id is not None:
             return "trade", int(tr_id), f"🔒 Almashuv kutilmoqda (#{tr_id})"
 
+        off_id = (
+            await session.execute(
+                select(Offer.id).where(
+                    Offer.offered_user_card_id == user_card_id,
+                    Offer.status == "pending",
+                    Offer.offer_type == "card",
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if off_id is not None:
+            return "offer", int(off_id), f"🔒 Karta taklifida band (#{off_id})"
+
         return "none", 0, "🟢 Sotish/Transferga tayyor"
 
     @staticmethod
     async def unlock_user_card_action(session: AsyncSession, user_id: int, user_card_id: int) -> Tuple[bool, str]:
-        """Foydalanuvchi kartasidagi pending transfer/trade yoki yetim bandlikni bekor qilib yechadi."""
+        """Foydalanuvchi kartasidagi pending transfer/trade/offer yoki yetim bandlikni bekor qilib yechadi."""
         from models.base import utcnow
-        from models.market import PendingTransfer
+        from models.market import Offer, PendingTransfer
         from models.v2_features import CardTrade
         from sqlalchemy import update
 
@@ -603,8 +675,18 @@ class CollectionService:
                         )
                 await session.flush()
                 return True, f"✅ Almashuv (#{eid}) bekor qilindi va karta bo‘shatildi!"
+        elif kind == "offer":
+            off = await session.get(Offer, eid)
+            if off and off.buyer_id == user_id and off.status == "pending":
+                off.status = "cancelled"
+                off.resolved_at = now
+                uc.is_locked = False
+                uc.card_state = "OWNED"
+                uc.updated_at = now
+                await session.flush()
+                return True, f"✅ Karta taklifi (#{eid}) bekor qilindi va karta bo‘shatildi!"
         elif kind == "market":
-            return False, "🛒 Bu karta Marketda sotuvda turibdi. Uni «Market → Mening kartalarim» bo‘limidan olib tashlang."
+            return False, "🛒 Bu karta Marketda sotuvda turibdi. Uni «Market → Mening e‘lonlarim» bo‘limidan olib tashlang."
         elif kind == "auction":
             return False, "🔨 Bu karta faol Auksionda band. Uni Auksion bo‘limidan bekor qiling (stavka bo‘lmasa)."
         else:

@@ -21,16 +21,27 @@ logger = logging.getLogger(__name__)
 _SEND_CONCURRENCY = 8
 
 
-async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0) -> int:
-    """Hamma faol guruhlar va barcha foydalanuvchilarga 'event boshlandi' e'lonini yuboradi."""
+async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0, target: str = "all") -> int:
+    """Tanlangan auditoriyaga (guruhlar/userlar/ikkalasi/none) 'event boshlandi' e'lonini yuboradi."""
+    target = (target or "all").lower()
+    if target == "none":
+        return 0
     tz = get_settings().timezone
     async with get_session() as session:
         pair = await EventService.get_event_with_card(session, event_id)
         if pair is None:
             return 0
         event, card = pair
-        groups = list((await session.execute(select(Group).where(Group.is_active.is_(True)))).scalars().all())
-        users = list((await session.execute(select(User).where(User.is_banned.is_(False)))).scalars().all())
+        groups = (
+            list((await session.execute(select(Group).where(Group.is_active.is_(True)))).scalars().all())
+            if target in ("all", "groups")
+            else []
+        )
+        users = (
+            list((await session.execute(select(User).where(User.is_banned.is_(False)))).scalars().all())
+            if target in ("all", "users")
+            else []
+        )
 
     caption = format_event_message(card, event, tz, "active")
     kb = event_buy_kb(event)
@@ -78,7 +89,8 @@ async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0) -> i
             seen_chats.add(u.telegram_id)
             tasks.append(_send_target(u.telegram_id, None))
 
-    await asyncio.gather(*tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
 
     async with get_session() as session:
         session.add_all(sent)
@@ -89,15 +101,13 @@ async def announce_event(bot: Bot, event_id: int, notify_admin_id: int = 0) -> i
         await session.commit()
 
     if notify_admin_id:
+        report_lines = [f"📢 <b>Event #{event_id} e'loni yuborildi!</b>"]
+        if target in ("all", "groups"):
+            report_lines.append(f"🏰 Guruhlarga: <b>{group_sent}/{len(groups)}</b>")
+        if target in ("all", "users"):
+            report_lines.append(f"👤 Foydalanuvchilarga: <b>{user_sent}/{len(users)}</b>")
         try:
-            await bot.send_message(
-                notify_admin_id,
-                (
-                    f"📢 <b>Event #{event_id} e'loni yuborildi!</b>\n"
-                    f"🏰 Guruhlarga: <b>{group_sent}/{len(groups)}</b>\n"
-                    f"👤 Foydalanuvchilarga: <b>{user_sent}/{len(users)}</b>"
-                ),
-            )
+            await bot.send_message(notify_admin_id, "\n".join(report_lines))
         except Exception:
             pass
     return len(sent)

@@ -23,6 +23,10 @@ EXTRA_GAME_DEFAULTS: Dict[str, Any] = {
     "chest_cost": 100,
     "chest_xp": 15,
     "chest_jackpot_pct": 1000,  # 1000 = 10x
+    "seq_enabled": True,
+    "seq_daily_limit": 5,
+    "seq_win_pct": 220,         # 220 = 2.2x
+    "seq_xp": 25,
 }
 
 # Animatsion (Telegram dice) o'yinlar: kalit -> (emoji, nom, jackpot qiymati, yutuq qiymati, jackpot nomi, yutuq nomi)
@@ -35,6 +39,9 @@ ANIM_GAMES: Dict[str, Tuple[str, str, int, int, str, str]] = {
 # Admin paneli uchun: (kalit, emoji, nom, yoqish kaliti, [(maydon, qisqa nom, 0 ruxsatmi, min, max)])
 Field = Tuple[str, str, bool, int, int]
 ADMIN_GAMES: List[Dict[str, Any]] = [
+    {"key": "seq", "emoji": "🧠", "name": "Xotira Zanjiri", "toggle": "seq_enabled",
+     "hint": "Ko‘nikma o‘yini: 4 ta runa ketma-ketligini eslab qolib takrorlang (2.2x).",
+     "fields": [("seq_daily_limit", "Kunlik limit", False, 1, 1000), ("seq_win_pct", "Yutuq foizi (%, 220 = 2.2x)", False, 100, 10000), ("seq_xp", "XP mukofoti", True, 0, 10000)]},
     {"key": "slots", "emoji": "🎰", "name": "Slot 777", "toggle": "slots_enabled",
      "hint": "777 = 10x, 3 ta bir xil = 4x, juft = 1.5x. Garov: 50/100/250/500.",
      "fields": [("slots_daily_limit", "Kunlik limit", False, 1, 1000), ("slots_xp", "XP mukofoti", True, 0, 10000)]},

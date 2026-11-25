@@ -17,6 +17,7 @@ from admin.v2 import (
     report,
     backup,
     support,
+    economy,
 )
 
 router = Router(name="admin_v2")
@@ -35,5 +36,6 @@ router.include_router(broadcast.router)
 router.include_router(report.router)
 router.include_router(backup.router)
 router.include_router(support.router)
+router.include_router(economy.router)
 
 __all__ = ["router"]

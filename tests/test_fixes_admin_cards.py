@@ -41,10 +41,10 @@ async def test_stale_transfer_lock_reconcile_and_manual_unlock(db_session):
     # 1. Transfer yaratib, muddatini o'tkazamiz
     res = await TransferService.create_pending_transfer(
         db_session,
-        sender_id=sender.id,
-        receiver_id=receiver.id,
-        user_card_id=uc.id,
-        mode="gift",
+        sender.id,
+        receiver.id,
+        uc.id,
+        price=0,
     )
     assert res.success and res.transfer is not None
     await db_session.refresh(uc)
@@ -74,10 +74,10 @@ async def test_stale_transfer_lock_reconcile_and_manual_unlock(db_session):
     # 3. Faol transferni foydalanuvchi o'zi bekor qilishi
     res2 = await TransferService.create_pending_transfer(
         db_session,
-        sender_id=sender.id,
-        receiver_id=receiver.id,
-        user_card_id=uc.id,
-        mode="gift",
+        sender.id,
+        receiver.id,
+        uc.id,
+        price=0,
     )
     assert res2.success
     ok_unlock, _ = await CollectionService.unlock_user_card_action(db_session, sender.id, uc.id)
@@ -138,17 +138,17 @@ async def test_admin_unban_protection_and_exclusion_from_rankings_and_search(db_
     await db_session.flush()
 
     # Rankinglardan adminlar chiqarilgan
-    top_cards = await RankingService.get_top_users(db_session, mode=RankingMode.TOTAL_CARDS, limit=10)
-    top_ids = {u.id for u, _ in top_cards}
+    top_cards = await RankingService.get_global_top(db_session, limit=10)
+    top_ids = {e.user.id for e in top_cards}
     assert adm_user.id not in top_ids
     assert role_adm.id not in top_ids
     assert normal_u.id in top_ids
 
-    top_coins = await RankingService.get_top_users(db_session, mode=RankingMode.COINS, limit=10)
+    top_coins = await RankingService.get_extended_top(db_session, scope="coins", limit=10)
     assert adm_user.id not in {u.id for u, _ in top_coins}
     assert normal_u.id in {u.id for u, _ in top_coins}
 
-    adm_rank, _ = await RankingService.get_user_ranks(db_session, adm_user)
+    adm_rank, _ = await RankingService.get_user_ranks(db_session, adm_user.id)
     assert adm_rank == 0
     prof_txt = format_profile_message(adm_user, adm_rank)
     assert "Admin (reytingdan tashqari)" in prof_txt
@@ -158,11 +158,14 @@ async def test_admin_unban_protection_and_exclusion_from_rankings_and_search(db_
     assert normal_u.id in {u.id for u, _, _ in power_top}
 
     # SearchService admin kartalarini yashiradi
-    s_global, _ = await SearchService.search_global_cards(db_session, "Ranking Hero", page=1, page_size=20)
-    assert all(u.id != adm_user.id for _, u, _ in s_global)
-    assert any(u.id == normal_u.id for _, u, _ in s_global)
+    s_global, _ = await SearchService.search_global_cards(db_session, mode="character", query="Ranking Hero", page=1, page_size=20)
+    assert all(it.owner.id != adm_user.id for it in s_global)
+    assert any(it.owner.id == normal_u.id for it in s_global)
 
-    insp = await SearchService.inspect_user_card(db_session, card.id, adm_user.id)
+    uc_adm = (
+        await db_session.execute(select(UserCard).where(UserCard.user_id == adm_user.id, UserCard.card_id == card.id))
+    ).scalar_one()
+    insp = await SearchService.inspect_user_card(db_session, uc_adm.id)
     assert insp is None
 
     # Lekin oddiy foydalanuvchi adminga sovg'a yubora oladi
@@ -173,10 +176,10 @@ async def test_admin_unban_protection_and_exclusion_from_rankings_and_search(db_
     db_session.add(uc_norm)
     await db_session.flush()
     tr = await TransferService.create_pending_transfer(
-        db_session, sender_id=normal_u.id, receiver_id=adm_user.id, user_card_id=uc_norm.id, mode="gift"
+        db_session, normal_u.id, adm_user.id, uc_norm.id, price=0
     )
     assert tr.success and tr.transfer is not None
-    acc = await TransferService.accept_pending_transfer(db_session, tr.transfer.id, adm_user.id)
+    acc = await TransferService.confirm_transfer(db_session, tr.transfer.id, normal_u.id)
     assert acc.success
     assert await UserService.owns_card(db_session, adm_user.id, gift_card.id)
 
@@ -218,7 +221,7 @@ async def test_undropped_card_preset_level_for_event_auction_and_grant(db_sessio
         db_session, card_id=c_auc.id, start_price=1000, hours=1, created_by_tg_id=admin_tg
     )
     assert ok_auc and auc is not None and auc.card_level == 3
-    ok_bid, _ = await AuctionWishlistService.place_bid(db_session, auc.id, buyer.id, 1500)
+    ok_bid, _ = await AuctionWishlistService.place_bid(db_session, auc.id, buyer, 1500)
     assert ok_bid
     ok_fin, _ = await AuctionWishlistService.admin_finalize_auction(db_session, auc.id)
     assert ok_fin

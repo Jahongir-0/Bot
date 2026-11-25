@@ -32,6 +32,7 @@ from utils.callback_data import AdminCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc, format_drop_message, format_group_settings
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, get_bot_username, send_card_visual
+from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_groups")
@@ -121,26 +122,49 @@ async def cb_schedule_overview(callback: CallbackQuery) -> None:
 @router.callback_query(AdminCb.filter((F.section == "groups") & (F.action == "list")))
 async def cb_admin_groups_list(callback: CallbackQuery, callback_data: AdminCb) -> None:
     page = max(1, callback_data.page)
+    filter_mode = callback_data.extra or ("active" if callback_data.section == "groups" else "all")
+    cond = []
+    if callback_data.section == "groups":
+        if filter_mode == "active":
+            cond.append(Group.is_active.is_(True))
+            cond.append(Group.bot_status == "active")
+        elif filter_mode == "left":
+            cond.append((Group.bot_status.in_(["left", "kicked"])) | Group.is_active.is_(False))
     async with get_session() as session:
-        total = int((await session.execute(select(func.count(Group.id)))).scalar_one() or 0)
+        total = int((await session.execute(select(func.count(Group.id)).where(*cond))).scalar_one() or 0)
         offset = (page - 1) * PAGE_SIZE
         groups = list(
-            (await session.execute(select(Group).order_by(Group.is_active.desc(), Group.id.desc()).offset(offset).limit(PAGE_SIZE)))
+            (await session.execute(select(Group).where(*cond).order_by(Group.is_active.desc(), Group.id.desc()).offset(offset).limit(PAGE_SIZE)))
             .scalars()
             .all()
         )
-    title = "📅 <b>DROP JADVALI — GURUH TANLANG</b>" if callback_data.section == "schedule" else f"👥 <b>GURUHLAR ({total} ta)</b>"
-    if not groups:
+    f_labels = {"active": "FAOL GURUHLAR", "left": "CHIQARILGAN / O‘CHGAN GURUHLAR", "all": "BARCHA GURUHLAR"}
+    title = (
+        "📅 <b>DROP JADVALI — GURUH TANLANG</b>"
+        if callback_data.section == "schedule"
+        else f"👥 <b>{f_labels.get(filter_mode, 'GURUHLAR')} ({total} ta)</b>"
+    )
+    if not groups and callback_data.section != "groups":
         await edit_or_answer(
             callback,
             f"{title}\n\n📭 Hozircha ro‘yxatga olingan guruhlar yo‘q.",
             reply_markup=admin_home_kb(callback.from_user.id),
         )
         return
+    if not groups:
+        title += "\n\n📭 Bu bo‘limda guruhlar yo‘q."
     await edit_or_answer(
         callback,
         title,
-        reply_markup=admin_groups_list_kb(callback.from_user.id, groups, section=callback_data.section, page=page, total=total, page_size=PAGE_SIZE),
+        reply_markup=admin_groups_list_kb(
+            callback.from_user.id,
+            groups,
+            section=callback_data.section,
+            page=page,
+            total=total,
+            page_size=PAGE_SIZE,
+            filter_mode=filter_mode,
+        ),
     )
 
 
@@ -235,12 +259,21 @@ async def _render_group_detail(target, owner_id: int, group_id: int) -> None:
         else "👤 Botni qo‘shgan: noma’lum\n"
     )
     link_line = "" if group.username else (f"🔗 Havola: {esc(link)}\n" if link else "🔗 Havola: yo‘q (yopiq guruh)\n")
+    bot_st = getattr(group, "bot_status", "active")
+    if bot_st in ("left", "kicked") or not group.is_active:
+        st_txt = f"🗑 Guruhdan chiqarilgan ({esc(bot_st)})"
+        if getattr(group, "left_at", None):
+            st_txt += f" · <code>{fmt_tashkent(group.left_at, '%d.%m.%Y %H:%M')}</code>"
+        if getattr(group, "status_reason", None):
+            st_txt += f"\n📝 Sabab: {esc(group.status_reason)}"
+    else:
+        st_txt = "🟢 Faol"
     text = (
         f"{format_group_settings(group)}\n"
         f"{adder_line}{link_line}"
         f"👤 Faol a’zolar (bazada): <b>{analytics['active_members']}</b>\n"
         f"📦 Jami droplar: <b>{analytics['total_drops']}</b> (Olingani: <b>{analytics['claimed_drops']}</b>)\n"
-        f"🔌 Bot holati: <b>{'🟢 Faol' if group.is_active else '🔴 Nofaol'}</b>"
+        f"🔌 Bot holati: <b>{st_txt}</b>"
     )
     await edit_or_answer(target, text, reply_markup=admin_group_settings_kb(owner_id, group, link=link))
 

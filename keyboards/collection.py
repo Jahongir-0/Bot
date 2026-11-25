@@ -7,19 +7,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from models.card import Card
 from models.user_card import UserCard
 from services.collection_service import AnimeSection, CardVariant, CharacterSection, CharacterStack
-from utils.callback_data import AucCb, CollectionCb, NavCb, OfferCb, WishCb
+from utils.callback_data import AucCb, CollectionCb, GiveCb, NavCb, SearchCb
 from utils.constants import get_rarity_meta, list_rarities
-from utils.formatting import level_badge, event_tag
+from utils.formatting import event_tag, level_badge
 
-# Callback data 64 baytdan oshmasligi va ':' belgisini o'z ichiga olmasligi shart,
-# shuning uchun filtrlar faqat qisqa raqam/lotin matn ko'rinishida uzatiladi.
+# Callback data 64 baytdan oshmasligi va ':' belgisini o'z ichiga olmasligi shart.
+CARDS_PAGE_SIZE = 5
 
 
 def _footer(builder: InlineKeyboardBuilder, owner_id: int, back_pack: str) -> None:
     builder.row(
-        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=back_pack),
+        InlineKeyboardButton(text="⬅️ Orqaga", callback_data=back_pack),
         InlineKeyboardButton(
-            text="🏠 BOSH MENU",
+            text="🏠 Bosh Menu",
             callback_data=NavCb(owner_id=owner_id, target="home").pack(),
         ),
     )
@@ -40,34 +40,107 @@ def _pager(builder: InlineKeyboardBuilder, page: int, total_pages: int, make_cb)
 
 
 def collection_summary_kb(owner_id: int) -> InlineKeyboardMarkup:
+    """Kartalarim (Bot 2.5):
+    Hammasi   | Anime bo'yicha
+    Sevimlilar| Rank bo'yicha
+    Qidiruv   | Birlashtirish
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="🗂 HAMMASI",
-            callback_data=CollectionCb(owner_id=owner_id, action="v2_list", filter_val="all", sort_by="newest", page=1).pack(),
+            text="🗂 Hammasi",
+            callback_data=CollectionCb(
+                owner_id=owner_id, action="v2_list", filter_val="all", sort_by="newest", page=1
+            ).pack(),
         ),
         InlineKeyboardButton(
-            text="📺 ASAR BO‘YICHA",
+            text="📺 Anime bo‘yicha",
             callback_data=CollectionCb(owner_id=owner_id, action="anime_list", page=1).pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="⭐ RANK BO‘YICHA",
-            callback_data=CollectionCb(owner_id=owner_id, action="by_rarity").pack(),
+            text="❤️ Sevimlilar",
+            callback_data=CollectionCb(
+                owner_id=owner_id, action="v2_list", filter_val="favorites", sort_by="newest", page=1
+            ).pack(),
         ),
         InlineKeyboardButton(
-            text="📩 TAKLIFLAR",
-            callback_data=OfferCb(owner_id=owner_id, action="incoming", page=1).pack(),
+            text="⭐ Rank bo‘yicha",
+            callback_data=CollectionCb(owner_id=owner_id, action="by_rarity").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="🔮 BIRLASHTIRISH",
+            text="🔍 Qidiruv",
+            callback_data=CollectionCb(owner_id=owner_id, action="search").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🔮 Birlashtirish",
             callback_data=CollectionCb(owner_id=owner_id, action="merge").pack(),
-        )
+        ),
     )
     _footer(builder, owner_id, NavCb(owner_id=owner_id, target="profile").pack())
+    return builder.as_markup()
+
+
+def collection_search_hub_kb(owner_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🎴 O‘zimni kartalarim",
+            callback_data=CollectionCb(owner_id=owner_id, action="my_search").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🌐 Boshqa kartalar",
+            callback_data=SearchCb(owner_id=owner_id, action="menu").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🎲 Tasodifiy kartalar",
+            callback_data=SearchCb(owner_id=owner_id, action="random", mode="random", page=1).pack(),
+        )
+    )
+    _footer(builder, owner_id, _view_back(owner_id))
+    return builder.as_markup()
+
+
+def collection_my_search_results_kb(
+    owner_id: int,
+    rows: List[tuple[UserCard, Card]],
+    page: int,
+    total: int,
+    page_size: int = CARDS_PAGE_SIZE,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for uc, card in rows:
+        meta = get_rarity_meta(card.rarity)
+        fav = "❤️ " if uc.is_favorite else ""
+        lv = level_badge(getattr(uc, "level", 1))
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{fav}{lv}{meta.emoji} {card.character_name[:24]} ({card.anime_name[:16]})"[:60],
+                callback_data=CollectionCb(
+                    owner_id=owner_id, action="card_detail", filter_val="srch", page=page, item_id=uc.id
+                ).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / page_size)) if total > 0 else 1
+    if total_pages > 1:
+        _pager(
+            builder,
+            page,
+            total_pages,
+            lambda p: CollectionCb(owner_id=owner_id, action="my_search_p", page=p).pack(),
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔍 Yangi qidiruv",
+            callback_data=CollectionCb(owner_id=owner_id, action="my_search").pack(),
+        )
+    )
+    _footer(builder, owner_id, CollectionCb(owner_id=owner_id, action="search").pack())
     return builder.as_markup()
 
 
@@ -78,31 +151,32 @@ def v2_collection_list_kb(
     sort_by: str,
     page: int,
     total: int,
-    page_size: int = 20,
+    page_size: int = CARDS_PAGE_SIZE,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    tabs = [
-        ("all", "Hammasi"),
-        ("anime", "Anime"),
-        ("manga", "Manga"),
-        ("movie", "Kino"),
-        ("cartoon", "Multfilm"),
-        ("event", "Event"),
-        ("limited", "Limitli"),
-        ("favorites", "❤️ Sevimli"),
-    ]
-    for i in range(0, len(tabs), 4):
-        builder.row(
-            *[
-                InlineKeyboardButton(
-                    text=("✅ " if filter_tab == k else "") + lbl,
-                    callback_data=CollectionCb(
-                        owner_id=owner_id, action="v2_list", filter_val=k, sort_by=sort_by, page=1
-                    ).pack(),
-                )
-                for k, lbl in tabs[i : i + 4]
-            ]
-        )
+    if filter_tab != "favorites":
+        tabs = [
+            ("all", "Hammasi"),
+            ("anime", "Anime"),
+            ("manga", "Manga"),
+            ("movie", "Kino"),
+            ("cartoon", "Multfilm"),
+            ("event", "Event"),
+            ("limited", "Limitli"),
+            ("favorites", "❤️ Sevimli"),
+        ]
+        for i in range(0, len(tabs), 4):
+            builder.row(
+                *[
+                    InlineKeyboardButton(
+                        text=("✅ " if filter_tab == k else "") + lbl,
+                        callback_data=CollectionCb(
+                            owner_id=owner_id, action="v2_list", filter_val=k, sort_by=sort_by, page=1
+                        ).pack(),
+                    )
+                    for k, lbl in tabs[i : i + 4]
+                ]
+            )
     sorts = [("newest", "🆕 Yangi"), ("rarest", "💎 Qiymatli"), ("alpha", "🔤 A-Z"), ("media", "📺 Asar")]
     builder.row(
         *[
@@ -119,13 +193,17 @@ def v2_collection_list_kb(
         meta = get_rarity_meta(card.rarity)
         fav = "❤️ " if uc.is_favorite else ""
         sc = "🖼 " if getattr(uc, "is_showcased", False) else ""
-        ser = f"#{uc.serial_number}" if getattr(uc, "serial_number", None) else ""
         lv = level_badge(getattr(uc, "level", 1))
         builder.row(
             InlineKeyboardButton(
-                text=f"{fav}{sc}{lv}{event_tag(card)}{meta.emoji} {card.character_name[:22]} {ser}"[:60],
+                text=f"{fav}{sc}{lv}{event_tag(card)}{meta.emoji} {card.character_name[:26]} · {card.anime_name[:14]}"[:60],
                 callback_data=CollectionCb(
-                    owner_id=owner_id, action="card_detail", filter_val=filter_tab, sort_by=sort_by, page=page, item_id=uc.id
+                    owner_id=owner_id,
+                    action="card_detail",
+                    filter_val=filter_tab,
+                    sort_by=sort_by,
+                    page=page,
+                    item_id=uc.id,
                 ).pack(),
             )
         )
@@ -147,7 +225,7 @@ def anime_sections_kb(
     sections: List[AnimeSection],
     page: int,
     total: int,
-    page_size: int = 6,
+    page_size: int = CARDS_PAGE_SIZE,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for sec in sections:
@@ -181,7 +259,7 @@ def anime_characters_kb(
     chars: List[CharacterSection],
     page: int,
     total: int,
-    page_size: int = 6,
+    page_size: int = CARDS_PAGE_SIZE,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for ch in chars:
@@ -189,7 +267,7 @@ def anime_characters_kb(
         variants_note = f" ({ch.variants} xil)" if ch.variants > 1 else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{fav}🎴 {ch.character_name[:26]} × {ch.copies}{variants_note}",
+                text=f"{fav}🎴 {ch.character_name[:26]} · {ch.copies} ta{variants_note}"[:60],
                 callback_data=CollectionCb(
                     owner_id=owner_id,
                     action="char_open",
@@ -233,7 +311,7 @@ def character_variants_kb(
         meta = get_rarity_meta(v.card.rarity)
         builder.row(
             InlineKeyboardButton(
-                text=f"{event_tag(v.card)}{meta.emoji} {meta.name} · {v.card.card_code} × {v.quantity}",
+                text=f"{event_tag(v.card)}{meta.emoji} {meta.name} · {v.card.card_code} × {v.quantity}"[:60],
                 callback_data=CollectionCb(
                     owner_id=owner_id,
                     action="card_detail",
@@ -267,7 +345,7 @@ def collection_rarity_filter_kb(owner_id: int) -> InlineKeyboardMarkup:
                 callback_data=CollectionCb(
                     owner_id=owner_id,
                     action="char_list",
-                    filter_val=f"rar_{rarity}",  # ':' ishlatilmaydi (CallbackData ajratuvchisi)
+                    filter_val=f"rar_{rarity}",
                     page=1,
                 ).pack(),
             )
@@ -282,7 +360,7 @@ def collection_list_kb(
     filter_val: str,
     page: int,
     total: int,
-    page_size: int = 6,
+    page_size: int = CARDS_PAGE_SIZE,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for st in stacks:
@@ -290,7 +368,7 @@ def collection_list_kb(
         fav_prefix = "❤️ " if st.is_favorite else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{fav_prefix}{event_tag(st.card)}{meta.emoji} {st.card.character_name[:24]} × {st.quantity}",
+                text=f"{fav_prefix}{event_tag(st.card)}{meta.emoji} {st.card.character_name[:26]} ({st.card.anime_name[:14]})"[:60],
                 callback_data=CollectionCb(
                     owner_id=owner_id,
                     action="card_detail",
@@ -319,21 +397,37 @@ def card_detail_kb(
     char_rep_id: int,
     card_id: int = 0,
     is_showcased: bool = False,
-    level_label: str = "",
-    unlock_label: str = "",
+    can_upgrade: bool = True,
 ) -> InlineKeyboardMarkup:
+    """Bot 2.5 karta tafsiloti tugmalari:
+    Batafsil    | Daraja ko'tarish
+    Sevimliga   | Vitrinaga
+    Marketga    | Botga sotish
+    Auksionga   | Userga sotish
+    Sovg'a qilish
+    """
     builder = InlineKeyboardBuilder()
-    if level_label:
-        builder.row(
+    row1 = [
+        InlineKeyboardButton(
+            text="📖 Batafsil",
+            callback_data=CollectionCb(
+                owner_id=owner_id, action="about", filter_val="d", page=1, item_id=user_card_id
+            ).pack(),
+        )
+    ]
+    if can_upgrade:
+        row1.append(
             InlineKeyboardButton(
-                text=level_label,
+                text="⬆️ Daraja ko‘tarish",
                 callback_data=CollectionCb(
                     owner_id=owner_id, action="lvl_ask", filter_val="d", page=1, item_id=user_card_id
                 ).pack(),
             )
         )
-    fav_text = "💔 Sevimlidan olish" if is_favorite else "❤️ Sevimliga qo‘shish"
-    show_text = "🖼 Vitrinadan olish" if is_showcased else "🖼 Vitrinaga qo‘yish"
+    builder.row(*row1)
+
+    fav_text = "❤️ Sevimli ✅" if is_favorite else "❤️ Sevimliga"
+    show_text = "🖼 Vitrina ✅" if is_showcased else "🖼 Vitrinaga"
     builder.row(
         InlineKeyboardButton(
             text=fav_text,
@@ -348,41 +442,17 @@ def card_detail_kb(
             ).pack(),
         ),
     )
-    row2 = [
-        InlineKeyboardButton(
-            text="📖 Batafsil",
-            callback_data=CollectionCb(
-                owner_id=owner_id, action="about", filter_val="d", page=1, item_id=user_card_id
-            ).pack(),
-        )
-    ]
-    if card_id > 0:
-        row2.append(
-            InlineKeyboardButton(
-                text="💖 Istaklarga",
-                callback_data=WishCb(owner_id=owner_id, act="add", cid=card_id).pack(),
-            )
-        )
-    builder.row(*row2)
-    if is_locked and unlock_label:
-        builder.row(
-            InlineKeyboardButton(
-                text=unlock_label,
-                callback_data=CollectionCb(
-                    owner_id=owner_id, action="unlock", filter_val="d", page=1, item_id=user_card_id
-                ).pack(),
-            )
-        )
+
     if not is_locked:
         builder.row(
             InlineKeyboardButton(
-                text="🛒 MARKETGA",
+                text="🛒 Marketga",
                 callback_data=CollectionCb(
                     owner_id=owner_id, action="list_prompt", filter_val="d", page=1, item_id=user_card_id
                 ).pack(),
             ),
             InlineKeyboardButton(
-                text="🤖 BOTGA SOTISH",
+                text="🤖 Botga sotish",
                 callback_data=CollectionCb(
                     owner_id=owner_id, action="bot_sell_ask", filter_val="d", page=1, item_id=user_card_id
                 ).pack(),
@@ -390,12 +460,30 @@ def card_detail_kb(
         )
         builder.row(
             InlineKeyboardButton(
-                text="🔨 AUKSIONGA QO‘YISH",
-                callback_data=AucCb(
-                    owner_id=owner_id, act="uc_new", aid=user_card_id
+                text="🔨 Auksionga",
+                callback_data=AucCb(owner_id=owner_id, act="uc_new", aid=user_card_id).pack(),
+            ),
+            InlineKeyboardButton(
+                text="💸 Userga sotish",
+                callback_data=GiveCb(owner_id=owner_id, action="sell_uc", user_card_id=user_card_id).pack(),
+            ),
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="🎁 Sovg‘a qilish",
+                callback_data=GiveCb(owner_id=owner_id, action="gift_uc", user_card_id=user_card_id).pack(),
+            )
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(
+                text="🔓 Bandlikni tekshirish / yechish",
+                callback_data=CollectionCb(
+                    owner_id=owner_id, action="unlock_uc", filter_val="d", page=1, item_id=user_card_id
                 ).pack(),
             )
         )
+
     _footer(
         builder,
         owner_id,

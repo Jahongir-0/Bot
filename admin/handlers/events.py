@@ -198,6 +198,14 @@ async def _render_evt_menu(callback: CallbackQuery) -> None:
     await edit_or_answer(callback, "\n".join(lines), reply_markup=admin_evt_menu_kb(callback.from_user.id, events))
 
 
+_TARGET_LABELS = {
+    "groups": "🏰 Faqat guruhlarga",
+    "users": "👤 Faqat userlarga",
+    "all": "🌍 Guruh va userlarga",
+    "none": "🔇 E’lonsiz (jim yaratish)",
+}
+
+
 def _evt_summary(data: dict) -> str:
     prices = []
     if data.get("price_coins"):
@@ -206,13 +214,15 @@ def _evt_summary(data: dict) -> str:
         prices.append(f"⭐ <b>{int(data['price_stars']):,}</b> Stars")
     hours = int(data.get("hours", EVENT_DURATION_HOURS))
     meta = get_rarity_meta(data.get("rarity", "Basic"))
+    tgt = str(data.get("announce_target", "all"))
     return (
         "🎁 <b>EVENTNI TASDIQLASH</b>\n\n"
         f"🎴 Karta: <b>{esc(data.get('card_name', ''))}</b> ({meta.emoji} {esc(meta.name)})\n"
         f"📺 Media: {esc(data.get('anime_name', ''))}\n"
         f"📦 Nusxa soni: <b>{data.get('copies')}</b> ta\n"
         f"💳 Narx: {'  yoki  '.join(prices)}\n"
-        f"⏳ Davomiyligi: <b>{hours} soat</b>"
+        f"⏳ Davomiyligi: <b>{hours} soat</b>\n"
+        f"📢 E’lon manzili: <b>{_TARGET_LABELS.get(tgt, _TARGET_LABELS['all'])}</b>"
     )
 
 
@@ -307,7 +317,18 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
         if "card_id" not in data or "copies" not in data:
             await callback.answer("Jarayon eskirgan.", show_alert=True)
             return
-        await edit_or_answer(callback, _evt_summary(data), reply_markup=admin_evt_confirm_kb(admin_id))
+        tgt = str(data.get("announce_target", "all"))
+        await edit_or_answer(callback, _evt_summary(data), reply_markup=admin_evt_confirm_kb(admin_id, target=tgt))
+        return
+
+    if action == "etgt":
+        tgt = callback_data.extra if callback_data.extra in _TARGET_LABELS else "all"
+        await state.update_data(announce_target=tgt)
+        data = await state.get_data()
+        if "card_id" not in data or "copies" not in data:
+            await callback.answer("Jarayon eskirgan.", show_alert=True)
+            return
+        await edit_or_answer(callback, _evt_summary(data), reply_markup=admin_evt_confirm_kb(admin_id, target=tgt))
         return
 
     if action == "go":
@@ -316,6 +337,9 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
             await callback.answer("Jarayon eskirgan.", show_alert=True)
             return
         hours = int(data.get("hours", EVENT_DURATION_HOURS))
+        target = str(data.get("announce_target", "all"))
+        if target not in _TARGET_LABELS:
+            target = "all"
         async with get_session() as session:
             res = await EventService.create_event(
                 session=session,
@@ -335,13 +359,17 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
             await callback.answer(res.message, show_alert=True)
             return
         await state.clear()
-        task = asyncio.create_task(announce_event(callback.bot, res.event.id, notify_admin_id=admin_id))
-        _BG_TASKS.add(task)
-        task.add_done_callback(_BG_TASKS.discard)
+        if target != "none":
+            task = asyncio.create_task(announce_event(callback.bot, res.event.id, notify_admin_id=admin_id, target=target))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
+            note = f"📢 E’lon ({_TARGET_LABELS[target]}) yuborilmoqda..."
+        else:
+            note = "🔇 Event e’lonsiz ishga tushirildi."
         await callback.answer("✅ Event boshlandi!", show_alert=True)
         await edit_or_answer(
             callback,
-            f"✅ <b>Event #{res.event.id} boshlandi!</b>\n📢 E’lon barcha guruhlar va userlarga yuborilmoqda...",
+            f"✅ <b>Event #{res.event.id} boshlandi!</b>\n{note}",
             reply_markup=admin_evt_menu_kb(admin_id, []),
         )
         return
@@ -427,4 +455,5 @@ async def fsm_evt_duration(message: Message, state: FSMContext) -> None:
     if "card_id" not in data or "copies" not in data:
         await message.answer("⚠️ Jarayon eskirgan.", reply_markup=admin_home_kb(message.from_user.id))
         return
-    await message.answer(_evt_summary(data), reply_markup=admin_evt_confirm_kb(message.from_user.id))
+    tgt = str(data.get("announce_target", "all"))
+    await message.answer(_evt_summary(data), reply_markup=admin_evt_confirm_kb(message.from_user.id, target=tgt))

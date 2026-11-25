@@ -115,14 +115,33 @@ async def cb_quiz_intro(callback: CallbackQuery, callback_data: QuizCb, db_user:
     await show_quiz_intro(callback, callback.from_user.id, callback_data.qid, db_user.id)
 
 
+async def _question_caption(session, qq: QuizQuestion, prefix: str = "") -> str:
+    total_q = int(
+        (
+            await session.execute(
+                select(func.count(QuizQuestion.id)).where(QuizQuestion.quiz_id == qq.quiz_id)
+            )
+        ).scalar_one()
+        or 0
+    )
+    pos = int(qq.order_num or 1)
+    t_sec = int(qq.time_limit_sec or 30)
+    head = f"{prefix}\n\n" if prefix else ""
+    return (
+        f"{head}🧠 <b>Savol {pos}/{max(total_q, pos)}</b>  <i>(⏱ ~{t_sec} soniya)</i>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"{esc(qq.question_text)}"
+    )
+
+
 @router.callback_query(QuizCb.filter(F.act == "play"))
 async def cb_quiz_play(callback: CallbackQuery, callback_data: QuizCb, db_user: User) -> None:
     async with get_session() as session:
         qq = await GameplayService.get_next_unanswered_question(session, callback_data.qid, db_user.id)
-    if qq is None:
-        await callback.answer("🎉 Siz ushbu quizdagi barcha savollarga javob bergansiz!", show_alert=True)
-        return
-    txt = f"🧠 <b>Savol #{qq.order_num}</b>\n\n{esc(qq.question_text)}"
+        if qq is None:
+            await callback.answer("🎉 Siz ushbu quizdagi barcha savollarga javob bergansiz!", show_alert=True)
+            return
+        txt = await _question_caption(session, qq)
     await edit_or_answer(callback, txt, reply_markup=quiz_question_kb(callback.from_user.id, qq))
 
 
@@ -147,16 +166,55 @@ async def cb_quiz_answer(callback: CallbackQuery, callback_data: QuizCb, db_user
             await session.rollback()
     await callback.answer(msg[:190], show_alert=True)
     if accepted:
+        owner_id = callback.from_user.id
         async with get_session() as session:
             next_q = await GameplayService.get_next_unanswered_question(session, qq.quiz_id, db_user.id)
+            if next_q is not None:
+                txt = await _question_caption(session, next_q, prefix=esc(msg))
+            else:
+                total_q = int(
+                    (
+                        await session.execute(
+                            select(func.count(QuizQuestion.id)).where(QuizQuestion.quiz_id == qq.quiz_id)
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                ok_q = int(
+                    (
+                        await session.execute(
+                            select(func.count(QuizAttempt.id)).where(
+                                QuizAttempt.quiz_id == qq.quiz_id,
+                                QuizAttempt.user_id == db_user.id,
+                                QuizAttempt.is_correct.is_(True),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
         if next_q is not None:
             await edit_or_answer(
                 callback,
-                f"{esc(msg)}\n\n🧠 <b>Keyingi savol #{next_q.order_num}</b>\n\n{esc(next_q.question_text)}",
-                reply_markup=quiz_question_kb(callback.from_user.id, next_q),
+                txt,
+                reply_markup=quiz_question_kb(owner_id, next_q),
             )
         else:
-            await _show_quizzes(callback, callback.from_user.id)
+            b = InlineKeyboardBuilder()
+            b.row(
+                InlineKeyboardButton(text="🧠 Boshqa quizlar", callback_data=QuizCb(owner_id=owner_id, act="v").pack()),
+                InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+            )
+            await edit_or_answer(
+                callback,
+                (
+                    f"{esc(msg)}\n\n"
+                    "🏁 <b>VIKTORINA YAKUNLANDI!</b>\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"📊 Natija: <b>{ok_q}/{total_q}</b> to‘g‘ri javob\n"
+                    "Barcha savollarga javob berdingiz!"
+                ),
+                reply_markup=b.as_markup(),
+            )
 
 
 @router.callback_query(QuizCb.filter(F.act == "hist"))

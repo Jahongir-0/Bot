@@ -18,6 +18,8 @@ from keyboards.v2 import (
     lucky_pick_kb,
     mines_bet_kb,
     mines_board_kb,
+    seq_bet_kb,
+    seq_pad_kb,
     slots_bet_kb,
     wheel_menu_kb,
 )
@@ -45,6 +47,9 @@ _GAME_USER_LOCKS: dict[int, asyncio.Lock] = {}
 _MINES_ACTIVE: dict[int, dict] = {}
 
 
+_SEQ_ACTIVE: dict[int, dict] = {}
+
+
 def _user_game_lock(user_id: int) -> asyncio.Lock:
     lock = _GAME_USER_LOCKS.get(user_id)
     if lock is None:
@@ -53,7 +58,7 @@ def _user_game_lock(user_id: int) -> asyncio.Lock:
     return lock
 
 
-_EXTRA_KEYS = ("dart", "bowling", "basket", "chest")
+_EXTRA_KEYS = ("dart", "bowling", "basket", "chest", "seq")
 
 
 def _game_menu_text(st: dict) -> str:
@@ -68,6 +73,7 @@ def _game_menu_text(st: dict) -> str:
 
     wheel_fee = f"{st['wheel_cost']:,} 🪙 chipta" if st["wheel_cost"] > 0 else "bepul"
     rows = [
+        ("🧠", "Xotira Zanjiri", f"4 ta runa eslab qoling ({int(cfg.get('seq_win_pct', 220)) / 100:g}x)", st["seq_enabled"], st["seq_used"], st["seq_limit"]),
         ("🎰", "Slot 777", "777 = 10x yutuq", st["slots_enabled"], st["slots_used"], st["slots_limit"]),
         ("💣", "Xazina ovi", "bombadan qoching, 4x gacha", st["mines_enabled"], st["mines_used"], st["mines_limit"]),
         ("🎡", "Omad g‘ildiragi", wheel_fee, st["wheel_enabled"], st["wheel_used"], st["wheel_limit"]),
@@ -145,6 +151,7 @@ def _games_kb_from_state(owner_id: int, st: dict) -> InlineKeyboardMarkup:
         can_bowling=st["bowling_enabled"] and st["bowling_used"] < st["bowling_limit"],
         can_basket=st["basket_enabled"] and st["basket_used"] < st["basket_limit"],
         can_chest=st["chest_enabled"] and st["chest_used"] < st["chest_limit"],
+        can_seq=st["seq_enabled"] and st["seq_used"] < st["seq_limit"],
     )
 
 
@@ -893,3 +900,183 @@ async def cb_game_chest_pick(callback: CallbackQuery, callback_data: GameCb, db_
         await callback.message.answer("⚠️ O‘yinda xatolik bo‘ldi. Qayta urinib ko‘ring.")
     finally:
         _PLAYING.discard(uid)
+
+
+# ===========================================================================
+# 🧠 XOTIRA ZANJIRI (Skill-Based Rune Memory Challenge)
+# ===========================================================================
+@router.callback_query(GameCb.filter(F.act == "seq"))
+async def cb_game_seq_menu(callback: CallbackQuery, db_user: User) -> None:
+    uid = db_user.id
+    active = _SEQ_ACTIVE.get(uid)
+    if active and not active.get("finished") and active.get("phase") == "recall":
+        step = int(active.get("step", 0))
+        seq = active.get("seq", [])
+        so_far = " → ".join(
+            ExtraGamesService.SEQ_RUNES[seq[i]] if i < step else "▫️" for i in range(len(seq))
+        )
+        await edit_or_answer(
+            callback,
+            (
+                f"🧠 <b>XOTIRA ZANJIRI — DAVOM ETISH</b> ({step}/{len(seq)})\n{LINE_SEP}\n"
+                f"Ketma-ketlik: {so_far}\n\n"
+                f"👇 {step + 1}-belgini tanlang:"
+            ),
+            reply_markup=seq_pad_kb(callback.from_user.id, ExtraGamesService.SEQ_RUNES),
+        )
+        await callback.answer()
+        return
+
+    st = await _game_state(uid)
+    cfg = st["cfg"]
+    if not st["seq_enabled"]:
+        await callback.answer("🔴 Xotira Zanjiri hozircha o‘chirilgan.", show_alert=True)
+        return
+    left = max(0, st["seq_limit"] - st["seq_used"])
+    if left <= 0:
+        await callback.answer("🎟 Bugungi urinishlar tugadi.", show_alert=True)
+        return
+    win_x = int(cfg.get("seq_win_pct", 220)) / 100
+    await edit_or_answer(
+        callback,
+        (
+            f"🧠 <b>XOTIRA ZANJIRI ({win_x:g}x)</b>\n{LINE_SEP}\n"
+            "Bot sizga <b>4 ta runa</b> ketma-ketligini <b>3 soniya</b> ko‘rsatadi.\n"
+            "So‘ng runalar yashiriladi — xuddi shu tartibda bosib chiqsangiz yutasiz!\n\n"
+            f"🏆 To‘g‘ri zanjir: <b>{win_x:g}x</b> + <b>{int(cfg.get('seq_xp', 25))} XP</b>\n"
+            f"💰 Balans: <b>{fmt_coins(st['coins'])} 🪙</b>\n"
+            f"🎟 Bugun qoldi: <b>{left}/{st['seq_limit']}</b>\n\n"
+            "👇 Garov miqdorini tanlang:"
+        ),
+        reply_markup=seq_bet_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GameCb.filter(F.act == "seq_go"))
+async def cb_game_seq_go(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    bet = int(callback_data.val)
+    if uid in _PLAYING:
+        await callback.answer("⏳ Biroz kuting...")
+        return
+    _PLAYING.add(uid)
+    try:
+        async with _user_game_lock(uid):
+            prev = _SEQ_ACTIVE.get(uid)
+            if prev and not prev.get("finished"):
+                await callback.answer("⚠️ Avval joriy Xotira Zanjiri o‘yinini yakunlang!", show_alert=True)
+                return
+            async with get_session() as session:
+                ok, msg, state_obj = await ExtraGamesService.start_seq_game(session, uid, bet)
+                if ok and state_obj is not None:
+                    await session.commit()
+                    _SEQ_ACTIVE[uid] = state_obj
+                else:
+                    await session.rollback()
+        if not ok or state_obj is None:
+            await callback.answer(msg[:190], show_alert=True)
+            return
+
+        await callback.answer()
+        runes = ExtraGamesService.SEQ_RUNES
+        seq_str = "  →  ".join(runes[i] for i in state_obj["seq"])
+        await edit_or_answer(
+            callback,
+            (
+                f"🧠 <b>ESLAB QOLING! (3 soniya)</b>\n{LINE_SEP}\n\n"
+                f"🔮 <b>{seq_str}</b>\n\n"
+                "⏳ <i>Ketma-ketlik yashirilmoqda...</i>"
+            ),
+            reply_markup=None,
+        )
+        await asyncio.sleep(3.2)
+        async with _user_game_lock(uid):
+            if uid not in _SEQ_ACTIVE or _SEQ_ACTIVE[uid] is not state_obj:
+                return
+            state_obj["phase"] = "recall"
+            state_obj["deadline"] = asyncio.get_running_loop().time() + 45.0
+        blanks = " → ".join("▫️" for _ in state_obj["seq"])
+        await edit_or_answer(
+            callback,
+            (
+                f"🧠 <b>XOTIRA ZANJIRI</b> (0/{len(state_obj['seq'])})\n{LINE_SEP}\n"
+                f"Ketma-ketlik: {blanks}\n\n"
+                "👇 1-belgidan boshlab tartib bilan bosing (45 soniya):"
+            ),
+            reply_markup=seq_pad_kb(callback.from_user.id, runes),
+        )
+    except Exception:
+        logger.exception("Xotira Zanjiri boshlashda xato")
+        _SEQ_ACTIVE.pop(uid, None)
+        await callback.message.answer("⚠️ O‘yinda xatolik bo‘ldi. Qayta urinib ko‘ring.")
+    finally:
+        _PLAYING.discard(uid)
+
+
+@router.callback_query(GameCb.filter(F.act == "seq_tap"))
+async def cb_game_seq_tap(callback: CallbackQuery, callback_data: GameCb, db_user: User) -> None:
+    uid = db_user.id
+    rune_idx = int(callback_data.val)
+    async with _user_game_lock(uid):
+        gstate = _SEQ_ACTIVE.get(uid)
+        if not gstate or gstate.get("finished"):
+            await callback.answer("Bu o‘yin yakunlangan. Yangi o‘yin boshlang!", show_alert=True)
+            return
+        now_t = asyncio.get_running_loop().time()
+        if gstate.get("phase") == "recall" and now_t > float(gstate.get("deadline", now_t + 1)):
+            gstate["finished"] = True
+            _SEQ_ACTIVE.pop(uid, None)
+            seq_str = " → ".join(ExtraGamesService.SEQ_RUNES[i] for i in gstate.get("seq", []))
+            await edit_or_answer(
+                callback,
+                (
+                    f"⏰ <b>VAQT TUGADI!</b>\n{LINE_SEP}\n"
+                    f"To‘g‘ri ketma-ketlik: {seq_str}\n"
+                    f"🪙 Yo‘qotildi: <b>-{int(gstate.get('bet', 0)):,}</b> coin"
+                ),
+                reply_markup=_game_result_kb(
+                    callback.from_user.id,
+                    "🧠 Yana o‘ynash",
+                    GameCb(owner_id=callback.from_user.id, act="seq").pack(),
+                    1,
+                ),
+            )
+            await callback.answer("Vaqt tugadi!")
+            return
+
+        new_coins = 0
+        used_now = 0
+        limit_now = 5
+        async with get_session() as session:
+            outcome, _payout, msg = await ExtraGamesService.step_seq_game(session, uid, gstate, rune_idx)
+            if outcome in ("win", "wrong"):
+                new_coins = int((await session.execute(select(User.coins).where(User.id == uid))).scalar_one_or_none() or 0)
+                await session.commit()
+                _en, used_now, limit_now = await ExtraGamesService.status(session, uid, "seq")
+            else:
+                await session.rollback()
+
+    if outcome == "invalid":
+        await callback.answer(msg[:190], show_alert=True)
+        return
+    if outcome == "progress":
+        await edit_or_answer(
+            callback,
+            msg,
+            reply_markup=seq_pad_kb(callback.from_user.id, ExtraGamesService.SEQ_RUNES),
+        )
+        await callback.answer("✅ To‘g‘ri!")
+        return
+
+    _SEQ_ACTIVE.pop(uid, None)
+    left = max(0, limit_now - used_now)
+    txt = f"{msg}\n{LINE_SEP}\n💰 Balans: <b>{fmt_coins(new_coins)} 🪙</b>\n🎟 Qoldi: <b>{left}/{limit_now}</b>"
+    kb = _game_result_kb(
+        callback.from_user.id,
+        "🧠 Yana o‘ynash",
+        GameCb(owner_id=callback.from_user.id, act="seq").pack(),
+        left,
+    )
+    await edit_or_answer(callback, txt, reply_markup=kb)
+    await callback.answer()

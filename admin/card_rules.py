@@ -36,6 +36,10 @@ CFG_FIELDS = {
     "bot_sell_level_bonus_pct": ("🤖 Botga sotish: lvl bonusi (%)", [0, 5, 10, 15, 20, 25], lambda v: f"+{int(v)}% / lvl"),
     "stars_per_level": ("⭐ Stars narxi (daraja boshiga)", [10, 20, 50, 100], lambda v: f"{int(v)} ⭐"),
     "stars_max_level": ("⭐ Stars bilan maksimal daraja", [3, 5, 7, 10], lambda v: f"{int(v)}"),
+    "merge_count": ("🔮 Birlashtirish: kerakli karta soni", [2, 3, 4, 5, 8, 10], lambda v: f"{int(v)} ta"),
+    "merge_daily_limit": ("🔮 Kunlik birlashtirish limiti", [0, 1, 2, 3, 5, 10], lambda v: "Cheklovsiz" if int(v) == 0 else f"{int(v)}/kun"),
+    "merge_cost_4": ("🔮 Birlashtirish: 4→5 rank (karta soni)", [0, 3, 5, 8, 10], lambda v: "o‘chiq" if int(v) == 0 else f"{int(v)} ta"),
+    "merge_cost_5": ("🔮 Birlashtirish: 5→6 rank (karta soni)", [0, 5, 10, 20], lambda v: "o‘chiq" if int(v) == 0 else f"{int(v)} ta"),
     "power_step": ("💪 Daraja boshiga kuch o‘sishi", [0.1, 0.15, 0.2, 0.3], lambda v: f"+{int(float(v) * 100)}%"),
 }
 
@@ -82,12 +86,31 @@ async def _render(target, owner: int) -> None:
             )
         )
     b.row(
+        InlineKeyboardButton(
+            text=f"🔮 Birlashtirish: {'🟢 YOQILGAN' if cfg.get('merge_enabled', True) else '🔴 O‘CHIQ'}",
+            callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mtog").pack(),
+        )
+    )
+    pairs = cfg.get("merge_pairs") or {}
+    ranks_by_ord = {int(r.get("order", 0)): r for r in ranks}
+    pair_btns = []
+    for ord_num in sorted(ranks_by_ord):
+        if ord_num + 1 in ranks_by_ord:
+            r_from = ranks_by_ord[ord_num]
+            r_to = ranks_by_ord[ord_num + 1]
+            on = bool(pairs.get(str(ord_num), True))
+            pair_btns.append(
+                InlineKeyboardButton(
+                    text=f"{'✅' if on else '🚫'} {r_from.get('emoji', '')}{ord_num}→{r_to.get('emoji', '')}{ord_num + 1}",
+                    callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mpair", tid=ord_num).pack(),
+                )
+            )
+    for i in range(0, len(pair_btns), 3):
+        b.row(*pair_btns[i : i + 3])
+    b.row(
         InlineKeyboardButton(text="✏️ Lvl narxi omili", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="coin_cost_factor").pack()),
         InlineKeyboardButton(text="✏️ Stars/lvl", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="stars_per_level").pack()),
         InlineKeyboardButton(text="✏️ Bot Lvl %", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="bot_sell_level_bonus_pct").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🔮 Birlashtirish sozlamalari (barcha ranklar)", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mg_v").pack()),
     )
     b.row(
         InlineKeyboardButton(text="💎 Rank narxlarini o‘zgartirish", callback_data=AdmV2Cb(owner_id=owner, sec="ranks", act="v").pack()),
@@ -104,82 +127,6 @@ async def _perm(callback: CallbackQuery, admin_perms: Optional[set]) -> bool:
         await callback.answer("⛔ Bu bo‘limga ruxsatingiz yo‘q.", show_alert=True)
         return False
     return True
-
-
-MERGE_PRESETS = [0, 2, 3, 5, 8, 10, 15, 20]
-
-
-def _merge_fmt(v: int) -> str:
-    return "🚫 o‘chiq" if int(v) <= 0 else f"{int(v)} ta"
-
-
-async def _render_merge(target, owner: int) -> None:
-    async with get_session() as session:
-        ranks = await GameplayService.get_rank_definitions(session)
-        cfg = await CardLevelService.get_config(session)
-    ranks = sorted(ranks, key=lambda r: int(r.get("order", 0)))
-    lines = [
-        header("🔮 <b>BIRLASHTIRISH SOZLAMALARI</b>"),
-        "Foydalanuvchi bir xil rankdagi kartalarini topshirib, <b>keyingi rankdagi</b> karta oladi.",
-        "Har bir rank uchun nechta karta kerakligini belgilang. <b>0 = o‘chiq</b> (o‘sha rankdan oshirib bo‘lmaydi).",
-        "",
-    ]
-    b = InlineKeyboardBuilder()
-    for idx, r in enumerate(ranks[:-1]):
-        order = int(r.get("order", idx + 1))
-        nxt = ranks[idx + 1]
-        cost = int(cfg.get(f"merge_cost_{order}", 0) or 0)
-        lines.append(f"{r.get('emoji', '⭐')} {esc(r['name'])} → {nxt.get('emoji', '⭐')} {esc(nxt['name'])}: <b>{_merge_fmt(cost)}</b>")
-        b.row(
-            InlineKeyboardButton(
-                text=f"{r.get('emoji', '⭐')} {r['name']} → {nxt['name']}: {_merge_fmt(cost)}"[:50],
-                callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mg_c", tid=order).pack(),
-            ),
-            InlineKeyboardButton(text="✏️", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mg_ed", tid=order).pack()),
-        )
-    lines += ["", "<i>Tugmani bossangiz tayyor qiymatlar almashadi (0 → 2 → 3 → 5 → 8 → 10 → 15 → 20). Aniq son uchun ✏️ ni bosing.</i>"]
-    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="v").pack()))
-    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
-
-
-@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mg_v")))
-async def cb_merge_home(callback: CallbackQuery, state: FSMContext, admin_perms: Optional[set] = None) -> None:
-    await state.clear()
-    if await _perm(callback, admin_perms):
-        await _render_merge(callback, callback.from_user.id)
-
-
-@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mg_c")))
-async def cb_merge_cycle(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: Optional[set] = None) -> None:
-    if not await _perm(callback, admin_perms):
-        return
-    key = f"merge_cost_{int(callback_data.tid)}"
-    async with get_session() as session:
-        cfg = await CardLevelService.get_config(session)
-        cur = int(cfg.get(key, 0) or 0)
-        nxt = next((p for p in MERGE_PRESETS if p > cur), MERGE_PRESETS[0])
-        await CardLevelService.set_config_value(session, key, nxt)
-        await session.commit()
-    await _render_merge(callback, callback.from_user.id)
-
-
-@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mg_ed")))
-async def cb_merge_edit_prompt(
-    callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: Optional[set] = None
-) -> None:
-    if not await _perm(callback, admin_perms):
-        return
-    key = f"merge_cost_{int(callback_data.tid)}"
-    await state.set_state(AdminCardRulesStates.waiting_val)
-    await state.update_data(owner_tg_id=callback.from_user.id, cr_field=key)
-    cancel_kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec=SEC, act="mg_v").pack())]]
-    )
-    await edit_or_answer(
-        callback,
-        "🔮 Nechta karta topshirilsa keyingi rankdagi karta berilsin? Butun son kiriting (<code>0</code> = o‘chirish):",
-        reply_markup=cancel_kb,
-    )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "v")))
@@ -213,6 +160,31 @@ async def cb_rules_cfg(callback: CallbackQuery, callback_data: AdmV2Cb, admin_pe
         cfg = await CardLevelService.get_config(session)
         new_val = _next(field[1], cfg[callback_data.ext])
         await CardLevelService.set_config_value(session, callback_data.ext, new_val)
+        await session.commit()
+    await _render(callback, callback.from_user.id)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mtog")))
+async def cb_rules_merge_toggle(callback: CallbackQuery, admin_perms: Optional[set] = None) -> None:
+    if not await _perm(callback, admin_perms):
+        return
+    async with get_session() as session:
+        cfg = await CardLevelService.get_config(session)
+        await CardLevelService.set_config_value(session, "merge_enabled", not bool(cfg.get("merge_enabled", True)))
+        await session.commit()
+    await _render(callback, callback.from_user.id)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mpair")))
+async def cb_rules_merge_pair(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: Optional[set] = None) -> None:
+    if not await _perm(callback, admin_perms):
+        return
+    async with get_session() as session:
+        cfg = await CardLevelService.get_config(session)
+        pairs = dict(cfg.get("merge_pairs") or {})
+        key = str(callback_data.tid)
+        pairs[key] = not bool(pairs.get(key, True))
+        await CardLevelService.set_config_value(session, "merge_pairs", pairs)
         await session.commit()
     await _render(callback, callback.from_user.id)
 
@@ -260,10 +232,6 @@ async def fsm_rules_val(message: Message, state: FSMContext) -> None:
             val = int(float(raw))
             if not (0 <= val <= 100):
                 raise ValueError("0 dan 100 gacha foiz kiriting.")
-        elif key.startswith("merge_cost_"):
-            val = int(float(raw))
-            if not (0 <= val <= 1000):
-                raise ValueError("0 dan 1000 gacha butun son kiriting (0 = o‘chirish).")
         else:
             await state.clear()
             return
@@ -274,7 +242,4 @@ async def fsm_rules_val(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         await CardLevelService.set_config_value(session, key, val)
         await session.commit()
-    if key.startswith("merge_cost_"):
-        await _render_merge(message, message.from_user.id)
-    else:
-        await _render(message, message.from_user.id)
+    await _render(message, message.from_user.id)

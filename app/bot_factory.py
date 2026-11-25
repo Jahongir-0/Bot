@@ -111,6 +111,18 @@ def create_dispatcher(lock_manager: LockManager) -> Dispatcher:
                 chat_id=chat_id,
                 action=action,
             )
+            try:
+                if upd.callback_query is not None:
+                    await upd.callback_query.answer(
+                        "⚠️ Kutilmagan texnik xatolik yuz berdi. Muammo adminga yuborildi.",
+                        show_alert=True,
+                    )
+                elif upd.message is not None and upd.message.chat.type == "private":
+                    await upd.message.answer(
+                        "⚠️ Kechirasiz, kutilmagan texnik xatolik yuz berdi. Muammo adminga yuborildi, birozdan keyin qayta urinib ko‘ring."
+                    )
+            except Exception:
+                pass
         return True
 
     register_all_routers(dp)

@@ -320,6 +320,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
         due_quizzes = []
         async with get_session() as session:
             finalized_auc = await AuctionWishlistService.finalize_expired_auctions(session)
+            ending_auc_notifs = await AuctionWishlistService.notify_ending_auctions(session)
             finalized_seasons = await GameplayService.finalize_expired_seasons(session)
             expired_bans = await SecurityBackupService.expire_temp_bans(session)
             expired_ads = await CommunityService.expire_due_ads(session)
@@ -339,7 +340,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                 q.status = "active"
                 q.is_active = True
                 q.is_dispatched = True
-            if finalized_auc or finalized_seasons or expired_bans or expired_ads or expired_ch.rowcount or due_msgs or due_quizzes:
+            if finalized_auc or ending_auc_notifs or finalized_seasons or expired_bans or expired_ads or expired_ch.rowcount or due_msgs or due_quizzes:
                 await session.commit()
 
         # Rejalashtirilgan xabarlarni yuborish

@@ -34,6 +34,18 @@ router.callback_query.filter(IsAdminFilter())
 # ===========================================================================
 # 14. SUPPORT, SECURITY (zero-pipe ban) & LOGS (paginated)
 # ===========================================================================
+def _extract_admin_support_payload(message: Message) -> tuple[str, str | None, str | None]:
+    caption = (message.caption or "").strip()
+    text = (message.text or "").strip()
+    if message.photo:
+        return caption or "[🖼 Rasm]", "photo", message.photo[-1].file_id
+    if message.video:
+        return caption or "[🎬 Video]", "video", message.video.file_id
+    if message.document:
+        return caption or f"[📎 Fayl: {message.document.file_name or 'hujjat'}]", "document", message.document.file_id
+    return text, None, None
+
+
 @router.callback_query(AdmV2Cb.filter(F.sec == "support"))
 async def cb_v2_support(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "support"):
@@ -42,7 +54,11 @@ async def cb_v2_support(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
     if callback_data.act == "reply":
         await state.set_state(AdminV2States.waiting_support_reply)
         await state.update_data(owner_tg_id=owner_id, ticket_id=callback_data.tid)
-        await edit_or_answer(callback, f"✍️ Murojaat <b>#{callback_data.tid}</b> uchun javob matnini yozing:", reply_markup=_cancel_kb(owner_id, "support", "v"))
+        await edit_or_answer(
+            callback,
+            f"✍️ Murojaat <b>#{callback_data.tid}</b> uchun javob yozing (matn, rasm, video yoki fayl):",
+            reply_markup=_cancel_kb(owner_id, "support", "v"),
+        )
         return
     async with get_session() as session:
         if callback_data.act == "close":
@@ -57,8 +73,12 @@ async def cb_v2_support(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
                 return
             t, msgs, u = res
             lines = [f"💬 <b>Murojaat #{t.id}</b> ({t.status}) — 👤 {esc(u.display_name if u else t.user_id)}\n<b>{esc(t.subject)}</b>\n"]
+            media_items = []
             for m in msgs[-10:]:
-                lines.append(f"<b>{m.sender_type}:</b> {esc(m.body)}")
+                tag = f" [📎 {m.media_type}]" if getattr(m, "media_type", None) else ""
+                lines.append(f"<b>{m.sender_type}{tag}:</b> {esc(m.body)}")
+                if getattr(m, "media_type", None) and getattr(m, "media_file_id", None):
+                    media_items.append((m.sender_type, m.media_type, m.media_file_id, m.body))
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -69,6 +89,18 @@ async def cb_v2_support(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
                 ]
             )
             await edit_or_answer(callback, "\n".join(lines), reply_markup=kb)
+            if callback.message and media_items:
+                for who, mtype, fid, cap in media_items[-3:]:
+                    try:
+                        c_txt = f"<b>{esc(who)}:</b> {esc(cap[:200])}"
+                        if mtype == "photo":
+                            await callback.message.answer_photo(fid, caption=c_txt)
+                        elif mtype == "video":
+                            await callback.message.answer_video(fid, caption=c_txt)
+                        elif mtype == "document":
+                            await callback.message.answer_document(fid, caption=c_txt)
+                    except Exception:
+                        pass
             return
         tickets = await CommunityService.list_tickets(session, limit=20)
     b = InlineKeyboardBuilder()
@@ -89,17 +121,36 @@ async def fsm_v2_support_reply(message: Message, state: FSMContext) -> None:
     if data.get("owner_tg_id") != message.from_user.id:
         return
     tid = int(data["ticket_id"])
-    body = (message.text or "").strip()
+    body, media_type, media_file_id = _extract_admin_support_payload(message)
+    if not body and not media_file_id:
+        await message.answer("⚠️ Matn yoki rasm/video/fayl yuboring.")
+        return
     await state.clear()
     async with get_session() as session:
-        t = await CommunityService.reply_ticket(session, tid, "admin", message.from_user.id, body)
+        t = await CommunityService.reply_ticket(
+            session,
+            tid,
+            "admin",
+            message.from_user.id,
+            body,
+            media_type=media_type,
+            media_file_id=media_file_id,
+        )
         user = await session.get(User, t.user_id) if t else None
         if user:
             await CommunityService.notify_user(session, user.id, "support", f"💬 Murojaat #{tid} ga javob", body)
         await session.commit()
     if user:
+        cap = f"💬 <b>Admin javobi (#{tid}):</b>\n\n{esc(body)}"
         try:
-            await message.bot.send_message(user.telegram_id, f"💬 <b>Admin javobi (#{tid}):</b>\n\n{esc(body)}")
+            if media_type == "photo" and media_file_id:
+                await message.bot.send_photo(user.telegram_id, media_file_id, caption=cap[:1020])
+            elif media_type == "video" and media_file_id:
+                await message.bot.send_video(user.telegram_id, media_file_id, caption=cap[:1020])
+            elif media_type == "document" and media_file_id:
+                await message.bot.send_document(user.telegram_id, media_file_id, caption=cap[:1020])
+            else:
+                await message.bot.send_message(user.telegram_id, cap)
         except Exception:
             pass
     await message.answer(f"✅ Javob yuborildi (Murojaat #{tid})!")

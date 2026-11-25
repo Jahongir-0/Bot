@@ -131,3 +131,134 @@ class ExtraGamesService:
                 f"🪙 Ichidan: <b>+{payout:,}</b> coin (sof: {sign}{net:,} 🪙) · ⚡ +{xp} XP"
             ), payout, net
         return True, f"📦 <b>Siz {int(pick)}-sandiqni ochdingiz!</b>\n\n{label}\n\n🪙 Yo‘qotildi: <b>-{cost:,}</b> coin", 0, -cost
+
+    # ------------------------------------------------------------------
+    # 🧠 Xotira Zanjiri (Skill-Based Rune Memory Challenge)
+    # ------------------------------------------------------------------
+    SEQ_RUNES: Tuple[str, ...] = ("🔥", "❄️", "⚡", "🌪", "💧", "✨")
+    SEQ_LENGTH: int = 4
+
+    @staticmethod
+    async def start_seq_game(
+        session: AsyncSession,
+        uid: int,
+        bet: int,
+        forced_seq: list[int] | None = None,
+    ) -> Tuple[bool, str, dict | None]:
+        user = await session.get(User, uid)
+        if user is None:
+            return False, "Foydalanuvchi topilmadi.", None
+        cfg = await GameplayService.get_game_config(session)
+        if not cfg.get("seq_enabled", True):
+            return False, "🧠 Xotira Zanjiri vaqtincha o‘chirilgan.", None
+        bet = int(bet)
+        if bet not in BETS:
+            return False, "Garov miqdori 50, 100, 250 yoki 500 coin bo‘lishi kerak.", None
+        today, used = await GameplayService._daily_game_count(session, uid, "seq")
+        limit = int(cfg.get("seq_daily_limit", 5))
+        if used >= limit:
+            return False, f"🧠 Bugungi Xotira Zanjiri limiti tugadi ({limit}/{limit}). Ertaga qayting!", None
+        try:
+            await UserService.debit_coins(
+                session, uid, bet, "mini_game_seq_bet", f"Xotira Zanjiri garov {bet}",
+                reference_id=f"seq_bet:{uid}:{today.isoformat()}:{used + 1}",
+            )
+        except InsufficientCoinsError:
+            return False, f"🪙 Coinlaringiz yetarli emas ({bet:,} 🪙 kerak).", None
+
+        gs = GameSession(
+            user_id=uid,
+            game_type="seq",
+            roll_value=bet,
+            reward_coins=0,
+            reward_xp=0,
+            created_date=today,
+        )
+        session.add(gs)
+        await session.flush()
+
+        n_runes = len(ExtraGamesService.SEQ_RUNES)
+        if forced_seq and len(forced_seq) == ExtraGamesService.SEQ_LENGTH:
+            seq = [int(x) % n_runes for x in forced_seq]
+        else:
+            seq = [_RNG.randrange(n_runes) for _ in range(ExtraGamesService.SEQ_LENGTH)]
+
+        state_obj = {
+            "session_id": gs.id,
+            "bet": bet,
+            "seq": seq,
+            "step": 0,
+            "phase": "memorize",
+            "finished": False,
+        }
+        return True, "🧠 Ketma-ketlikni eslab qoling!", state_obj
+
+    @staticmethod
+    async def step_seq_game(
+        session: AsyncSession,
+        uid: int,
+        game_state: dict,
+        rune_idx: int,
+    ) -> Tuple[str, int, str]:
+        """Qaytaradi: (outcome: 'progress'|'win'|'wrong'|'invalid', payout, msg)."""
+        if game_state.get("finished"):
+            return "invalid", 0, "Bu o‘yin allaqachon tugagan."
+        if game_state.get("phase") != "recall":
+            return "invalid", 0, "Avval ketma-ketlikni eslab oling!"
+        seq = list(game_state.get("seq") or [])
+        step = int(game_state.get("step", 0))
+        if not (0 <= int(rune_idx) < len(ExtraGamesService.SEQ_RUNES)) or step >= len(seq):
+            return "invalid", 0, "Noto‘g‘ri tanlov."
+
+        bet = int(game_state["bet"])
+        runes = ExtraGamesService.SEQ_RUNES
+        target_seq_str = " → ".join(runes[i] for i in seq)
+
+        if int(rune_idx) != int(seq[step]):
+            game_state["finished"] = True
+            return "wrong", 0, (
+                f"❌ <b>XATO!</b>\n\n"
+                f"Siz {step + 1}-bosqichda {runes[int(rune_idx)]} bosdingiz.\n"
+                f"To‘g‘ri ketma-ketlik: {target_seq_str}\n\n"
+                f"🪙 Yo‘qotildi: <b>-{bet:,}</b> coin"
+            )
+
+        step += 1
+        game_state["step"] = step
+        if step < len(seq):
+            so_far = " → ".join(runes[seq[i]] if i < step else "▫️" for i in range(len(seq)))
+            return "progress", 0, (
+                f"🧠 <b>XOTIRA ZANJIRI</b> ({step}/{len(seq)})\n\n"
+                f"Ketma-ketlik: {so_far}\n\n"
+                f"👇 Keyingi ({step + 1}-) belgiga bosing:"
+            )
+
+        # Barcha belgilar to'g'ri topildi!
+        game_state["finished"] = True
+        cfg = await GameplayService.get_game_config(session)
+        pct = max(100, int(cfg.get("seq_win_pct", 220)))
+        payout = int(round(bet * pct / 100))
+        xp = int(cfg.get("seq_xp", 25))
+
+        user = await session.get(User, uid)
+        gs = await session.get(GameSession, int(game_state["session_id"]))
+        if gs is not None:
+            gs.reward_coins = payout
+            gs.reward_xp = xp
+        await UserService.credit_coins(
+            session, uid, payout, "mini_game_seq_win", f"Xotira Zanjiri {pct}%",
+            reference_id=f"seq_win:{game_state['session_id']}",
+        )
+        if user is not None:
+            user.game_wins = int(user.game_wins or 0) + 1
+            user.xp = int(user.xp or 0) + xp
+            user.level = max(1, 1 + (user.xp // 250))
+            await GameplayService.add_season_points(session, uid, points=15, xp=xp)
+        await session.flush()
+
+        net = payout - bet
+        return "win", payout, (
+            f"🏆 <b>MUKAMMAL XOTIRA!</b>\n\n"
+            f"Zanjir: {target_seq_str}\n\n"
+            f"🪙 Yutuq: <b>+{payout:,}</b> coin (sof: +{net:,} 🪙) · ⚡ +{xp} XP"
+        )

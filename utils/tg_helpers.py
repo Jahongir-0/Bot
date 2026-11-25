@@ -63,6 +63,22 @@ def is_admin_user(tg_user: Optional[TgUser]) -> bool:
     return is_super_admin(tg_user)
 
 
+def _uzbek_error_hint(exc: BaseException) -> str:
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    if "constraint" in msg or "integrity" in msg:
+        return "Ma’lumotlar bazasi cheklovi (takroriy yoki noto‘g‘ri bog‘lanish)."
+    if "column" in msg and ("does not exist" in msg or "no such" in msg):
+        return "Ma’lumotlar bazasida ustun yetishmayapti (migratsiya kerak)."
+    if "timeout" in msg or isinstance(exc, TimeoutError):
+        return "Tarmoq yoki Telegram API javobi kechikdi."
+    if "forbidden" in msg or "blocked" in msg:
+        return "Foydalanuvchi yoki guruh botni bloklagan / huquq yo‘q."
+    if name in ("KeyError", "AttributeError", "TypeError", "NameError"):
+        return f"Kod mantiqida xatolik ({name}) — tekshirish talab etiladi."
+    return f"Texnik xatolik ({name})."
+
+
 async def send_error_alert_to_super_admins(
     bot: Bot,
     module_name: str,
@@ -71,20 +87,22 @@ async def send_error_alert_to_super_admins(
     chat_id: Optional[int] = None,
     action: Optional[str] = None,
 ) -> None:
-    """Super Adminlarga xavfsiz xato xabarnomasini yuboradi (hech qanday token/parolsiz)."""
+    """Super Adminlarga tushunarli o'zbekcha xavfsiz xato hisobotini yuboradi (token/parolsiz)."""
     settings = get_settings()
     if not settings.admin_ids:
         return
     tb = redact_secrets("".join(traceback.format_exception_only(type(exc), exc))).strip()
-    short_tb = tb[:350]
+    short_tb = tb[:320]
+    hint = _uzbek_error_hint(exc)
     lines = [
-        "🔴 <b>BOT ERROR</b>",
-        f"📦 Module: <code>{module_name}</code>",
-        f"👤 User: <code>{user_tg_id or '—'}</code> | 💬 Chat: <code>{chat_id or '—'}</code>",
+        "🔴 <b>BOTDA XATOLIK ANIQLANDI</b>",
+        f"🧠 <b>Sabab:</b> {hint}",
+        f"📦 <b>Bo‘lim:</b> <code>{module_name}</code>",
+        f"👤 <b>Foydalanuvchi ID:</b> <code>{user_tg_id or '—'}</code> | 💬 <b>Chat:</b> <code>{chat_id or '—'}</code>",
     ]
     if action:
-        lines.append(f"⚡ Action: <code>{redact_secrets(action)[:120]}</code>")
-    lines.append(f"⚠️ Error: <code>{short_tb}</code>")
+        lines.append(f"⚡ <b>Harakat:</b> <code>{redact_secrets(action)[:110]}</code>")
+    lines.append(f"⚠️ <b>Tafsilot:</b> <code>{short_tb}</code>")
     msg_text = "\n".join(lines)
     for admin_id in settings.admin_ids:
         try:

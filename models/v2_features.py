@@ -155,6 +155,8 @@ class Auction(Base, TimestampMixin):
     finalized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     channel_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     card_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_bid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ending_notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
 
 
@@ -251,6 +253,7 @@ class WishlistItem(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     card_id: Mapped[int] = mapped_column(Integer, ForeignKey("cards.id", ondelete="CASCADE"), nullable=False, index=True)
+    notify_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
 
 class UserNotification(Base, TimestampMixin):
@@ -286,6 +289,8 @@ class SupportMessage(Base, TimestampMixin):
     sender_type: Mapped[str] = mapped_column(String(16), nullable=False, default="user")  # user|admin
     sender_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    media_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # photo|video|document
+    media_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
 class SecurityIncident(Base, TimestampMixin):
@@ -343,3 +348,34 @@ class CardTrade(Base, TimestampMixin):
     partner_coins: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending_pick", index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BotStoreListing(Base, TimestampMixin):
+    __tablename__ = "bot_store_listings"
+    __table_args__ = (
+        CheckConstraint("price_coins > 0", name="ck_bot_store_price_positive"),
+        Index("ix_bot_store_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    card_id: Mapped[int] = mapped_column(Integer, ForeignKey("cards.id", ondelete="CASCADE"), nullable=False, index=True)
+    card_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    price_coins: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="user_sell")  # user_sell|admin
+    seller_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", index=True)  # active|sold|removed
+    buyer_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    sold_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CardSuggestion(Base, TimestampMixin):
+    __tablename__ = "card_suggestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    media_type: Mapped[str] = mapped_column(String(24), nullable=False, default="Anime")
+    anime_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    character_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)  # pending|approved|rejected
+    admin_note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)

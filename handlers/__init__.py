@@ -6,6 +6,7 @@ from admin.quick_add import router as admin_quick_add_router
 from admin.v2 import router as admin_v2_router
 from handlers.achievements import router as achievements_router
 from handlers.auction import router as auction_router
+from handlers.bot_store import router as bot_store_router
 from handlers.collection import router as collection_router
 from handlers.daily import router as daily_router
 from handlers.drop import router as drop_router
@@ -44,6 +45,7 @@ def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(collection_router)
     dp.include_router(daily_router)
     dp.include_router(market_router)
+    dp.include_router(bot_store_router)
     dp.include_router(transfer_router)
     dp.include_router(offer_router)
     dp.include_router(search_router)

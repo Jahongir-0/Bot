@@ -10,6 +10,8 @@ from models.card import Card
 from models.market import CardListing, Offer
 from models.user import User
 from models.user_card import UserCard
+from models.v2_features import BotStoreListing, CardHistory
+from services.settings_service import SettingsService
 from services.user_service import InsufficientCoinsError, UserService
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE
 
@@ -32,6 +34,8 @@ class BotSellQuote:
     total_price: int
     is_favorite: bool = False
     is_showcased: bool = False
+    discount_pct: int = 0
+    discount_coins: int = 0
 
 
 @dataclass
@@ -42,6 +46,8 @@ class MarketActionResult:
     card: Optional[Card] = None
     seller: Optional[User] = None
     price_paid: int = 0
+    fee_coins: int = 0
+    fee_pct: int = 0
     is_duplicate: bool = False
     level_before: int = 0
     level_after: int = 0
@@ -75,7 +81,7 @@ class MarketService:
                     UserCard.user_id == seller_id,
                     UserCard.is_locked.is_(False),
                 )
-                .values(is_locked=True, updated_at=utcnow())
+                .values(is_locked=True, card_state="MARKET", updated_at=utcnow())
             )
             if upd.rowcount != 1:
                 return MarketActionResult(
@@ -94,6 +100,15 @@ class MarketService:
             )
             session.add(listing)
             await session.flush()
+
+            from services.auction_wishlist_service import AuctionWishlistService
+
+            await AuctionWishlistService.notify_wishlist_watchers(
+                session,
+                card.id,
+                "market",
+                f"🛒 {card.character_name} bozorga {price:,} 🪙 narxda qo‘yildi!",
+            )
             return MarketActionResult(
                 True,
                 "Karta marketga muvaffaqiyatli qo‘yildi!",
@@ -128,7 +143,7 @@ class MarketService:
             await session.execute(
                 update(UserCard)
                 .where(UserCard.id == listing.user_card_id)
-                .values(is_locked=False, updated_at=utcnow())
+                .values(is_locked=False, card_state="OWNED", updated_at=utcnow())
             )
             await session.flush()
             return MarketActionResult(True, "Karta sotuvdan olindi.", listing=listing)
@@ -171,6 +186,10 @@ class MarketService:
             uc_id = listing.user_card_id
             listing_id_val = listing.id
 
+            comm_cfg = await SettingsService.get_commission_config(session)
+            fee_coins, fee_pct = SettingsService.compute_commission(price_paid, comm_cfg, "market_buy")
+            seller_payout = max(1, price_paid - fee_coins)
+
             try:
                 await UserService.debit_coins(
                     session=session,
@@ -186,13 +205,15 @@ class MarketService:
             await UserService.credit_coins(
                 session=session,
                 user_id=seller_id,
-                amount=price_paid,
+                amount=seller_payout,
                 tx_type="market_sell",
-                description=f"Sold {card.character_name} on market",
+                description=f"Sold {card.character_name} on market"
+                + (f" (-{fee_pct}% komissiya)" if fee_coins else ""),
                 reference_id=f"listing:{listing_id_val}",
+                meta={"commission": fee_coins, "pct": fee_pct},
             )
 
-            # Refund any pending offers on this user_card BEFORE deleting uc (FK CASCADE)
+            # Refund/unlock any pending offers on this user_card BEFORE deleting uc (FK CASCADE)
             pending_offers = (
                 await session.execute(
                     select(Offer).where(
@@ -204,14 +225,21 @@ class MarketService:
             for off in pending_offers:
                 off.status = "cancelled"
                 off.resolved_at = now
-                await UserService.credit_coins(
-                    session=session,
-                    user_id=off.buyer_id,
-                    amount=off.amount,
-                    tx_type="offer_refund",
-                    description="Card sold on market - offer refunded",
-                    reference_id=f"offer:{off.id}",
-                )
+                if getattr(off, "offer_type", "coins") == "card" and getattr(off, "offered_user_card_id", None):
+                    await session.execute(
+                        update(UserCard)
+                        .where(UserCard.id == off.offered_user_card_id)
+                        .values(is_locked=False, card_state="OWNED", updated_at=now)
+                    )
+                elif int(off.amount or 0) > 0:
+                    await UserService.credit_coins(
+                        session=session,
+                        user_id=off.buyer_id,
+                        amount=off.amount,
+                        tx_type="offer_refund",
+                        description="Card sold on market - offer refunded",
+                        reference_id=f"offer:{off.id}",
+                    )
 
             if seller is not None:
                 s_stats = dict(seller.stats or {})
@@ -238,6 +266,7 @@ class MarketService:
                         is_showcased=False,
                         card_state="OWNED",
                         acquired_via="market",
+                        acquired_price_coins=price_paid,
                         updated_at=now,
                     )
                 )
@@ -253,6 +282,8 @@ class MarketService:
                 card=card,
                 seller=seller,
                 price_paid=price_paid,
+                fee_coins=fee_coins,
+                fee_pct=fee_pct,
                 is_duplicate=dup is not None,
                 level_before=dup.level_before if dup else 1,
                 level_after=dup.level_after if dup else 1,
@@ -306,8 +337,21 @@ class MarketService:
         return ListingView(listing=row[0], card=row[1], seller=row[2])
 
     # ------------------------------------------------------------------
-    # Bot Market (kartani botga sotish: rank narxi + level bonusi)
+    # Bot Market (kartani botga sotish: rank narxi + level bonusi - bot chegirmasi)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _compute_quote_values(
+        rank_val: int, level: int, lvl_cfg: dict, store_cfg: dict
+    ) -> Tuple[int, int, int, int, int, int]:
+        from services.card_level_service import CardLevelService
+
+        gross, base, bonus = CardLevelService.bot_sell_price(rank_val, level, lvl_cfg)
+        discount_pct = max(0, min(80, int(store_cfg.get("sell_discount_pct", 15))))
+        discount_coins = int(round(gross * discount_pct / 100.0)) if discount_pct > 0 else 0
+        total = max(1, gross - discount_coins)
+        bonus_pct = max(0, int(lvl_cfg.get("bot_sell_level_bonus_pct", 10)))
+        return total, base, bonus, bonus_pct, discount_pct, discount_coins
+
     @staticmethod
     async def get_bot_sell_quote(
         session: AsyncSession,
@@ -315,26 +359,24 @@ class MarketService:
         user_card_id: int,
     ) -> Tuple[bool, str, Optional[BotSellQuote]]:
         from services.card_level_service import CardLevelService
-        from services.collection_service import CollectionService
-        from services.settings_service import SettingsService
 
-        await CollectionService.reconcile_user_card_locks(session, user_id)
         uc = await session.get(UserCard, user_card_id)
         if uc is None or uc.user_id != user_id:
             return False, "Karta topilmadi yoki sizga tegishli emas.", None
         if uc.is_locked:
-            _, _, lock_lbl = await CollectionService.get_card_lock_info(session, uc.id)
-            return False, f"Karta hozir band ({lock_lbl}).", None
+            return False, "Karta hozir market/auksion/almashuvda band.", None
         card = await session.get(Card, uc.card_id)
         if card is None:
             return False, "Karta ma’lumoti topilmadi.", None
 
         rcfg = await SettingsService.get_rarity_config(session)
         lvl_cfg = await CardLevelService.get_config(session)
+        store_cfg = await SettingsService.get_bot_store_config(session)
         level = int(getattr(uc, "level", 1) or 1)
         rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-        total, base, bonus = CardLevelService.bot_sell_price(rank_val, level, lvl_cfg)
-        bonus_pct = max(0, int(lvl_cfg.get("bot_sell_level_bonus_pct", 10)))
+        total, base, bonus, bonus_pct, disc_pct, disc_coins = MarketService._compute_quote_values(
+            rank_val, level, lvl_cfg, store_cfg
+        )
         return True, "ok", BotSellQuote(
             user_card_id=uc.id,
             card=card,
@@ -345,6 +387,8 @@ class MarketService:
             total_price=total,
             is_favorite=bool(uc.is_favorite),
             is_showcased=bool(getattr(uc, "is_showcased", False)),
+            discount_pct=disc_pct,
+            discount_coins=disc_coins,
         )
 
     @staticmethod
@@ -355,10 +399,7 @@ class MarketService:
         page_size: int = 8,
     ) -> Tuple[List[BotSellQuote], int]:
         from services.card_level_service import CardLevelService
-        from services.collection_service import CollectionService
-        from services.settings_service import SettingsService
 
-        await CollectionService.reconcile_user_card_locks(session, user_id)
         cond = [UserCard.user_id == user_id, UserCard.is_locked.is_(False)]
         total = int((await session.execute(select(func.count(UserCard.id)).where(*cond))).scalar_one() or 0)
         offset = (max(1, page) - 1) * page_size
@@ -377,12 +418,14 @@ class MarketService:
 
         rcfg = await SettingsService.get_rarity_config(session)
         lvl_cfg = await CardLevelService.get_config(session)
-        bonus_pct = max(0, int(lvl_cfg.get("bot_sell_level_bonus_pct", 10)))
+        store_cfg = await SettingsService.get_bot_store_config(session)
         quotes: List[BotSellQuote] = []
         for uc, card in rows:
             lv = int(getattr(uc, "level", 1) or 1)
             rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-            total_p, base_p, bonus_p = CardLevelService.bot_sell_price(rank_val, lv, lvl_cfg)
+            total_p, base_p, bonus_p, bonus_pct, disc_pct, disc_coins = MarketService._compute_quote_values(
+                rank_val, lv, lvl_cfg, store_cfg
+            )
             quotes.append(
                 BotSellQuote(
                     user_card_id=uc.id,
@@ -394,6 +437,8 @@ class MarketService:
                     total_price=total_p,
                     is_favorite=bool(uc.is_favorite),
                     is_showcased=bool(getattr(uc, "is_showcased", False)),
+                    discount_pct=disc_pct,
+                    discount_coins=disc_coins,
                 )
             )
         return quotes, total
@@ -404,9 +449,12 @@ class MarketService:
         user_id: int,
         user_card_id: int,
     ) -> MarketActionResult:
-        from models.v2_features import CardHistory
+        from services.auction_wishlist_service import AuctionWishlistService
         from services.card_level_service import CardLevelService
-        from services.settings_service import SettingsService
+
+        store_cfg = await SettingsService.get_bot_store_config(session)
+        if not store_cfg.get("enabled", True) or not store_cfg.get("sell_enabled", True):
+            return MarketActionResult(False, "🤖 Botga karta sotish hozircha vaqtincha o‘chirilgan.")
 
         lock_mgr = get_lock_manager()
         async with lock_mgr.lock(f"uc:{user_card_id}", ttl_ms=5000) as acquired:
@@ -438,9 +486,11 @@ class MarketService:
             lvl_cfg = await CardLevelService.get_config(session)
             level = int(getattr(uc, "level", 1) or 1)
             rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-            total_price, base_val, bonus_val = CardLevelService.bot_sell_price(rank_val, level, lvl_cfg)
+            total_price, base_val, bonus_val, _, disc_pct, disc_coins = MarketService._compute_quote_values(
+                rank_val, level, lvl_cfg, store_cfg
+            )
 
-            # Refund any pending offers on this user_card BEFORE deleting uc (FK CASCADE)
+            # Refund/unlock any pending offers on this user_card BEFORE deleting uc (FK CASCADE)
             pending_offers = (
                 await session.execute(
                     select(Offer).where(
@@ -452,14 +502,21 @@ class MarketService:
             for off in pending_offers:
                 off.status = "cancelled"
                 off.resolved_at = now
-                await UserService.credit_coins(
-                    session=session,
-                    user_id=off.buyer_id,
-                    amount=off.amount,
-                    tx_type="offer_refund",
-                    description="Card sold to bot - offer refunded",
-                    reference_id=f"offer:{off.id}",
-                )
+                if getattr(off, "offer_type", "coins") == "card" and getattr(off, "offered_user_card_id", None):
+                    await session.execute(
+                        update(UserCard)
+                        .where(UserCard.id == off.offered_user_card_id)
+                        .values(is_locked=False, card_state="OWNED", updated_at=now)
+                    )
+                elif int(off.amount or 0) > 0:
+                    await UserService.credit_coins(
+                        session=session,
+                        user_id=off.buyer_id,
+                        amount=off.amount,
+                        tx_type="offer_refund",
+                        description="Card sold to bot - offer refunded",
+                        reference_id=f"offer:{off.id}",
+                    )
 
             session.add(
                 CardHistory(
@@ -469,16 +526,29 @@ class MarketService:
                     from_user_id=user_id,
                     to_user_id=None,
                     price=total_price,
-                    details={"level": level, "rank": card.rarity, "base": base_val, "bonus": bonus_val},
+                    details={
+                        "level": level,
+                        "rank": card.rarity,
+                        "base": base_val,
+                        "bonus": bonus_val,
+                        "discount_pct": disc_pct,
+                        "discount_coins": disc_coins,
+                    },
                 )
             )
 
-            # Oddiy (event bo'lmagan) karta bot zaxirasiga qaytadi
-            if not card.is_event_card:
-                if int(card.dropped_count or 0) > 0:
-                    card.dropped_count = max(0, int(card.dropped_count) - 1)
-                if not card.is_deleted and card.card_state in ("OWNED", "UNRELEASED", "LOCKED"):
-                    card.card_state = "AVAILABLE"
+            # Sotilgan karta to'liq Rank narxida Bot Do'koniga tushadi
+            store_price = max(1, int(base_val))
+            session.add(
+                BotStoreListing(
+                    card_id=card.id,
+                    card_level=level,
+                    price_coins=store_price,
+                    source="user_sell",
+                    seller_user_id=user_id,
+                    status="active",
+                )
+            )
 
             await session.delete(uc)
             await session.flush()
@@ -492,10 +562,16 @@ class MarketService:
                 reference_id=f"botsell:{user_card_id}",
             )
             await UserService.recompute_card_counts(session, user_id)
+            await AuctionWishlistService.notify_wishlist_watchers(
+                session,
+                card.id,
+                "bot_store",
+                f"🏛 {card.character_name} Bot Do‘konida {store_price:,} 🪙 narxda paydo bo‘ldi!",
+            )
             await session.flush()
             return MarketActionResult(
                 True,
-                f"🤖 Karta botga sotildi! +{total_price:,} 🪙",
+                f"🤖 Karta Bot Do‘koniga sotildi! +{total_price:,} 🪙",
                 card=card,
                 price_paid=total_price,
                 level_before=level,

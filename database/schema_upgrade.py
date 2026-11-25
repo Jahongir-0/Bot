@@ -43,6 +43,9 @@ def _col_defs(dialect: str):
             ("is_banned", f"BOOLEAN NOT NULL DEFAULT {bool_false}"),
             ("ban_until", dt),
             ("ban_reason", "VARCHAR(500)"),
+            ("bot_status", "VARCHAR(16) NOT NULL DEFAULT 'active'"),
+            ("left_at", dt),
+            ("status_reason", "VARCHAR(255)"),
         ],
         "users": [
             ("referred_by_id", "INTEGER"),
@@ -68,6 +71,12 @@ def _col_defs(dialect: str):
             ("is_showcased", f"BOOLEAN NOT NULL DEFAULT {bool_false}"),
             ("card_state", "VARCHAR(24) NOT NULL DEFAULT 'OWNED'"),
             ("level", "INTEGER NOT NULL DEFAULT 1"),
+            ("acquired_price_coins", "BIGINT NOT NULL DEFAULT 0"),
+            ("acquired_price_stars", "INTEGER NOT NULL DEFAULT 0"),
+        ],
+        "offers": [
+            ("offer_type", "VARCHAR(16) NOT NULL DEFAULT 'coin'"),
+            ("offered_user_card_id", "INTEGER"),
         ],
         "admin_actions": [
             ("old_value", f"JSON NOT NULL DEFAULT {json_empty_obj}"),
@@ -85,6 +94,15 @@ def _col_defs(dialect: str):
         ],
         "auctions": [
             ("card_level", "INTEGER NOT NULL DEFAULT 1"),
+            ("last_bid_at", dt),
+            ("ending_notified", f"BOOLEAN NOT NULL DEFAULT {bool_false}"),
+        ],
+        "wishlist_items": [
+            ("notify_available", f"BOOLEAN NOT NULL DEFAULT {bool_true}"),
+        ],
+        "support_messages": [
+            ("media_type", "VARCHAR(16)"),
+            ("media_file_id", "VARCHAR(255)"),
         ],
         "forced_channels": [
             ("channel_type", "VARCHAR(24) NOT NULL DEFAULT 'telegram'"),
@@ -166,7 +184,22 @@ def upgrade_schema_sync(conn: Connection) -> None:
         except Exception as exc:  # pragma: no cover
             logger.warning("bans.user_id alter xato: %s", exc)
 
-    # Backfill serial_number, media_type, card_state (idempotent)
+    # PostgreSQL'da offers.ck_offers_amount_positive ni amount >= 0 ga yumshatish (karta taklifi uchun 0 ruxsat)
+    if dialect == "postgresql" and insp.has_table("offers"):
+        try:
+            conn.execute(text("ALTER TABLE offers DROP CONSTRAINT IF EXISTS ck_offers_amount_positive"))
+            conn.execute(
+                text(
+                    "DO $$ BEGIN "
+                    "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_offers_amount_non_negative') THEN "
+                    "ALTER TABLE offers ADD CONSTRAINT ck_offers_amount_non_negative CHECK (amount >= 0); "
+                    "END IF; END $$;"
+                )
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("offers check constraint upgrade xato: %s", exc)
+
+    # Backfill serial_number, media_type, card_state, bot_status (idempotent)
     try:
         conn.execute(text("UPDATE user_cards SET serial_number = 10000 + id WHERE serial_number IS NULL"))
         conn.execute(text("UPDATE cards SET media_type = 'Anime' WHERE media_type IS NULL OR media_type = ''"))
@@ -186,6 +219,13 @@ def upgrade_schema_sync(conn: Connection) -> None:
                 "WHERE card_state IS NULL OR card_state = ''"
             )
         )
+        conn.execute(
+            text(
+                "UPDATE groups SET bot_status = CASE "
+                "WHEN is_active = FALSE THEN 'left' ELSE 'active' END "
+                "WHERE bot_status IS NULL OR bot_status = ''"
+            )
+        )
     except Exception as exc:  # pragma: no cover
         logger.warning("Backfill xato (e'tibor berilmadi): %s", exc)
 
@@ -195,6 +235,9 @@ def upgrade_schema_sync(conn: Connection) -> None:
         "CREATE INDEX IF NOT EXISTS ix_active_drops_card_created ON active_drops (card_id, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_cards_media_state ON cards (media_type, card_state)",
         "CREATE INDEX IF NOT EXISTS ix_user_cards_serial ON user_cards (serial_number)",
+        "CREATE INDEX IF NOT EXISTS ix_groups_bot_status ON groups (bot_status)",
+        "CREATE INDEX IF NOT EXISTS ix_offers_offered_uc ON offers (offered_user_card_id)",
+        "CREATE INDEX IF NOT EXISTS ix_bot_store_status_created ON bot_store_listings (status, created_at)",
     ):
         try:
             conn.execute(text(stmt))

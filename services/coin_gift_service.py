@@ -101,7 +101,12 @@ class CoinGiftService:
                 left = cfg["daily_limit"] - already
                 if amount > left:
                     return False, f"Kunlik limit: {cfg['daily_limit']:,} 🪙. Bugun yana {max(0, left):,} 🪙 yubora olasiz.", 0, 0
-            fee = amount * cfg["fee_percent"] // 100
+            comm_cfg = await SettingsService.get_commission_config(session)
+            fee, _pct = SettingsService.compute_commission(amount, comm_cfg, "coin_gift")
+            if fee == 0 and cfg["fee_percent"] > 0:
+                cg_entry = comm_cfg.get("coin_gift") or {}
+                if cg_entry.get("enabled", True):
+                    fee = amount * cfg["fee_percent"] // 100
             received = amount - fee
             if received <= 0:
                 return False, "Miqdor juda kichik.", 0, 0

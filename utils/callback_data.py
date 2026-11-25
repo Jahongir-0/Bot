@@ -102,14 +102,14 @@ class AdmV2Cb(CallbackData, prefix="av2"):
 
 class QuizCb(CallbackData, prefix="qz"):
     owner_id: int
-    act: str = "v"  # v, intro, play, ans, hist
+    act: str = "v"  # v, play, ans, hist
     qid: int = 0
     opt: int = 0
 
 
 class GameCb(CallbackData, prefix="gm"):
     owner_id: int
-    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick, slots, slots_go, mines, mines_go, mines_open, mines_cash, wheel, wheel_go, an, an_go, chest, chest_pick
+    act: str = "v"  # v, dice, pick, flip, flip_go, lucky, lucky_pick, slots, slots_go, mines, mines_go, mines_open, mines_cash, wheel, wheel_go
     val: int = 0
     extra: str = ""
 
@@ -168,3 +168,19 @@ class PackCb(CallbackData, prefix="pck"):
     owner_id: int
     act: str = "v"  # v, open
     tier: str = ""
+
+
+class BotStoreCb(CallbackData, prefix="bst"):
+    owner_id: int
+    act: str = "v"  # v, buy_list, buy_det, buy_go, sell_list, sell_det, sell_go, adm, adm_add, adm_del, disc
+    lid: int = 0
+    p: int = 1
+
+
+class SuggestCb(CallbackData, prefix="sug"):
+    owner_id: int
+    act: str = "new"  # new, med, list, adm, ok, no
+    sid: int = 0
+    p: int = 1
+    ext: str = ""
+

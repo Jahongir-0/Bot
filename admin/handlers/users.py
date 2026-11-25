@@ -20,6 +20,7 @@ from keyboards.admin import (
     admin_users_menu_kb,
 )
 from models.group import Group, GroupMember
+from models.transaction import CoinTransaction
 from models.user import User
 from services.admin_service import AdminService
 from services.community_service import CommunityService
@@ -118,12 +119,19 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         added_total = int(
             (await session.execute(select(func.count(Group.id)).where(Group.added_by_user_id == user.id))).scalar_one() or 0
         )
+        recent_txs = (
+            await session.execute(
+                select(CoinTransaction).where(CoinTransaction.user_id == user.id).order_by(CoinTransaction.id.desc()).limit(3)
+            )
+        ).scalars().all()
 
     if user.is_banned:
         if user.ban_until:
             ban_str = f"⏱ Vaqtli ban ({fmt_tashkent(user.ban_until)} gacha (Toshkent vaqti))"
         else:
             ban_str = "🚫 Umrbod BANNED"
+        if getattr(user, "ban_reason", None):
+            ban_str += f"\n📌 Ban sababi: <i>{esc(user.ban_reason)}</i>"
     else:
         ban_str = "🟢 Active"
     vip_str = f"💎 {esc(user.vip_tier)}" if CommunityService.is_vip_active(user) else "▫️ Oddiy"
@@ -134,6 +142,13 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         added_groups_str += (
             f"   • <a href=\"https://t.me/{esc(g.username)}\">{title}</a>\n" if g.username else f"   • {title}\n"
         )
+    tx_block = ""
+    if recent_txs:
+        tx_lines = [
+            f"   • <code>{fmt_tashkent(tx.created_at, '%d.%m %H:%M')}</code> {esc(tx.tx_type)}: <b>{int(tx.amount):+,}</b> 🪙"
+            for tx in recent_txs
+        ]
+        tx_block = "\n💳 <b>Oxirgi tranzaksiyalar:</b>\n" + "\n".join(tx_lines)
     text = (
         f"👤 <b>USER BOSHQARUVI</b>\n\n"
         f"🆔 Telegram ID: <code>{user.telegram_id}</code>\n"
@@ -147,6 +162,7 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         f"{added_groups_str}"
         f"📌 Holat: <b>{ban_str}</b>\n"
         f"🕒 Oxirgi faollik: <code>{fmt_tashkent(user.last_activity, '%Y-%m-%d %H:%M')}</code>"
+        f"{tx_block}"
     )
     await edit_or_answer(target, text, reply_markup=admin_user_detail_kb(admin_tg_id, user))
 

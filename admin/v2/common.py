@@ -13,6 +13,7 @@ from utils.callback_data import AdmV2Cb, AdminCb
 class AdminV2States(StatesGroup):
     # Cards
     waiting_zip_cards = State()
+    waiting_batch_text = State()
     waiting_card_search = State()
     waiting_card_edit_val = State()
     waiting_card_give_user_search = State()
@@ -53,6 +54,13 @@ class AdminV2States(StatesGroup):
     waiting_auc_price = State()
     waiting_auc_hours = State()
     waiting_auc_step = State()
+    waiting_auc_edit_val = State()
+
+    # Bot Store & Commissions
+    waiting_bs_price = State()
+    waiting_bs_level = State()
+    waiting_bs_disc = State()
+    waiting_comm_pct = State()
 
     # Season
     waiting_season_name = State()

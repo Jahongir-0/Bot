@@ -97,6 +97,73 @@ def format_card_block(
     return "\n".join(lines)
 
 
+def format_v25_card_caption(
+    card: Card,
+    *,
+    level: int = 1,
+    max_level: int = 10,
+    power: int = 10,
+    level_title_emoji: str = "🌱",
+    level_title_name: str = "Uyg‘onish",
+    acquired_price_coins: int = 0,
+    acquired_price_stars: int = 0,
+    rank_price_coins: Optional[int] = None,
+    single_id: Optional[str] = None,
+    owner_name: Optional[str] = None,
+    status_line: str = "",
+) -> str:
+    """Bot 2.5 karta tafsiloti matni (photo caption <= 1024 belgi)."""
+    meta = get_rarity_meta(card.rarity)
+    rank_upper = str(meta.name or card.rarity or "BASIC").upper()
+    mtype = getattr(card, "media_type", "Anime") or "Anime"
+    media_part = f"{card.anime_name} · {mtype}" if mtype and mtype != "Anime" else card.anime_name
+
+    if int(acquired_price_stars or 0) > 0:
+        price_part = f"⭐ {fmt_coins(acquired_price_stars)} ⭐"
+    else:
+        shown_coins = int(acquired_price_coins or 0) or int(rank_price_coins or 0) or int(card.base_value or 0)
+        price_part = f"💎 {fmt_coins(shown_coins)} 🪙"
+
+    id_text = single_id or (card.card_code or f"CRD-{card.id:04d}")
+    owner_line = (
+        f"👤 Egasi: <b>{esc(owner_name)}</b>"
+        if owner_name
+        else "👤 Sizning kolleksiyangizda"
+    )
+
+    frame = level_frame(level)
+    frame_top = f"{frame[0]}\n" if frame else ""
+    frame_bottom = f"\n{frame[1]}" if frame else ""
+
+    lines = [
+        f"{frame_top}🎴 <b>{esc(card.character_name)}</b>",
+        f"{esc(media_part)}",
+        "",
+        f"{meta.emoji} <b>{esc(rank_upper)}</b>　{price_part}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"⭐ Daraja　<b>{int(level)}</b> / {int(max_level)}",
+        f"💪 Kuch　　<b>{fmt_coins(power)}</b>",
+        f"{level_title_emoji} {esc(level_title_name)}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"🆔 <code>{esc(id_text)}</code>",
+        owner_line,
+    ]
+    if card.is_event_card:
+        total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
+        lines.append(f"🎯 Event karta ({total})")
+    if status_line:
+        lines.extend(["", status_line])
+
+    out = ("\n".join(lines) + frame_bottom).strip()
+    if len(out) > 1015:
+        out = out[:1012] + "..."
+    return out
+
+
 def format_card_about(card: Card) -> str:
     meta_dict = getattr(card, "metadata_json", None) or {}
     lines = [

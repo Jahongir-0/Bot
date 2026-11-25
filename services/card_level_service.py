@@ -6,8 +6,6 @@
 """
 from __future__ import annotations
 
-import re
-
 import logging
 import time
 from dataclasses import dataclass
@@ -50,12 +48,12 @@ DEFAULT_LEVEL_CONFIG: Dict[str, Any] = {
     "stars_per_level": 20,     # Stars narxi = shu son x joriy daraja
     "stars_max_level": 5,      # Stars bilan faqat shu darajagacha ko'tariladi
     "bot_sell_level_bonus_pct": 10,  # Botga sotishda har bir qo'shimcha daraja uchun +foiz (o'rtacha 10%)
-    # Birlashtirish: N-rank kartalaridan nechtasini topshirsa, (N+1)-rank karta beriladi (0 = o'chirilgan)
-    "merge_cost_1": 10,        # 1-rank -> 2-rank
-    "merge_cost_2": 8,         # 2-rank -> 3-rank
-    "merge_cost_3": 6,         # 3-rank (Epic) -> 4-rank (Legendary)
-    "merge_cost_4": 5,         # 4-rank (Legendary) -> 5-rank (Mythic)
-    "merge_cost_5": 10,        # 5-rank (Mythic) -> 6-rank (Divine)
+    "merge_enabled": True,     # Birlashtirish yoqilgan/o'chiq
+    "merge_count": 3,          # Birlashtirish uchun kerakli kartalar soni (standart 3)
+    "merge_daily_limit": 1,    # Kuniga necha marta birlashtirish mumkin (standart 1, 0 = cheklovsiz)
+    "merge_pairs": {"1": True, "2": True, "3": True, "4": True, "5": True},  # from_order -> from_order+1
+    "merge_cost_4": 3,
+    "merge_cost_5": 3,
     "base_power": {"1": 10, "2": 25, "3": 60, "4": 150, "5": 400, "6": 1000},
 }
 
@@ -88,19 +86,25 @@ class CardLevelService:
         stored = await SettingsService.get_value(session, CFG_KEY, None)
         cfg = dict(DEFAULT_LEVEL_CONFIG)
         cfg["base_power"] = dict(DEFAULT_LEVEL_CONFIG["base_power"])
+        cfg["merge_pairs"] = dict(DEFAULT_LEVEL_CONFIG["merge_pairs"])
         if isinstance(stored, dict):
             for k, v in stored.items():
                 if k == "base_power" and isinstance(v, dict):
                     cfg["base_power"].update({str(a): int(b) for a, b in v.items()})
-                elif k in cfg or re.match(r"^merge_cost_\d+$", str(k)):
+                elif k == "merge_pairs" and isinstance(v, dict):
+                    cfg["merge_pairs"].update({str(a): bool(b) for a, b in v.items()})
+                elif k in cfg:
                     cfg[k] = v
         cfg["max_level"] = max(2, min(50, int(cfg["max_level"])))
+        cfg["merge_count"] = max(2, min(20, int(cfg.get("merge_count", 3))))
+        cfg["merge_daily_limit"] = max(0, min(50, int(cfg.get("merge_daily_limit", 1))))
+        cfg["merge_enabled"] = bool(cfg.get("merge_enabled", True))
         return cfg
 
     @staticmethod
     async def set_config_value(session: AsyncSession, key: str, value: Any) -> None:
         cfg = await CardLevelService.get_config(session)
-        if (key not in cfg and not re.match(r"^merge_cost_\d+$", str(key))) or key == "base_power":
+        if key not in cfg or key == "base_power":
             raise ValueError("Noma’lum sozlama")
         cfg[key] = value
         await SettingsService.set_value(session, CFG_KEY, cfg)
@@ -143,6 +147,20 @@ class CardLevelService:
     def title_text(level: int) -> str:
         emoji, name = CardLevelService.title(level)
         return f"{emoji} {name}"
+
+    @staticmethod
+    def level_frame_and_perk(level: int, max_level: int = 10) -> Tuple[str, str]:
+        """Yuqori darajalardagi progressiv vizual ramka va afzallik matni."""
+        lv = max(1, int(level or 1))
+        if lv >= max_level:
+            return "👑 Oltin Afsona Ramkasi", "✨ Maksimal kuch, elita bezak va yuqori savdo nufuzi"
+        if lv >= 7:
+            return "💠 Kristal Ramka", "⚡ Kuchli jang bonusi va vitrina nufuzi"
+        if lv >= 4:
+            return "🔥 Olovli Ramka", "💪 Yuqori kuch va auksionda yuqori joziba"
+        if lv >= 2:
+            return "🌿 Yashil Ramka", "📈 Kuch +15% har darajada oshib boradi"
+        return "▫️ Oddiy Ramka", "🌱 Boshlang‘ich daraja — kuchaytirishga tayyor"
 
     @staticmethod
     def power(rarity: str, level: int, cfg: Dict[str, Any]) -> int:
@@ -251,12 +269,9 @@ class CardLevelService:
     async def top_power(session: AsyncSession, limit: int = 10):
         """Eng kuchli kolleksiya egalari: [(User, umumiy_kuch)] — 60 soniya keshlanadi."""
         from models.user import User
-        from services.admin_service import AdminService
-        from utils.cache_scope import cache_scope
 
-        scope = cache_scope(session)
         now = time.monotonic()
-        if _POWER_CACHE.get("scope") == scope and now - _POWER_CACHE["ts"] < 60 and _POWER_CACHE["rows"]:
+        if now - _POWER_CACHE["ts"] < 60 and _POWER_CACHE["rows"]:
             ranked = _POWER_CACHE["rows"]
         else:
             cfg = await CardLevelService.get_config(session)
@@ -268,21 +283,13 @@ class CardLevelService:
             totals: Dict[int, int] = {}
             for uid, lv, rarity in rows:
                 totals[uid] = totals.get(uid, 0) + CardLevelService.power(rarity, int(lv or 1), cfg)
-            ranked = sorted(totals.items(), key=lambda x: -x[1])
-            _POWER_CACHE["ts"] = now
-            _POWER_CACHE["rows"] = ranked
-            _POWER_CACHE["scope"] = scope
-
-        excluded = set(await AdminService.get_excluded_admin_user_ids(session))
+            ranked = sorted(totals.items(), key=lambda x: -x[1])[:50]
+            _POWER_CACHE["ts"], _POWER_CACHE["rows"] = now, ranked
         out = []
-        for uid, val in ranked:
-            if uid in excluded:
-                continue
+        for uid, val in ranked[:limit]:
             u = await session.get(User, uid)
-            if u is not None and not u.is_banned:
+            if u is not None:
                 out.append((u, val))
-                if len(out) >= limit:
-                    break
         return out
 
     # ---------------------------------------------------------------- Stars bilan ko'tarish
@@ -320,28 +327,57 @@ class CardLevelService:
         return target_level
 
 
-    # ---------------------------------------------------------------- Birlashtirish
+    # ---------------------------------------------------------------- Birlashtirish (Bot 2.5)
     @staticmethod
     def merge_options(cfg: Dict[str, Any]):
-        """[(manba rank tartibi, kerakli kartalar soni)] — faqat yoqilganlari."""
+        """[(manba rank tartibi, kerakli kartalar soni)] — faqat yoqilgan juftliklar."""
+        if not bool(cfg.get("merge_enabled", True)):
+            return []
+        from utils.constants import get_runtime_ranks
+
+        ranks = sorted(get_runtime_ranks(), key=lambda r: int(r.get("order", 99)))
+        orders = [int(r.get("order", 0)) for r in ranks if int(r.get("order", 0)) > 0]
+        if not orders:
+            orders = [1, 2, 3, 4, 5, 6]
+        max_ord = max(orders)
+        pairs = cfg.get("merge_pairs") if isinstance(cfg.get("merge_pairs"), dict) else {}
+        cost = max(2, int(cfg.get("merge_count", 3)))
         out = []
-        orders = []
-        for k in cfg:
-            m = re.match(r"^merge_cost_(\d+)$", str(k))
-            if m:
-                orders.append(int(m.group(1)))
-        for order in sorted(set(orders)):
-            try:
-                cost = int(cfg.get(f"merge_cost_{order}", 0))
-            except (TypeError, ValueError):
-                cost = 0
-            if cost > 0:
+        for order in orders:
+            if order >= max_ord:
+                continue
+            if pairs.get(str(order), True):
                 out.append((order, cost))
         return out
 
     @staticmethod
+    async def merge_used_today(session: AsyncSession, user_id: int) -> int:
+        from datetime import datetime, time as dt_time, timezone
+        from sqlalchemy import func
+        from models.base import utcnow
+        from models.v2_features import CardHistory
+
+        now = utcnow()
+        start_dt = datetime.combine(now.date(), dt_time.min, tzinfo=timezone.utc)
+        cnt = (
+            await session.execute(
+                select(func.count(CardHistory.id)).where(
+                    CardHistory.event_type == "merge",
+                    CardHistory.to_user_id == user_id,
+                    CardHistory.created_at >= start_dt,
+                )
+            )
+        ).scalar_one()
+        return int(cnt or 0)
+
+    @staticmethod
     async def _spare_cards(session: AsyncSession, user_id: int, order: int):
-        """Birlashtirish uchun yaroqli kartalar: band emas, vitrinada/sevimlida emas. Past darajali birinchi."""
+        """Birlashtirish uchun yaroqli kartalar:
+        - is_locked = False (market/auksion/trade/transferda emas)
+        - is_showcased = False (vitrinada emas)
+        - is_favorite = False (sevimlida emas)
+        - level == 1 (lvl ko'tarilgan kartalar ASLO tanlanmaydi!)
+        """
         names = get_rarity_aliases(get_rank_name_by_order(order))
         if not names:
             return []
@@ -356,9 +392,10 @@ class CardLevelService:
                     UserCard.is_locked.is_(False),
                     UserCard.is_showcased.is_(False),
                     UserCard.is_favorite.is_(False),
+                    UserCard.level == 1,
                     func.lower(Card.rarity).in_(names),
                 )
-                .order_by(UserCard.level.asc(), UserCard.id.asc())
+                .order_by(UserCard.id.asc())
             )
         ).scalars().all()
         return list(rows)
@@ -369,20 +406,38 @@ class CardLevelService:
 
     @staticmethod
     async def merge(session: AsyncSession, user_id: int, order: int) -> Tuple[bool, str, Optional[Card]]:
-        """`cost` ta kartani topshirib, keyingi rankdan bitta yangi karta olish."""
+        """`cost` ta tasodifiy mos kartani topshirib, keyingi rankdan bitta yangi karta olish."""
         import random
-
         from sqlalchemy import func
-
+        from models.v2_features import CardHistory
         from services.user_service import UserService
 
         cfg = await CardLevelService.get_config(session)
+        if not bool(cfg.get("merge_enabled", True)):
+            return False, "🔮 Birlashtirish tizimi hozircha vaqtincha o‘chirilgan.", None
+
+        daily_limit = max(0, int(cfg.get("merge_daily_limit", 1)))
+        if daily_limit > 0:
+            used_today = await CardLevelService.merge_used_today(session, user_id)
+            if used_today >= daily_limit:
+                return (
+                    False,
+                    f"⏳ Bugungi birlashtirish limiti tugadi ({used_today}/{daily_limit}). Ertaga qayta urinib ko‘ring.",
+                    None,
+                )
+
         cost = dict(CardLevelService.merge_options(cfg)).get(order)
         if not cost:
-            return False, "Bu birlashtirish hozircha o‘chirilgan.", None
+            return False, "Bu rank juftligida birlashtirish o‘chirilgan.", None
+
         spare = await CardLevelService._spare_cards(session, user_id, order)
         if len(spare) < cost:
-            return False, f"Yetarli karta yo‘q: kerak {cost} ta, bo‘sh kartalar {len(spare)} ta.", None
+            return (
+                False,
+                f"⚠️ Yetarli yaroqli karta yo‘q: kerak <b>{cost} ta</b>, yaroqli <b>{len(spare)} ta</b>.\n"
+                "<i>(Sevimli ❤️, Vitrina 🖼, darajasi 1 dan katta ⬆️ yoki savdoda band kartalar olinmaydi.)</i>",
+                None,
+            )
 
         next_name = get_rank_name_by_order(order + 1)
         next_names = get_rarity_aliases(next_name)
@@ -402,14 +457,34 @@ class CardLevelService:
         if not pool:
             return False, f"Hozircha {next_name} kartalari mavjud emas (hammasi tarqatilgan yoki sizda bor).", None
 
+        chosen_to_burn = random.sample(spare, cost)
         reward = random.choice(list(pool))
-        for uc in spare[:cost]:
+        for uc in chosen_to_burn:
             await session.delete(uc)
         await session.flush()
+
+        rcfg = await SettingsService.get_rarity_config(session)
+        reward_val = CardLevelService.rank_value_for_card(reward, rcfg)
         reward.dropped_count = int(reward.dropped_count or 0) + 1
-        new_uc = UserCard(user_id=user_id, card_id=reward.id, acquired_via="merge", card_state="OWNED")
+        new_uc = UserCard(
+            user_id=user_id,
+            card_id=reward.id,
+            acquired_via="merge",
+            card_state="OWNED",
+            acquired_price_coins=reward_val,
+        )
         session.add(new_uc)
         await session.flush()
         new_uc.serial_number = 10000 + new_uc.id
+        session.add(
+            CardHistory(
+                card_id=reward.id,
+                user_card_id=new_uc.id,
+                event_type="merge",
+                to_user_id=user_id,
+                price=reward_val,
+                details={"from_order": order, "consumed": cost},
+            )
+        )
         await UserService.recompute_card_counts(session, user_id, add_xp=50)
         return True, "ok", reward

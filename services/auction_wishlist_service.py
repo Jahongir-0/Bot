@@ -16,12 +16,13 @@ from models.v2_features import (
     Auction,
     AuctionBid,
     CardHistory,
+    CardSuggestion,
     CardTrade,
     WishlistItem,
 )
 from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
-from services.user_service import UserService
+from services.user_service import InsufficientCoinsError, UserService
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE
 
 logger = logging.getLogger(__name__)
@@ -116,11 +117,6 @@ class AuctionWishlistService:
             return False, "Karta topilmadi.", None
 
         if user_card_id is not None:
-            from services.collection_service import CollectionService
-
-            await CollectionService.reconcile_user_card_locks(session, seller_user_id)
-            uc = await session.get(UserCard, user_card_id)
-            auc_level = max(1, int(getattr(uc, "level", 1) or 1)) if uc else 1
             upd = await session.execute(
                 update(UserCard)
                 .where(
@@ -134,7 +130,6 @@ class AuctionWishlistService:
                 return False, "Bu karta nusxasi auksion uchun band yoki topilmadi.", None
         else:
             # Admin auksioni: karta hali tashlanmagan/yopiq bo'lsa state AUCTION qilamiz
-            auc_level = max(1, int(getattr(card, "preset_level", 1) or 1))
             card.card_state = "AUCTION"
             card.is_available = False
 
@@ -150,7 +145,6 @@ class AuctionWishlistService:
             starts_at=now,
             ends_at=now + timedelta(hours=min(168, int(hours))),
             status="active",
-            card_level=auc_level,
         )
         session.add(auc)
         await session.flush()
@@ -160,9 +154,18 @@ class AuctionWishlistService:
         return True, "Auksion boshlandi!", auc
 
     @staticmethod
-    async def list_active_auctions(session: AsyncSession, page: int = 1, page_size: int = 10) -> Tuple[List[Tuple[Auction, Card]], int]:
+    async def list_active_auctions(
+        session: AsyncSession,
+        page: int = 1,
+        page_size: int = 10,
+        owner_filter: str = "all",
+    ) -> Tuple[List[Tuple[Auction, Card]], int]:
         now = utcnow()
         cond = [Auction.status == "active", Auction.ends_at > now]
+        if owner_filter == "users":
+            cond.append(Auction.seller_user_id.is_not(None))
+        elif owner_filter == "admin":
+            cond.append(Auction.seller_user_id.is_(None))
         total = int((await session.execute(select(func.count(Auction.id)).where(*cond))).scalar_one() or 0)
         rows = (
             await session.execute(
@@ -203,9 +206,6 @@ class AuctionWishlistService:
     async def list_user_sellable_cards(
         session: AsyncSession, user_id: int, page: int = 1, page_size: int = 8
     ) -> Tuple[List[Tuple[UserCard, Card]], int]:
-        from services.collection_service import CollectionService
-
-        await CollectionService.reconcile_user_card_locks(session, user_id)
         cond = [UserCard.user_id == user_id, UserCard.is_locked.is_(False)]
         total = int((await session.execute(select(func.count(UserCard.id)).where(*cond))).scalar_one() or 0)
         rows = (
@@ -316,12 +316,19 @@ class AuctionWishlistService:
                     f"Auksion #{auc.id} da yangi stavka: {amount:,} 🪙. Sizning {prev_amount:,} 🪙 balansingizga qaytarildi.",
                 )
 
+            now = utcnow()
             auc.current_price = int(amount)
             auc.highest_bidder_id = bidder.id
             auc.bid_count = int(auc.bid_count) + 1
+            auc.last_bid_at = now
+            extended_note = ""
+            if ensure_utc(auc.ends_at) - now < timedelta(minutes=20):
+                auc.ends_at = now + timedelta(minutes=20)
+                auc.ending_notified = False
+                extended_note = "\n⏳ <i>Anti-snipe: tugash vaqti +20 daqiqaga uzaytirildi!</i>"
             session.add(AuctionBid(auction_id=auc.id, user_id=bidder.id, amount=int(amount), is_refunded=False))
             await session.flush()
-            return True, f"✅ Stavka qabul qilindi: {amount:,} 🪙!"
+            return True, f"✅ Stavka qabul qilindi: {amount:,} 🪙!{extended_note}"
 
     @staticmethod
     async def _finalize_single_auction(session: AsyncSession, auc: Auction) -> None:
@@ -362,13 +369,19 @@ class AuctionWishlistService:
         )
 
         if auc.seller_user_id:
+            from services.settings_service import SettingsService
+
+            comm_cfg = await SettingsService.get_commission_config(session)
+            fee_coins, fee_pct = SettingsService.compute_commission(price, comm_cfg, "auction")
+            seller_payout = max(1, price - fee_coins)
             await UserService.credit_coins(
                 session,
                 auc.seller_user_id,
-                price,
+                seller_payout,
                 "auction_sale",
-                f"Auction #{auc.id} sold",
+                f"Auction #{auc.id} sold" + (f" (-{fee_pct}% komissiya)" if fee_coins else ""),
                 reference_id=f"auction_sale:{auc.id}",
+                meta={"commission": fee_coins, "pct": fee_pct},
             )
 
         if auc.user_card_id:
@@ -385,14 +398,21 @@ class AuctionWishlistService:
                 for off in pending_offers:
                     off.status = "cancelled"
                     off.resolved_at = now
-                    await UserService.credit_coins(
-                        session=session,
-                        user_id=off.buyer_id,
-                        amount=off.amount,
-                        tx_type="offer_refund",
-                        description="Card won in auction - offer refunded",
-                        reference_id=f"offer:{off.id}",
-                    )
+                    if getattr(off, "offer_type", "coins") == "card" and getattr(off, "offered_user_card_id", None):
+                        await session.execute(
+                            update(UserCard)
+                            .where(UserCard.id == off.offered_user_card_id)
+                            .values(is_locked=False, card_state="OWNED", updated_at=now)
+                        )
+                    elif int(off.amount or 0) > 0:
+                        await UserService.credit_coins(
+                            session=session,
+                            user_id=off.buyer_id,
+                            amount=off.amount,
+                            tx_type="offer_refund",
+                            description="Card won in auction - offer refunded",
+                            reference_id=f"offer:{off.id}",
+                        )
                 if card is not None and await UserService.owns_card(session, winner_id, auc.card_id):
                     from services.card_level_service import CardLevelService
 
@@ -407,16 +427,15 @@ class AuctionWishlistService:
                     uc.is_showcased = False
                     uc.card_state = "OWNED"
                     uc.acquired_via = "auction"
+                    uc.acquired_price_coins = price
             await UserService.recompute_card_counts(session, winner_id, add_xp=50)
             if auc.seller_user_id:
                 await UserService.recompute_card_counts(session, auc.seller_user_id)
         else:
-            target_lvl = max(1, int(getattr(auc, "card_level", 1) or 1))
             if card is not None and await UserService.owns_card(session, winner_id, auc.card_id):
                 from services.card_level_service import CardLevelService
 
-                for _ in range(target_lvl):
-                    await CardLevelService.apply_duplicate(session, winner_id, card)
+                await CardLevelService.apply_duplicate(session, winner_id, card)
                 await UserService.recompute_card_counts(session, winner_id, add_xp=50)
             else:
                 try:
@@ -426,7 +445,7 @@ class AuctionWishlistService:
                             card_id=auc.card_id,
                             acquired_via="auction",
                             card_state="OWNED",
-                            level=target_lvl,
+                            acquired_price_coins=price,
                         )
                         session.add(uc)
                         await session.flush()
@@ -476,6 +495,65 @@ class AuctionWishlistService:
         return done
 
     @staticmethod
+    async def notify_ending_auctions(session: AsyncSession) -> int:
+        """Tugashiga <= 20 daqiqa qolgan auksionlar haqida ishtirokchilar va istaganlarga xabar beradi."""
+        now = utcnow()
+        window_end = now + timedelta(minutes=20)
+        ending = list(
+            (
+                await session.execute(
+                    select(Auction).where(
+                        Auction.status == "active",
+                        Auction.ends_at > now,
+                        Auction.ends_at <= window_end,
+                        Auction.ending_notified.is_(False),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        notified_aucs = 0
+        for auc in ending:
+            auc.ending_notified = True
+            card = await session.get(Card, auc.card_id)
+            char_name = card.character_name if card else f"Karta #{auc.card_id}"
+            bidders = set(
+                int(x)
+                for x in (
+                    await session.execute(select(AuctionBid.user_id).where(AuctionBid.auction_id == auc.id))
+                )
+                .scalars()
+                .all()
+            )
+            watchers = set(
+                int(x)
+                for x in (
+                    await session.execute(
+                        select(WishlistItem.user_id).where(
+                            WishlistItem.card_id == auc.card_id,
+                            WishlistItem.notify_available.is_(True),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            targets = (bidders | watchers) - ({auc.seller_user_id} if auc.seller_user_id else set())
+            for uid in targets:
+                await CommunityService.notify_user(
+                    session,
+                    uid,
+                    "auction",
+                    "⏳ Auksion yakunlanmoqda!",
+                    f"Auksion #{auc.id} ({char_name}) tugashiga 20 daqiqadan kam vaqt qoldi! Joriy narx: {int(auc.current_price):,} 🪙",
+                )
+            notified_aucs += 1
+        if notified_aucs:
+            await session.flush()
+        return notified_aucs
+
+    @staticmethod
     async def admin_finalize_auction(session: AsyncSession, auction_id: int) -> Tuple[bool, str]:
         auc = await session.get(Auction, auction_id)
         if auc is None or auc.status != "active":
@@ -523,22 +601,43 @@ class AuctionWishlistService:
         return True, "❌ Auksion bekor qilindi va stavkalar qaytarildi."
 
     # ------------------------------------------------------------------
-    # Wishlist
+    # Wishlist & Card Suggestions
     # ------------------------------------------------------------------
     @staticmethod
-    async def toggle_wishlist(session: AsyncSession, user_id: int, card_id: int) -> Tuple[bool, str]:
-        row = (
+    async def is_wishlisted(session: AsyncSession, user_id: int, card_id: int) -> Optional[WishlistItem]:
+        return (
             await session.execute(
                 select(WishlistItem).where(WishlistItem.user_id == user_id, WishlistItem.card_id == card_id)
             )
         ).scalar_one_or_none()
+
+    @staticmethod
+    async def toggle_wishlist(session: AsyncSession, user_id: int, card_id: int) -> Tuple[bool, str]:
+        row = await AuctionWishlistService.is_wishlisted(session, user_id, card_id)
         if row is not None:
             await session.delete(row)
             await session.flush()
-            return False, "❌ Karta Wishlistdan olib tashlandi."
-        session.add(WishlistItem(user_id=user_id, card_id=card_id))
+            return False, "❌ Karta Istaklardan olib tashlandi."
+        if await UserService.owns_card(session, user_id, card_id):
+            return False, "⚠️ Bu karta sizda allaqachon bor — istaklar ro‘yxatiga qo‘shib bo‘lmaydi."
+        session.add(WishlistItem(user_id=user_id, card_id=card_id, notify_available=True))
         await session.flush()
-        return True, "💖 Karta Wishlistga qo‘shildi! Bozorga yoki auksionga chiqsa xabar beramiz."
+        return True, "💖 Karta Istaklarga qo‘shildi! Guruhga tushsa, bozor yoki auksionga chiqsa xabar beramiz."
+
+    @staticmethod
+    async def toggle_wishlist_notify(session: AsyncSession, user_id: int, card_id: int) -> Tuple[bool, str]:
+        row = await AuctionWishlistService.is_wishlisted(session, user_id, card_id)
+        if row is None:
+            if await UserService.owns_card(session, user_id, card_id):
+                return False, "⚠️ Bu karta sizda allaqachon bor."
+            session.add(WishlistItem(user_id=user_id, card_id=card_id, notify_available=True))
+            await session.flush()
+            return True, "🔔 Sotuv/Drop xabarnomasi yoqildi (karta Istaklarga ham qo‘shildi)!"
+        row.notify_available = not bool(row.notify_available)
+        await session.flush()
+        if row.notify_available:
+            return True, "🔔 Sotuv/Drop xabarnomasi yoqildi!"
+        return False, "🔕 Sotuv/Drop xabarnomasi o‘chirildi."
 
     @staticmethod
     async def get_user_wishlist(session: AsyncSession, user_id: int) -> List[Card]:
@@ -556,6 +655,37 @@ class AuctionWishlistService:
         )
 
     @staticmethod
+    async def get_user_wishlist_page(
+        session: AsyncSession, user_id: int, page: int = 1, page_size: int = 5
+    ) -> Tuple[List[Card], int]:
+        cond = [WishlistItem.user_id == user_id, Card.is_deleted.is_(False)]
+        total = int(
+            (
+                await session.execute(
+                    select(func.count(WishlistItem.id))
+                    .join(Card, Card.id == WishlistItem.card_id)
+                    .where(*cond)
+                )
+            ).scalar_one()
+            or 0
+        )
+        rows = list(
+            (
+                await session.execute(
+                    select(Card)
+                    .join(WishlistItem, WishlistItem.card_id == Card.id)
+                    .where(*cond)
+                    .order_by(WishlistItem.id.desc())
+                    .offset((max(1, page) - 1) * page_size)
+                    .limit(page_size)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return rows, total
+
+    @staticmethod
     async def get_most_wanted(session: AsyncSession, limit: int = 10) -> List[Tuple[Card, int]]:
         rows = (
             await session.execute(
@@ -570,19 +700,108 @@ class AuctionWishlistService:
         return [(r[0], int(r[1])) for r in rows]
 
     @staticmethod
+    async def get_most_wanted_page(
+        session: AsyncSession, page: int = 1, page_size: int = 5
+    ) -> Tuple[List[Tuple[Card, int]], int]:
+        total = int(
+            (
+                await session.execute(
+                    select(func.count(func.distinct(WishlistItem.card_id)))
+                    .join(Card, Card.id == WishlistItem.card_id)
+                    .where(Card.is_deleted.is_(False))
+                )
+            ).scalar_one()
+            or 0
+        )
+        rows = (
+            await session.execute(
+                select(Card, func.count(WishlistItem.id).label("cnt"))
+                .join(WishlistItem, WishlistItem.card_id == Card.id)
+                .where(Card.is_deleted.is_(False))
+                .group_by(Card.id)
+                .order_by(func.count(WishlistItem.id).desc(), Card.id.asc())
+                .offset((max(1, page) - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        return [(r[0], int(r[1])) for r in rows], total
+
+    @staticmethod
     async def notify_wishlist_watchers(
         session: AsyncSession, card_id: int, notif_type: str, body: str
     ) -> int:
         user_ids = list(
             (
-                await session.execute(select(WishlistItem.user_id).where(WishlistItem.card_id == card_id))
+                await session.execute(
+                    select(WishlistItem.user_id).where(
+                        WishlistItem.card_id == card_id,
+                        WishlistItem.notify_available.is_(True),
+                    )
+                )
             )
             .scalars()
             .all()
         )
         for uid in user_ids:
-            await CommunityService.notify_user(session, uid, notif_type, "💖 Wishlist yangiligi!", body)
+            await CommunityService.notify_user(session, uid, notif_type, "🔔 Karta xabarnomasi!", body)
         return len(user_ids)
+
+    @staticmethod
+    async def create_suggestion(
+        session: AsyncSession,
+        user_id: int,
+        media_type: str,
+        anime_name: str,
+        character_name: str,
+        note: Optional[str] = None,
+    ) -> CardSuggestion:
+        sug = CardSuggestion(
+            user_id=user_id,
+            media_type=(media_type or "Anime").strip()[:24],
+            anime_name=anime_name.strip()[:160],
+            character_name=character_name.strip()[:160],
+            note=(note or "").strip()[:500] or None,
+            status="pending",
+        )
+        session.add(sug)
+        await session.flush()
+        return sug
+
+    @staticmethod
+    async def list_suggestions(
+        session: AsyncSession,
+        status: Optional[str] = "pending",
+        page: int = 1,
+        page_size: int = 5,
+    ) -> Tuple[List[Tuple[CardSuggestion, Optional[User]]], int]:
+        cond = []
+        if status and status != "all":
+            cond.append(CardSuggestion.status == status)
+        total = int((await session.execute(select(func.count(CardSuggestion.id)).where(*cond))).scalar_one() or 0)
+        rows = (
+            await session.execute(
+                select(CardSuggestion, User)
+                .outerjoin(User, User.id == CardSuggestion.user_id)
+                .where(*cond)
+                .order_by(CardSuggestion.id.desc())
+                .offset((max(1, page) - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        return [(r[0], r[1]) for r in rows], total
+
+    @staticmethod
+    async def resolve_suggestion(
+        session: AsyncSession, suggestion_id: int, status: str, admin_note: Optional[str] = None
+    ) -> Optional[CardSuggestion]:
+        sug = await session.get(CardSuggestion, suggestion_id)
+        if sug is None:
+            return None
+        sug.status = status
+        if admin_note:
+            sug.admin_note = admin_note[:500]
+        await session.flush()
+        return sug
 
     # ------------------------------------------------------------------
     # Two-Sided Atomic Card-for-Card Trading
@@ -654,14 +873,21 @@ class AuctionWishlistService:
         for off in pending_offers:
             off.status = "cancelled"
             off.resolved_at = now
-            await UserService.credit_coins(
-                session=session,
-                user_id=off.buyer_id,
-                amount=off.amount,
-                tx_type="offer_refund",
-                description="Card traded - offer refunded",
-                reference_id=f"offer:{off.id}",
-            )
+            if getattr(off, "offer_type", "coins") == "card" and getattr(off, "offered_user_card_id", None):
+                await session.execute(
+                    update(UserCard)
+                    .where(UserCard.id == off.offered_user_card_id)
+                    .values(is_locked=False, card_state="OWNED", updated_at=now)
+                )
+            elif int(off.amount or 0) > 0:
+                await UserService.credit_coins(
+                    session=session,
+                    user_id=off.buyer_id,
+                    amount=int(off.amount),
+                    tx_type="offer_refund",
+                    description="Card traded - offer refunded",
+                    reference_id=f"offer:{off.id}",
+                )
 
         trade.partner_uc_id = part_uc_id
         trade.status = "accepted"

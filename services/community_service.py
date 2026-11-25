@@ -628,12 +628,31 @@ class CommunityService:
             return None
         return CommunityService.format_ad_footer(ad, bot_username=bot_username)
 
+    @staticmethod
+    async def list_admin_tg_ids(session: AsyncSession, section: Optional[str] = None) -> List[int]:
+        settings = get_settings()
+        ids: Set[int] = set(settings.admin_ids)
+        roles = await CommunityService.list_admin_roles(session)
+        for r in roles:
+            if not r.is_active:
+                continue
+            if r.is_super_admin or not section or section in (r.permissions or []):
+                ids.add(int(r.telegram_id))
+        return sorted(ids)
+
     # ------------------------------------------------------------------
     # Support Tickets
     # ------------------------------------------------------------------
     @staticmethod
     async def create_ticket(
-        session: AsyncSession, user_id: int, subject: str, body: str, sender_tg_id: int, category: str = "support"
+        session: AsyncSession,
+        user_id: int,
+        subject: str,
+        body: str,
+        sender_tg_id: int,
+        category: str = "support",
+        media_type: Optional[str] = None,
+        media_file_id: Optional[str] = None,
     ) -> SupportTicket:
         now = utcnow()
         t = SupportTicket(
@@ -650,7 +669,9 @@ class CommunityService:
                 ticket_id=t.id,
                 sender_type="user",
                 sender_tg_id=sender_tg_id,
-                body=body,
+                body=body or "[Media]",
+                media_type=media_type,
+                media_file_id=media_file_id,
             )
         )
         await session.flush()
@@ -658,7 +679,13 @@ class CommunityService:
 
     @staticmethod
     async def reply_ticket(
-        session: AsyncSession, ticket_id: int, sender_type: str, sender_tg_id: int, body: str
+        session: AsyncSession,
+        ticket_id: int,
+        sender_type: str,
+        sender_tg_id: int,
+        body: str,
+        media_type: Optional[str] = None,
+        media_file_id: Optional[str] = None,
     ) -> Optional[SupportTicket]:
         t = await session.get(SupportTicket, ticket_id)
         if t is None:
@@ -672,7 +699,9 @@ class CommunityService:
                 ticket_id=t.id,
                 sender_type=sender_type,
                 sender_tg_id=sender_tg_id,
-                body=body,
+                body=body or "[Media]",
+                media_type=media_type,
+                media_file_id=media_file_id,
             )
         )
         await session.flush()

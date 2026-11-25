@@ -5,10 +5,12 @@ from utils.callback_data import (
     AchCb,
     AdminCb,
     AucCb,
+    BotStoreCb,
     DropCb,
     GameCb,
     NavCb,
     NotifCb,
+    OfferCb,
     QuizCb,
     SupCb,
     TradeCb,
@@ -22,37 +24,53 @@ def _nav(owner_id: int, text: str, target: str) -> InlineKeyboardButton:
 
 
 def main_menu_kb(owner_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
-    """BOSH MENU: 10 ta bo‘lim, 2 ustunli tartib. Savdo bo‘limlari (bozor, auksion, almashish, sovg‘a) — «Savdo markazi» ichida."""
+    """BOSH MENU (Bot 2.5):
+    Profilim | Reyting
+    Savdo    | Qidiruv
+    Vip      | Stars
+    Bonus    | O'yinlar
+    Xabarlar | Aloqa
+    Qo'llanma
+    """
     b = InlineKeyboardBuilder()
-    b.row(_nav(owner_id, "👤 PROFILIM", "profile"), _nav(owner_id, "🎴 KARTALARIM", "cards"))
-    b.row(_nav(owner_id, "🛒 SAVDO MARKAZI", "savdo"), _nav(owner_id, "🎮 O‘YINLAR", "grp_play"))
-    b.row(_nav(owner_id, "🎁 KUNLIK BONUS", "daily"), _nav(owner_id, "🏆 REYTING", "ranking"))
-    b.row(_nav(owner_id, "🔍 QIDIRUV", "search"), _nav(owner_id, "👥 DO‘STLAR", "referral"))
+    b.row(_nav(owner_id, "👤 Profilim", "profile"), _nav(owner_id, "🏆 Reyting", "ranking"))
+    b.row(_nav(owner_id, "🛒 Savdo", "savdo"), _nav(owner_id, "🔍 Qidiruv", "search"))
     b.row(
-        _nav(owner_id, "❓ QO‘LLANMA", "help"),
-        InlineKeyboardButton(text="💬 ALOQA", callback_data=SupCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="💎 Vip", callback_data=VipCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "⭐ Stars", "stars"),
     )
+    b.row(_nav(owner_id, "🎁 Bonus", "daily"), _nav(owner_id, "🎮 O‘yinlar", "grp_play"))
+    b.row(
+        InlineKeyboardButton(text="🔔 Xabarlar", callback_data=NotifCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="💬 Aloqa", callback_data=SupCb(owner_id=owner_id, act="v").pack()),
+    )
+    b.row(_nav(owner_id, "❓ Qo‘llanma", "help"))
     if is_admin:
-        b.row(InlineKeyboardButton(text="🛡️ ADMIN PANEL", callback_data=AdminCb(owner_id=owner_id, section="home").pack()))
+        b.row(InlineKeyboardButton(text="🛡️ Admin Panel", callback_data=AdminCb(owner_id=owner_id, section="home").pack()))
     return b.as_markup()
 
 
 def savdo_hub_kb(owner_id: int) -> InlineKeyboardMarkup:
-    """SAVDO MARKAZI: karta bilan bog‘liq barcha savdo amallari bir joyda."""
+    """SAVDO MARKAZI (Bot 2.5):
+    Market    | Bot Do'koni
+    Auksion   | Event
+    Almashish | Sovg'a berish
+    Bosh Menu
+    """
     b = InlineKeyboardBuilder()
     b.row(
-        _nav(owner_id, "🛒 BOZOR", "market"),
-        InlineKeyboardButton(text="🔨 AUKSION", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "🛒 Market", "market"),
+        InlineKeyboardButton(text="🏛 Bot Do‘koni", callback_data=BotStoreCb(owner_id=owner_id, act="v").pack()),
     )
     b.row(
-        InlineKeyboardButton(text="🤝 ALMASHISH", callback_data=TradeCb(owner_id=owner_id, act="v").pack()),
-        _nav(owner_id, "🎁 SOVG‘A BERISH", "give"),
+        InlineKeyboardButton(text="🔨 Auksion", callback_data=AucCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "🎯 Event", "event"),
     )
     b.row(
-        _nav(owner_id, "🔍 QIDIRUV", "search"),
-        InlineKeyboardButton(text="💖 ISTAKLAR", callback_data=WishCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="🤝 Almashish", callback_data=TradeCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "🎁 Sovg‘a berish", "give"),
     )
-    b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
+    b.row(_nav(owner_id, "🏠 Bosh Menu", "home"))
     return b.as_markup()
 
 
@@ -61,39 +79,42 @@ def games_hub_kb(owner_id: int, has_games: bool = True, has_pack: bool = True) -
     b = InlineKeyboardBuilder()
     buttons = []
     if has_games:
-        buttons.append(InlineKeyboardButton(text="🎲 MINI O‘YINLAR", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
-    buttons.append(InlineKeyboardButton(text="🧠 VIKTORINA", callback_data=QuizCb(owner_id=owner_id, act="v").pack()))
-    buttons.append(_nav(owner_id, "🎯 EVENTLAR", "event"))
-    buttons.append(_nav(owner_id, "📋 VAZIFALAR", "quests"))
+        buttons.append(InlineKeyboardButton(text="🎲 Mini o‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()))
+    buttons.append(InlineKeyboardButton(text="🧠 Viktorina", callback_data=QuizCb(owner_id=owner_id, act="v").pack()))
+    buttons.append(_nav(owner_id, "🎯 Eventlar", "event"))
+    buttons.append(_nav(owner_id, "📋 Vazifalar", "quests"))
     if has_pack:
-        buttons.append(_nav(owner_id, "🎁 PAKETLAR", "packs"))
+        buttons.append(_nav(owner_id, "🎁 Paketlar", "packs"))
     b.add(*buttons)
     b.adjust(2)
-    b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
+    b.row(_nav(owner_id, "🏠 Bosh Menu", "home"))
     return b.as_markup()
 
 
 def profile_kb(owner_id: int) -> InlineKeyboardMarkup:
-    """PROFIL markazi: faqat shaxsiy narsalar."""
+    """PROFILIM (Bot 2.5):
+    Kartalarim | Istaklar
+    Yutuqlar   | Vazifalar
+    Do'stlar   | Sozlamalar
+    Takliflar  | Bosh Menu
+    """
     b = InlineKeyboardBuilder()
     b.row(
-        _nav(owner_id, "🎴 KARTALARIM", "cards"),
-        InlineKeyboardButton(text="🎨 BEZAK", callback_data=AchCb(owner_id=owner_id, act="frames").pack()),
-    )
-    b.row(_nav(owner_id, "🎁 KUNLIK BONUS", "daily"), _nav(owner_id, "📋 VAZIFALAR", "quests"))
-    b.row(
-        InlineKeyboardButton(text="💎 VIP", callback_data=VipCb(owner_id=owner_id, act="v").pack()),
-        _nav(owner_id, "⭐ STARS DO‘KONI", "stars"),
+        _nav(owner_id, "🎴 Kartalarim", "cards"),
+        InlineKeyboardButton(text="💖 Istaklar", callback_data=WishCb(owner_id=owner_id, act="v").pack()),
     )
     b.row(
-        InlineKeyboardButton(text="🏅 YUTUQLAR", callback_data=AchCb(owner_id=owner_id, act="v").pack()),
-        InlineKeyboardButton(text="💖 ISTAKLAR", callback_data=WishCb(owner_id=owner_id, act="v").pack()),
+        InlineKeyboardButton(text="🏅 Yutuqlar", callback_data=AchCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "📋 Vazifalar", "quests"),
     )
     b.row(
-        _nav(owner_id, "👥 DO‘STLAR", "referral"),
-        InlineKeyboardButton(text="🔔 XABARLAR", callback_data=NotifCb(owner_id=owner_id, act="v").pack()),
+        _nav(owner_id, "👥 Do‘stlar", "referral"),
+        _nav(owner_id, "⚙️ Sozlamalar", "settings"),
     )
-    b.row(_nav(owner_id, "🏠 BOSH MENU", "home"))
+    b.row(
+        InlineKeyboardButton(text="📩 Takliflar", callback_data=OfferCb(owner_id=owner_id, action="incoming", page=1).pack()),
+        _nav(owner_id, "🏠 Bosh Menu", "home"),
+    )
     return b.as_markup()
 
 

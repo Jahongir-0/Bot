@@ -20,6 +20,30 @@ class GlobalCardSearchItem:
     active_listing: Optional[CardListing]
 
 
+def _card_id_cond(q: str, include_user_card_id: bool):
+    q_clean = q.strip()
+    upper_q = q_clean.upper()
+    digits = ""
+    if q_clean.isdigit():
+        digits = q_clean
+    elif upper_q.startswith("CRD-"):
+        tail = upper_q[4:].strip()
+        if tail.isdigit():
+            digits = tail
+
+    conds = [func.lower(Card.card_code) == q_clean.lower()]
+    if digits:
+        num = int(digits)
+        conds.append(Card.id == num)
+        if include_user_card_id:
+            conds.append(UserCard.id == num)
+            conds.append(UserCard.serial_number == num)
+        for width in (1, 3, 4, 5):
+            conds.append(func.lower(Card.card_code) == f"crd-{num:0{width}d}")
+        conds.append(func.lower(Card.card_code) == f"crd-{num}")
+    return or_(*conds)
+
+
 def _apply_card_filters(stmt, count_stmt, mode: str, query: str, include_user_card_id: bool = True):
     q = query.strip()
     if not q:
@@ -34,22 +58,14 @@ def _apply_card_filters(stmt, count_stmt, mode: str, query: str, include_user_ca
     elif mode == "rarity":
         cond = func.lower(Card.rarity).in_(rarity_aliases)
     elif mode == "card_id":
-        if q.isdigit():
-            cond = (UserCard.id == int(q)) | (Card.id == int(q)) if include_user_card_id else (Card.id == int(q))
-        else:
-            cond = func.lower(Card.card_code) == q.lower()
+        cond = _card_id_cond(q, include_user_card_id=include_user_card_id)
     elif mode == "any":
-        conditions = [
+        cond = or_(
             Card.character_name.ilike(pattern),
             Card.anime_name.ilike(pattern),
-            func.lower(Card.card_code) == q.lower(),
             func.lower(Card.rarity).in_(rarity_aliases),
-        ]
-        if q.isdigit():
-            conditions.append(Card.id == int(q))
-            if include_user_card_id:
-                conditions.append(UserCard.id == int(q))
-        cond = or_(*conditions)
+            _card_id_cond(q, include_user_card_id=include_user_card_id),
+        )
     else:
         return stmt, count_stmt
 
@@ -133,6 +149,7 @@ class SearchService:
         media_type: Optional[str] = None,
         sort_by: str = "value_desc",
         include_unreleased: bool = False,
+        only_unowned: bool = False,
     ) -> Tuple[List[Card], int]:
         """Foydalanuvchilar uchun katalog qidiruvi (unreleased kartalarni yashiradi, typo va aliaslarni qo'llab-quvvatlaydi)."""
         from services.admin_service import AdminService
@@ -143,7 +160,10 @@ class SearchService:
             owner_conds.append(UserCard.user_id.not_in(excluded_ids))
         has_owner = exists().where(*owner_conds)
         base_conds = [Card.is_deleted.is_(False)]
-        if not include_unreleased:
+        if only_unowned or mode == "unowned":
+            any_owner = exists().where(UserCard.card_id == Card.id)
+            base_conds.extend([Card.is_available.is_(True), ~any_owner])
+        elif not include_unreleased:
             base_conds.append((Card.dropped_count > 0) | Card.is_event_card.is_(True) | has_owner)
         if media_type and media_type != "all":
             if media_type == "Manga":

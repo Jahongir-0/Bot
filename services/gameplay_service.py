@@ -530,7 +530,10 @@ class GameplayService:
             return False, False, "Bu savolga allaqachon javob bergansiz!"
 
         if not is_correct:
-            return True, False, f"❌ Noto‘g‘ri! To‘g‘ri javob: {qq.options[qq.correct_index]}"
+            opts = list(qq.options or [])
+            cidx = int(qq.correct_index or 0)
+            correct_lbl = opts[cidx] if 0 <= cidx < len(opts) else "—"
+            return True, False, f"❌ Noto‘g‘ri! To‘g‘ri javob: {correct_lbl}"
 
         # Mukofot (to'g'ri javob uchun)
         user.quiz_wins = int(user.quiz_wins or 0) + 1
@@ -556,11 +559,10 @@ class GameplayService:
     # ------------------------------------------------------------------
     @staticmethod
     async def get_game_config(session: AsyncSession) -> Dict[str, Any]:
-        raw = await SettingsService.get_value(session, "game_config", DEFAULT_GAME_CONFIG)
         from utils.game_catalog import EXTRA_GAME_DEFAULTS
 
-        cfg = dict(DEFAULT_GAME_CONFIG)
-        cfg.update(EXTRA_GAME_DEFAULTS)
+        raw = await SettingsService.get_value(session, "game_config", DEFAULT_GAME_CONFIG)
+        cfg = {**DEFAULT_GAME_CONFIG, **EXTRA_GAME_DEFAULTS}
         if isinstance(raw, dict):
             cfg.update(raw)
         return cfg
@@ -1291,8 +1293,6 @@ class GameplayService:
     # ------------------------------------------------------------------
     @staticmethod
     async def pick_daily_random_card(session: AsyncSession, user: User) -> Optional[Card]:
-        if not await SettingsService.get_daily_card_enabled(session):
-            return None  # admin paneldan yoqilmaguncha kunlik bonusda karta berilmaydi
         cfg = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
         if not isinstance(cfg, dict) or not cfg.get("enabled", True):
             return None
@@ -1408,17 +1408,11 @@ class GameplayService:
 
     @staticmethod
     async def get_season_leaderboard(session: AsyncSession, season_id: int, limit: int = 10) -> List[Tuple[SeasonProgress, User]]:
-        from services.admin_service import AdminService
-
-        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
-        conds = [SeasonProgress.season_id == season_id, User.is_banned.is_(False)]
-        if excluded_ids:
-            conds.append(User.id.not_in(excluded_ids))
         rows = (
             await session.execute(
                 select(SeasonProgress, User)
                 .join(User, User.id == SeasonProgress.user_id)
-                .where(*conds)
+                .where(SeasonProgress.season_id == season_id, User.is_banned.is_(False))
                 .order_by(SeasonProgress.points.desc(), SeasonProgress.xp.desc())
                 .limit(limit)
             )

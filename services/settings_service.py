@@ -323,3 +323,100 @@ class SettingsService:
     @staticmethod
     async def set_daily_card_enabled(session: AsyncSession, value: bool) -> None:
         await SettingsService.set_value(session, "daily_card_enabled", bool(value))
+
+    # ------------------------------------------------------------------
+    # Komissiya sozlamalari (Market, Taklif, Auksion, Almashish, Sovg'a)
+    # ------------------------------------------------------------------
+    COMMISSION_KEYS = {
+        "market_buy": ("🛒 Market xaridi", False, 5),
+        "market_offer": ("💰 Market/Karta taklifi", False, 5),
+        "auction": ("🔨 Auksion", False, 5),
+        "trade": ("🤝 Almashish", False, 3),
+        "card_gift": ("🎁 Karta sovg‘asi", False, 0),
+        "coin_gift": ("💸 Coin sovg‘asi", True, 0),
+    }
+
+    @staticmethod
+    async def get_commission_config(session: AsyncSession) -> Dict[str, Dict[str, Any]]:
+        stored = await SettingsService.get_value(session, "commission_config", None)
+        stored = stored if isinstance(stored, dict) else {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for key, (_label, def_on, def_pct) in SettingsService.COMMISSION_KEYS.items():
+            entry = stored.get(key) if isinstance(stored.get(key), dict) else {}
+            out[key] = {
+                "enabled": bool(entry.get("enabled", def_on)),
+                "percent": max(0, min(90, int(entry.get("percent", def_pct)))),
+            }
+        # coin_gift bilan sinxronlash
+        cg = await SettingsService.get_value(session, "coin_gift_config", None)
+        if isinstance(cg, dict) and "fee_percent" in cg and "coin_gift" not in stored:
+            out["coin_gift"]["percent"] = max(0, min(90, int(cg.get("fee_percent", 0))))
+        return out
+
+    @staticmethod
+    async def set_commission_field(
+        session: AsyncSession,
+        key: str,
+        enabled: Optional[bool] = None,
+        percent: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        if key not in SettingsService.COMMISSION_KEYS:
+            raise ValueError("Noma’lum komissiya turi.")
+        cfg = await SettingsService.get_commission_config(session)
+        if enabled is not None:
+            cfg[key]["enabled"] = bool(enabled)
+        if percent is not None:
+            val = int(percent)
+            if not (0 <= val <= 90):
+                raise ValueError("Komissiya foizi 0 dan 90 gacha bo‘lishi kerak.")
+            cfg[key]["percent"] = val
+        await SettingsService.set_value(session, "commission_config", cfg)
+        if key == "coin_gift":
+            cg = await SettingsService.get_value(session, "coin_gift_config", None)
+            cg = dict(cg) if isinstance(cg, dict) else {"enabled": True, "min_amount": 100, "daily_limit": 0, "fee_percent": 0}
+            cg["fee_percent"] = cfg[key]["percent"] if cfg[key]["enabled"] else 0
+            await SettingsService.set_value(session, "coin_gift_config", cg)
+        return cfg
+
+    @staticmethod
+    def compute_commission(base_amount: int, cfg: Dict[str, Dict[str, Any]], key: str) -> tuple[int, int]:
+        """(komissiya_coin, foiz) qaytaradi."""
+        amt = max(0, int(base_amount or 0))
+        entry = (cfg or {}).get(key) or {}
+        if not entry.get("enabled") or amt <= 0:
+            return 0, 0
+        pct = max(0, min(90, int(entry.get("percent", 0))))
+        if pct <= 0:
+            return 0, 0
+        fee = int(round(amt * pct / 100.0))
+        return max(0, fee), pct
+
+    # ------------------------------------------------------------------
+    # Bot Do'koni sozlamalari (sell discount %, yoqish/o'chirish)
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def get_bot_store_config(session: AsyncSession) -> Dict[str, Any]:
+        raw = await SettingsService.get_value(session, "bot_store_config", None)
+        raw = raw if isinstance(raw, dict) else {}
+        return {
+            "enabled": bool(raw.get("enabled", True)),
+            "sell_enabled": bool(raw.get("sell_enabled", True)),
+            "buy_enabled": bool(raw.get("buy_enabled", True)),
+            "sell_discount_pct": max(0, min(80, int(raw.get("sell_discount_pct", 15)))),
+        }
+
+    @staticmethod
+    async def set_bot_store_field(session: AsyncSession, field: str, value: Any) -> Dict[str, Any]:
+        cfg = await SettingsService.get_bot_store_config(session)
+        if field not in cfg:
+            raise ValueError("Noma’lum sozlama.")
+        if field in ("enabled", "sell_enabled", "buy_enabled"):
+            cfg[field] = bool(value)
+        else:
+            val = int(value)
+            if not (0 <= val <= 80):
+                raise ValueError("Chegirma foizi 0 dan 80 gacha bo‘lishi kerak.")
+            cfg[field] = val
+        await SettingsService.set_value(session, "bot_store_config", cfg)
+        return cfg
+

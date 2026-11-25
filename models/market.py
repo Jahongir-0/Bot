@@ -47,7 +47,7 @@ class CardListing(Base, TimestampMixin):
 class Offer(Base, TimestampMixin):
     __tablename__ = "offers"
     __table_args__ = (
-        CheckConstraint("amount > 0", name="ck_offers_amount_positive"),
+        CheckConstraint("amount >= 0", name="ck_offers_amount_non_negative"),
         Index("ix_offers_owner_status", "owner_id", "status"),
         Index("ix_offers_expires_status", "expires_at", "status"),
     )
@@ -77,7 +77,14 @@ class Offer(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    offer_type: Mapped[str] = mapped_column(String(16), nullable=False, default="coin", server_default="coin")
+    offered_user_card_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("user_cards.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

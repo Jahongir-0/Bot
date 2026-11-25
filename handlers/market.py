@@ -8,18 +8,26 @@ from sqlalchemy import func, select
 
 from database.session import get_session
 from keyboards.main_menu import back_home_kb
-from keyboards.market import bot_sell_confirm_kb, bot_sell_list_kb, listing_detail_kb, market_list_kb
+from keyboards.market import (
+    bot_sell_confirm_kb,
+    bot_sell_list_kb,
+    listing_buy_confirm_kb,
+    listing_detail_kb,
+    market_list_kb,
+)
 from models.card import Card
 from models.user import User
 from models.user_card import UserCard
+from services.card_level_service import CardLevelService
 from services.collection_service import CollectionService
+from services.community_service import CommunityService
 from services.market_service import MarketService
+from services.settings_service import SettingsService
 from services.user_service import InsufficientCoinsError
 from utils.callback_data import MarketCb, NavCb
-from utils.constants import PAGE_SIZE
-from utils.constants import get_rarity_meta
-from utils.formatting import LINE, header, esc, fmt_coins, format_card_block
-from utils.tg_helpers import append_private_ad, edit_or_answer
+from utils.constants import PAGE_SIZE, get_rarity_meta
+from utils.formatting import LINE, esc, fmt_coins, format_v25_card_caption, header
+from utils.tg_helpers import edit_or_answer, safe_delete, send_card_message
 
 logger = logging.getLogger(__name__)
 router = Router(name="market")
@@ -47,12 +55,6 @@ async def _show_market(target, owner_id: int, db_user: User, page: int = 1, my_o
             lines.append(f"      💰 {fmt_coins(item.listing.price)} 🪙{seller}")
         lines.append("\n👇 Kartani tanlang:")
         text = "\n".join(lines)
-
-    is_pm = (isinstance(target, Message) and target.chat.type == "private") or (
-        isinstance(target, CallbackQuery) and target.message is not None and target.message.chat.type == "private"
-    )
-    if is_pm:
-        text = await append_private_ad(text, target.bot, db_user)
 
     await edit_or_answer(
         target,
@@ -175,26 +177,81 @@ async def cb_my_listings(callback: CallbackQuery, callback_data: MarketCb, db_us
 async def cb_listing_view(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
     async with get_session() as session:
         detail = await MarketService.get_listing_detail(session, callback_data.listing_id)
+        uc = await session.get(UserCard, detail.listing.user_card_id) if detail else None
+        lvl_cfg = await CardLevelService.get_config(session)
+        rcfg = await SettingsService.get_rarity_config(session)
 
     if detail is None or detail.listing.status != "active":
         await callback.answer("Bu e'lon allaqachon yopilgan.", show_alert=True)
         await _show_market(callback, callback.from_user.id, db_user, page=callback_data.page)
         return
 
-    text = (
-        f"{header('🛒 <b>BOZOR</b>')}\n"
-        f"{format_card_block(detail.card)}\n"
-        f"{LINE}\n"
-        f"👤 Sotuvchi: <b>{esc(detail.seller.display_name)}</b>\n"
-        f"💰 Narxi: <b>{fmt_coins(detail.listing.price)}</b> 🪙"
+    lv = int(getattr(uc, "level", 1) or 1)
+    power = CardLevelService.power(detail.card.rarity, lv, lvl_cfg)
+    l_emoji, l_name = CardLevelService.title(lv)
+    rank_val = CardLevelService.rank_value_for_card(detail.card, rcfg)
+    caption = format_v25_card_caption(
+        detail.card,
+        level=lv,
+        max_level=int(lvl_cfg.get("max_level", 10)),
+        power=power,
+        level_title_emoji=l_emoji,
+        level_title_name=l_name,
+        acquired_price_coins=int(detail.listing.price),
+        rank_price_coins=rank_val,
+        owner_name=detail.seller.display_name,
+        status_line=f"🛒 Bozor narxi: <b>{fmt_coins(detail.listing.price)} 🪙</b>",
     )
     kb = listing_detail_kb(
         owner_id=callback.from_user.id,
         listing_id=detail.listing.id,
         is_seller=(detail.seller.id == db_user.id),
         page=callback_data.page,
+        user_card_id=detail.listing.user_card_id,
     )
-    await edit_or_answer(callback, text, reply_markup=kb)
+    if callback.message:
+        await safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
+        await send_card_message(callback.bot, callback.message.chat.id, detail.card, caption, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(MarketCb.filter(F.action == "buy_ask"))
+async def cb_buy_ask(callback: CallbackQuery, callback_data: MarketCb, db_user: User) -> None:
+    async with get_session() as session:
+        detail = await MarketService.get_listing_detail(session, callback_data.listing_id)
+        comm_cfg = await SettingsService.get_commission_config(session)
+
+    if detail is None or detail.listing.status != "active":
+        await callback.answer("Bu e'lon allaqachon yopilgan.", show_alert=True)
+        await _show_market(callback, callback.from_user.id, db_user, page=callback_data.page)
+        return
+    if detail.seller.id == db_user.id:
+        await callback.answer("O‘zingizning kartangizni sotib ololmaysiz!", show_alert=True)
+        return
+
+    price = int(detail.listing.price)
+    fee_coins, fee_pct = SettingsService.compute_commission(price, comm_cfg, "market_buy")
+    seller_gets = max(1, price - fee_coins)
+    comm_lines = (
+        f"💸 Tizim komissiyasi ({fee_pct}%): <b>-{fmt_coins(fee_coins)} 🪙</b>\n"
+        f"📥 Sotuvchiga tushadi: <b>{fmt_coins(seller_gets)} 🪙</b>\n"
+        if fee_coins > 0
+        else "✅ Komissiya: <b>0%</b>\n"
+    )
+    text = (
+        f"{header('🛒 <b>XARIDNI TASDIQLANG</b>')}\n"
+        f"🎴 Karta: <b>{esc(detail.card.character_name)}</b> ({esc(detail.card.anime_name)})\n"
+        f"👤 Sotuvchi: <b>{esc(detail.seller.display_name)}</b>\n"
+        f"{LINE}\n"
+        f"💰 Narxi: <b>{fmt_coins(price)} 🪙</b>\n"
+        f"{comm_lines}"
+        f"\nTasdiqlaysizmi?"
+    )
+    await edit_or_answer(
+        callback,
+        text,
+        reply_markup=listing_buy_confirm_kb(callback.from_user.id, detail.listing.id, page=callback_data.page),
+    )
 
 
 @router.callback_query(MarketCb.filter(F.action == "buy"))
@@ -207,6 +264,16 @@ async def cb_buy_listing(callback: CallbackQuery, callback_data: MarketCb, db_us
                 buyer_id=db_user.id,
             )
             if res.success:
+                if res.seller is not None:
+                    seller_gets = max(1, int(res.price_paid) - int(res.fee_coins or 0))
+                    await CommunityService.notify_user(
+                        session,
+                        res.seller.id,
+                        "market",
+                        "🛒 Kartangiz sotildi!",
+                        f"{res.card.character_name} kartangiz {db_user.display_name} tomonidan "
+                        f"{res.price_paid:,} 🪙 ga sotib olindi (hisobingizga +{seller_gets:,} 🪙).",
+                    )
                 await session.commit()
             else:
                 await session.rollback()
@@ -224,6 +291,19 @@ async def cb_buy_listing(callback: CallbackQuery, callback_data: MarketCb, db_us
         await callback.answer(f"❌ {res.message}", show_alert=True)
         return
 
+    if res.seller is not None:
+        try:
+            seller_gets = max(1, int(res.price_paid) - int(res.fee_coins or 0))
+            await callback.bot.send_message(
+                res.seller.telegram_id,
+                f"🛒 <b>Kartangiz sotildi!</b>\n\n"
+                f"🎴 <b>{esc(res.card.character_name)}</b> → 👤 {esc(db_user.display_name)}\n"
+                f"💰 Hisobingizga qo‘shildi: <b>+{fmt_coins(seller_gets)} 🪙</b>"
+                + (f" (komissiya -{res.fee_pct}%)" if res.fee_coins else ""),
+            )
+        except Exception:
+            pass
+
     await callback.answer("🎉 Karta sotib olindi!", show_alert=True)
     extra = ""
     if res.is_duplicate:
@@ -231,11 +311,12 @@ async def cb_buy_listing(callback: CallbackQuery, callback_data: MarketCb, db_us
             extra = f"\n👑 Karta maksimal darajada edi — <b>+{fmt_coins(res.refund)} 🪙</b> qaytarildi!"
         else:
             extra = f"\n🔁 Bu karta sizda bor edi — daraja ko‘tarildi: <b>{res.level_before} → {res.level_after}</b>!"
+    comm_note = f"\n💸 Komissiya: {res.fee_pct}% ({fmt_coins(res.fee_coins)} 🪙)" if res.fee_coins else ""
     await edit_or_answer(
         callback,
         f"🎉 <b>TABRIKLAYMIZ!</b>\n\n"
         f"🎴 <b>{esc(res.card.character_name)}</b> kartasi sizning kolleksiyangizga o‘tkazildi!\n"
-        f"💰 To‘landi: <b>{fmt_coins(res.price_paid)} 🪙</b>{extra}",
+        f"💰 To‘landi: <b>{fmt_coins(res.price_paid)} 🪙</b>{comm_note}{extra}",
         reply_markup=back_home_kb(callback.from_user.id, "market"),
     )
 
