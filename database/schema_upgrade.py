@@ -158,27 +158,31 @@ def upgrade_schema_sync(conn: Connection) -> None:
         existing = {c["name"] for c in insp.get_columns(table)}
         for name, ddl in cols:
             if name not in existing:
-                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {name} {ddl}'))
+                if_not = "IF NOT EXISTS " if dialect == "postgresql" else ""
+                with conn.begin_nested():
+                    conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {if_not}{name} {ddl}'))
                 logger.info("Schema upgrade: %s.%s qo'shildi", table, name)
                 if table == "cards" and name == "drop_limit":
                     added_drop_limit = True
 
     if added_drop_limit:
-        for rarity, drops in _DEFAULT_DROPS.items():
-            conn.execute(text("UPDATE cards SET drop_limit = :d WHERE rarity = :r"), {"d": drops, "r": rarity})
-        conn.execute(
-            text(
-                "UPDATE cards SET dropped_count = "
-                "(SELECT COUNT(*) FROM active_drops WHERE active_drops.card_id = cards.id)"
+        with conn.begin_nested():
+            for rarity, drops in _DEFAULT_DROPS.items():
+                conn.execute(text("UPDATE cards SET drop_limit = :d WHERE rarity = :r"), {"d": drops, "r": rarity})
+            conn.execute(
+                text(
+                    "UPDATE cards SET dropped_count = "
+                    "(SELECT COUNT(*) FROM active_drops WHERE active_drops.card_id = cards.id)"
+                )
             )
-        )
 
     # PostgreSQL'da bans.user_id guruh banlari uchun NULL bo'la olishi kerak
     if dialect == "postgresql" and insp.has_table("bans"):
         try:
             for col in insp.get_columns("bans"):
                 if col["name"] == "user_id" and not col.get("nullable", True):
-                    conn.execute(text("ALTER TABLE bans ALTER COLUMN user_id DROP NOT NULL"))
+                    with conn.begin_nested():
+                        conn.execute(text("ALTER TABLE bans ALTER COLUMN user_id DROP NOT NULL"))
                     logger.info("Schema upgrade: bans.user_id nullable qilindi")
                     break
         except Exception as exc:  # pragma: no cover
@@ -187,45 +191,47 @@ def upgrade_schema_sync(conn: Connection) -> None:
     # PostgreSQL'da offers.ck_offers_amount_positive ni amount >= 0 ga yumshatish (karta taklifi uchun 0 ruxsat)
     if dialect == "postgresql" and insp.has_table("offers"):
         try:
-            conn.execute(text("ALTER TABLE offers DROP CONSTRAINT IF EXISTS ck_offers_amount_positive"))
-            conn.execute(
-                text(
-                    "DO $$ BEGIN "
-                    "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_offers_amount_non_negative') THEN "
-                    "ALTER TABLE offers ADD CONSTRAINT ck_offers_amount_non_negative CHECK (amount >= 0); "
-                    "END IF; END $$;"
+            with conn.begin_nested():
+                conn.execute(text("ALTER TABLE offers DROP CONSTRAINT IF EXISTS ck_offers_amount_positive"))
+                conn.execute(
+                    text(
+                        "DO $$ BEGIN "
+                        "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_offers_amount_non_negative') THEN "
+                        "ALTER TABLE offers ADD CONSTRAINT ck_offers_amount_non_negative CHECK (amount >= 0); "
+                        "END IF; END $$;"
+                    )
                 )
-            )
         except Exception as exc:  # pragma: no cover
             logger.warning("offers check constraint upgrade xato: %s", exc)
 
     # Backfill serial_number, media_type, card_state, bot_status (idempotent)
     try:
-        conn.execute(text("UPDATE user_cards SET serial_number = 10000 + id WHERE serial_number IS NULL"))
-        conn.execute(text("UPDATE cards SET media_type = 'Anime' WHERE media_type IS NULL OR media_type = ''"))
-        conn.execute(
-            text(
-                "UPDATE cards SET card_state = CASE "
-                "WHEN is_deleted = TRUE THEN 'DELETED' "
-                "WHEN is_event_card = TRUE THEN 'EVENT' "
-                "ELSE 'AVAILABLE' END "
-                "WHERE card_state IS NULL OR card_state = ''"
+        with conn.begin_nested():
+            conn.execute(text("UPDATE user_cards SET serial_number = 10000 + id WHERE serial_number IS NULL"))
+            conn.execute(text("UPDATE cards SET media_type = 'Anime' WHERE media_type IS NULL OR media_type = ''"))
+            conn.execute(
+                text(
+                    "UPDATE cards SET card_state = CASE "
+                    "WHEN is_deleted = TRUE THEN 'DELETED' "
+                    "WHEN is_event_card = TRUE THEN 'EVENT' "
+                    "ELSE 'AVAILABLE' END "
+                    "WHERE card_state IS NULL OR card_state = ''"
+                )
             )
-        )
-        conn.execute(
-            text(
-                "UPDATE user_cards SET card_state = CASE "
-                "WHEN is_locked = TRUE THEN 'LOCKED' ELSE 'OWNED' END "
-                "WHERE card_state IS NULL OR card_state = ''"
+            conn.execute(
+                text(
+                    "UPDATE user_cards SET card_state = CASE "
+                    "WHEN is_locked = TRUE THEN 'LOCKED' ELSE 'OWNED' END "
+                    "WHERE card_state IS NULL OR card_state = ''"
+                )
             )
-        )
-        conn.execute(
-            text(
-                "UPDATE groups SET bot_status = CASE "
-                "WHEN is_active = FALSE THEN 'left' ELSE 'active' END "
-                "WHERE bot_status IS NULL OR bot_status = ''"
+            conn.execute(
+                text(
+                    "UPDATE groups SET bot_status = CASE "
+                    "WHEN is_active = FALSE THEN 'left' ELSE 'active' END "
+                    "WHERE bot_status IS NULL OR bot_status = ''"
+                )
             )
-        )
     except Exception as exc:  # pragma: no cover
         logger.warning("Backfill xato (e'tibor berilmadi): %s", exc)
 
@@ -240,21 +246,23 @@ def upgrade_schema_sync(conn: Connection) -> None:
         "CREATE INDEX IF NOT EXISTS ix_bot_store_status_created ON bot_store_listings (status, created_at)",
     ):
         try:
-            conn.execute(text(stmt))
+            with conn.begin_nested():
+                conn.execute(text(stmt))
         except Exception as exc:  # pragma: no cover
             logger.warning("Index yaratilmadi (%s): %s", stmt, exc)
 
     try:
-        dup = conn.execute(
-            text("SELECT 1 FROM user_cards GROUP BY user_id, card_id HAVING COUNT(*) > 1 LIMIT 1")
-        ).first()
-        if dup is None:
-            conn.execute(
-                text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_cards_user_card ON user_cards (user_id, card_id)")
-            )
-        else:
-            logger.warning(
-                "user_cards da dublikat nusxalar bor: UNIQUE indeks qo'yilmadi."
-            )
+        with conn.begin_nested():
+            dup = conn.execute(
+                text("SELECT 1 FROM user_cards GROUP BY user_id, card_id HAVING COUNT(*) > 1 LIMIT 1")
+            ).first()
+            if dup is None:
+                conn.execute(
+                    text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_cards_user_card ON user_cards (user_id, card_id)")
+                )
+            else:
+                logger.warning(
+                    "user_cards da dublikat nusxalar bor: UNIQUE indeks qo'yilmadi."
+                )
     except Exception as exc:  # pragma: no cover
         logger.warning("UNIQUE indeks tekshiruvida xato: %s", exc)

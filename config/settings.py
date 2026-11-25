@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     default_offer_expiry_hours: int = Field(default=24, alias="DEFAULT_OFFER_EXPIRY_HOURS")
     enable_telegram_stars: bool = Field(default=True, alias="ENABLE_TELEGRAM_STARS")
     stars_payment_secret: str = Field(default="", alias="STARS_PAYMENT_SECRET")
-    auto_schema_upgrade: bool = Field(default=False, alias="AUTO_SCHEMA_UPGRADE")
+    auto_schema_upgrade: bool = Field(default=True, alias="AUTO_SCHEMA_UPGRADE")
     db_pool_size: int = Field(default=5, alias="DB_POOL_SIZE", ge=1, le=50)
     db_max_overflow: int = Field(default=10, alias="DB_MAX_OVERFLOW", ge=0, le=100)
     db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT", ge=5, le=120)

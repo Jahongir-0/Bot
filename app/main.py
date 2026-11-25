@@ -46,7 +46,7 @@ async def main() -> None:
     settings.validate_runtime()
 
     logger.info("Initializing database...")
-    await init_db(auto_schema_upgrade=settings.auto_schema_upgrade)
+    await init_db(auto_schema_upgrade=True)
     async with get_session() as session:
         await seed_initial_data(session)
         await GameplayService.sync_runtime_and_legacy_ranks(session)
