@@ -1,123 +1,38 @@
-import asyncio
-import logging
+"""Yangi qo'shilgan foydalanuvchilarga beriladigan boshlang'ich bonus (admin paneldan o'zgartiriladi).
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from sqlalchemy import exists, select, update
+Eslatma: bonus faqat YANGI foydalanuvchilarga beriladi. Avvaldan bor foydalanuvchilarning coiniga tegilmaydi.
+"""
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.session import get_session
-from models.base import utcnow
-from models.transaction import CoinTransaction
-from models.user import User
 from services.settings_service import SettingsService
 
-logger = logging.getLogger(__name__)
-
-WELCOME_BONUS_COINS = 40_000
 TX_NEW = "welcome_bonus"
-TX_LEGACY = "welcome_bonus_legacy"
-DONE_KEY = "welcome_bonus_40k_legacy_done"
-BATCH_SIZE = 300
-SEND_DELAY = 0.05  # ~20 xabar/soniya (Telegram limitidan past)
-
-NEW_USER_TEXT = (
-    "🎁 <b>Xush kelibsiz!</b>\n"
-    f"Sizga boshlang‘ich bonus sifatida <b>{WELCOME_BONUS_COINS:,} 🪙</b> berildi!\n\n"
-    f"Har bir yangi qo‘shilgan foydalanuvchi <b>{WELCOME_BONUS_COINS:,} coin</b> oladi. Omad!\n\n"
-)
-
-LEGACY_TEXT = (
-    f"🎁 <b>Sizga {WELCOME_BONUS_COINS:,} 🪙 berildi!</b>\n\n"
-    f"Endi har bir yangi qo‘shilgan foydalanuvchi boshidanoq <b>{WELCOME_BONUS_COINS:,} coin</b> oladi.\n"
-    f"Avval qo‘shilgan foydalanuvchilar xafa bo‘lmasligi uchun sizga ham bonus sifatida "
-    f"<b>{WELCOME_BONUS_COINS:,} 🪙</b> qo‘shib berildi.\n\n"
-    "Balansingizni /me orqali ko‘rishingiz mumkin. Yaxshi o‘yin! 🎴"
-)
-
-
-async def _send(bot: Bot, tg_id: int, text: str) -> bool:
-    for _ in range(3):
-        try:
-            await bot.send_message(tg_id, text)
-            return True
-        except TelegramRetryAfter as exc:
-            await asyncio.sleep(float(exc.retry_after) + 0.5)
-        except (TelegramForbiddenError, TelegramBadRequest):
-            return False  # bot bloklangan / chat yo'q
-        except Exception as exc:
-            logger.warning("welcome bonus xabari yuborilmadi (%s): %s", tg_id, exc)
-            return False
-    return False
+SETTING_KEY = "welcome_bonus_coins"
+DEFAULT_WELCOME_BONUS = 2_000
+MAX_WELCOME_BONUS = 1_000_000_000
 
 
 class WelcomeBonusService:
     @staticmethod
-    async def grant_legacy_users(bot: Bot) -> None:
-        """Bot yangilanganda BIR MARTA: avvalgi barcha foydalanuvchilarga 40 000 coin + xabar.
-
-        Har bir user uchun 'welcome_bonus*' tranzaksiyasi tekshiriladi, shuning uchun qayta
-        ishga tushirilsa ham hech kim ikki marta olmaydi (jarayon yarim yo'lda to'xtasa, davom etadi).
-        """
+    async def get_amount(session: AsyncSession) -> int:
+        raw = await SettingsService.get_value(session, SETTING_KEY, DEFAULT_WELCOME_BONUS)
         try:
-            async with get_session() as session:
-                if await SettingsService.get_value(session, DONE_KEY, False):
-                    return
+            return max(0, min(int(raw), MAX_WELCOME_BONUS))
+        except (TypeError, ValueError):
+            return DEFAULT_WELCOME_BONUS
 
-            granted = sent = 0
-            while True:
-                async with get_session() as session:
-                    rows = (
-                        await session.execute(
-                            select(User.id, User.telegram_id)
-                            .where(
-                                ~exists().where(
-                                    CoinTransaction.user_id == User.id,
-                                    CoinTransaction.tx_type.in_((TX_NEW, TX_LEGACY)),
-                                )
-                            )
-                            .order_by(User.id)
-                            .limit(BATCH_SIZE)
-                        )
-                    ).all()
-                    if not rows:
-                        break
-                    ids = [r.id for r in rows]
-                    await session.execute(
-                        update(User)
-                        .where(User.id.in_(ids))
-                        .values(coins=User.coins + WELCOME_BONUS_COINS, updated_at=utcnow())
-                        .execution_options(synchronize_session=False)
-                    )
-                    balances = dict(
-                        (await session.execute(select(User.id, User.coins).where(User.id.in_(ids)))).all()
-                    )
-                    session.add_all(
-                        [
-                            CoinTransaction(
-                                user_id=uid,
-                                amount=WELCOME_BONUS_COINS,
-                                balance_after=int(balances[uid]),
-                                tx_type=TX_LEGACY,
-                                description="Yangilanish bonusi (barcha foydalanuvchilarga)",
-                                reference_id=f"{TX_LEGACY}:{uid}",
-                                meta={},
-                            )
-                            for uid in ids
-                        ]
-                    )
-                    await session.commit()
-                granted += len(rows)
+    @staticmethod
+    async def set_amount(session: AsyncSession, amount: int) -> int:
+        amount = int(amount)
+        if not (0 <= amount <= MAX_WELCOME_BONUS):
+            raise ValueError(f"Qiymat 0 dan {MAX_WELCOME_BONUS:,} gacha bo‘lishi kerak.")
+        await SettingsService.set_value(session, SETTING_KEY, amount)
+        return amount
 
-                for r in rows:
-                    if await _send(bot, int(r.telegram_id), LEGACY_TEXT):
-                        sent += 1
-                    await asyncio.sleep(SEND_DELAY)
 
-            async with get_session() as session:
-                await SettingsService.set_value(session, DONE_KEY, True)
-                await session.commit()
-            logger.info("Welcome bonus: %s ta userga berildi, %s tasiga xabar yetdi", granted, sent)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Welcome bonus jarayonida xato")
+def new_user_text(amount: int) -> str:
+    """Yangi foydalanuvchiga birinchi /start da ko'rsatiladigan xabar."""
+    return (
+        "🎁 <b>Xush kelibsiz!</b>\n"
+        f"Sizga boshlang‘ich bonus sifatida <b>{int(amount):,} 🪙</b> berildi!\n\n"
+    )

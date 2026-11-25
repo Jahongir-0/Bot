@@ -8,14 +8,14 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database.session import get_session
-from keyboards.main_menu import GROUP_MENUS, back_home_kb, group_menu_kb, main_menu_kb
+from keyboards.main_menu import back_home_kb, main_menu_kb
 from models.user import User
 from services.community_service import CommunityService
 from models.base import utcnow
 from services.drop_service import DropService
 from services.group_policy_service import GroupPolicyService
 from services.gameplay_service import GameplayService
-from services.welcome_bonus_service import NEW_USER_TEXT
+from services.welcome_bonus_service import WelcomeBonusService, new_user_text
 from services.ranking_service import RankingService
 from services.settings_service import SettingsService
 from services.user_service import UserService
@@ -34,23 +34,24 @@ WELCOME_TEXT = (
 )
 
 HELP_TEXT = (
-    "❓ <b>QANDAY O‘YNALADI?</b>\n"
+    "❓ <b>QO‘LLANMA</b>\n"
     "━━━━━━━━━━━━━━━\n"
-    "<b>1️⃣ Karta yig‘ish</b>\n"
-    "Botni guruhga qo‘shing. Guruhda karta rasmi tashlanadi (ismi yashirin). "
-    "O‘sha xabarga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!\n\n"
-    "<b>2️⃣ Coin, XP va Paketlar</b>\n"
-    "🎁 Kunlik bonus (/daily) · 🎲 mini-o‘yinlar (/game) · 🧠 viktorina (/quiz) · "
-    "📋 vazifalar · 🎁 karta paketlari (/pack) orqali coin va kartalar yuting.\n\n"
-    "<b>3️⃣ Savdo va Almashuv</b>\n"
-    "🛒 Bozor (/market) · 🔨 auksion (/auction) · 🤝 do‘stlar bilan almashuv (/trade) · 💖 istaklar (/wishlist).\n\n"
-    "<b>4️⃣ Asosiy buyruqlar</b>\n"
-    "/menu — bosh menyu · /me — profilim\n"
-    "/cards — kartalarim · /search — qidiruv\n"
-    "/daily — kunlik bonus · /pack — karta paketlari\n"
-    "/game — mini-o‘yinlar · /quiz — viktorina\n"
-    "/top — reytinglar · /vip — VIP imtiyozlar\n\n"
-    "💬 Savol yoki taklif bo‘lsa, menyudagi <b>ALOQA</b> (/support) tugmasi orqali adminga yozing."
+    "<b>1️⃣ Karta qanday olinadi?</b>\n"
+    "Botni guruhga qo‘shing. Guruhda yashirin ismli karta rasmi tashlanadi. "
+    "Xabarga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!\n\n"
+    "<b>2️⃣ Bosh menyu bo‘limlari</b>\n"
+    "👤 <b>Profilim</b> — balans, daraja, VIP, yutuqlar, bezak\n"
+    "🎴 <b>Kartalarim</b> — kolleksiya, daraja oshirish, birlashtirish\n"
+    "🛒 <b>Savdo markazi</b> — bozor, auksion, almashish, sovg‘a, qidiruv, istaklar\n"
+    "🎮 <b>O‘yinlar</b> — mini o‘yinlar, viktorina, eventlar, vazifalar, paketlar\n"
+    "🎁 <b>Kunlik bonus</b> — har kuni bepul coin\n"
+    "🏆 <b>Reyting</b> — eng kuchli kolleksiyalar, boylik va daraja\n"
+    "👥 <b>Do‘stlar</b> — taklif qiling, ikkalangiz ham coin oling\n\n"
+    "<b>3️⃣ Tezkor buyruqlar</b>\n"
+    "/menu — bosh menyu · /me — profil · /cards — kartalarim\n"
+    "/savdo — savdo markazi · /game — o‘yinlar · /daily — kunlik bonus\n"
+    "/givecoin @user 500 — coin yuborish · /top — reyting\n\n"
+    "💬 Savol yoki taklif bo‘lsa, <b>ALOQA</b> tugmasi orqali adminga yozing."
 )
 
 
@@ -62,8 +63,24 @@ def _home_text(db_user: User, welcome: str = WELCOME_TEXT) -> str:
         f"🪙 <b>{fmt_coins(db_user.coins)}</b> coin  ·  ⚡ <b>{db_user.level}</b>-daraja  ·  🎴 <b>{db_user.total_cards}</b> karta\n"
         "━━━━━━━━━━━━━━━\n"
         f"{welcome}\n\n"
-        "👇 Kerakli bo‘limni tanlang. Kolleksiya, kunlik bonus va VIP — <b>PROFILIM</b> ichida."
+        "👇 <b>Bo‘limni tanlang:</b>\n"
+        "🎴 Kartalarim · 🛒 Savdo (bozor, auksion, almashish, sovg‘a) · 🎮 O‘yinlar · 🏆 Reyting"
     )
+
+
+async def _load_home_context(db_user: User) -> tuple[User, str]:
+    """Bosh menyu uchun yangi foydalanuvchi ma'lumoti va salomlashuv matni."""
+    welcome_txt = WELCOME_TEXT
+    fresh_user = db_user
+    async with get_session() as session:
+        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
+        custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
+        if custom_w:
+            welcome_txt = str(custom_w)
+        fresh = await session.get(User, db_user.id)
+        if fresh is not None:
+            fresh_user = fresh
+    return fresh_user, welcome_txt
 
 
 async def _show_referral(target, tg_id: int, db_user: User) -> None:
@@ -76,11 +93,21 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
         sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
         fresh_user = await session.get(User, db_user.id)
         ref_cfg = await SettingsService.get_referral_config(session)
-        grp_coins = await SettingsService.get_group_add_reward_coins(session)
+        gcfg = await SettingsService.get_group_reward_config(session)
 
     ref_count = int(fresh_user.referral_count if fresh_user else db_user.referral_count or 0)
     r3_name = get_rank_name_by_order(3, "Epic")
     r3_meta = get_rarity_meta(r3_name)
+    if not gcfg["enabled"]:
+        group_reward_line = "• Hozircha mukofot berilmaydi\n"
+    else:
+        amount = (
+            f"a’zolar soni × <b>{fmt_coins(gcfg['per_member_coins'])}</b> 🪙 (masalan, 100 a’zo = {fmt_coins(100 * gcfg['per_member_coins'])} 🪙)"
+            if gcfg["per_member"]
+            else f"<b>+{fmt_coins(gcfg['flat_coins'])}</b> 🪙"
+        )
+        card_part = f" + {r3_meta.emoji} eksklyuziv <b>{esc(r3_name)} karta</b>" if gcfg["give_epic_card"] else ""
+        group_reward_line = f"• {amount}{card_part}\n"
     text = (
         f"{header('👥 <b>DO‘STLAR VA MUKOFOTLAR</b>')}\n"
         f"👥 Taklif qilgan do‘stlaringiz: <b>{ref_count}</b> ta\n\n"
@@ -89,8 +116,8 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
         f"• Do‘stingiz: <b>+{fmt_coins(ref_cfg['invitee_coins'])}</b> 🪙\n"
         "<i>(Faqat botga birinchi marta kirgan do‘stlar uchun)</i>\n\n"
         "🏰 <b>Botni guruhga qo‘shsangiz</b>\n"
-        f"• <b>+{fmt_coins(grp_coins)}</b> 🪙 + {r3_meta.emoji} eksklyuziv <b>{esc(r3_name)} karta</b>\n"
-        "<i>(Bu karta boshqa guruhlarga tashlanmaydi, faqat sizga beriladi)</i>\n\n"
+        f"{group_reward_line}"
+        f"<i>Guruhda kamida {gcfg['min_members']} ta haqiqiy a’zo bo‘lishi kerak (botlar hisoblanmaydi).</i>\n\n"
         f"🔗 <b>Sizning havolangiz</b> (bosib nusxalang):\n<code>{esc(ref_link)}</code>"
     )
     builder = InlineKeyboardBuilder()
@@ -107,7 +134,6 @@ async def _show_referral(target, tg_id: int, db_user: User) -> None:
             )
         )
     builder.row(
-        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=NavCb(owner_id=tg_id, target="profile").pack()),
         InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=tg_id, target="home").pack()),
     )
     await edit_or_answer(target, text, reply_markup=builder.as_markup())
@@ -126,17 +152,14 @@ async def cmd_start(
     ref_notice = ""
     args = (command.args or "").strip() if command else ""
     if args.startswith("quiz_") and args[5:].isdigit():
-        from handlers.v2_features import show_quiz_intro
+        from handlers.quiz import show_quiz_intro
 
         await show_quiz_intro(message, message.from_user.id, int(args[5:]), db_user.id)
         return
     welcome_txt = WELCOME_TEXT
-    pack_lim = 1
     fresh_user = db_user
     async with get_session() as session:
         sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
-        gcfg = await GameplayService.get_game_config(session)
-        pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
         custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
         if custom_w:
             welcome_txt = str(custom_w)
@@ -144,9 +167,12 @@ async def cmd_start(
         if fresh is not None:
             fresh_user = fresh
             if isinstance(fresh.stats, dict) and fresh.stats.get("welcome_notice"):
+                notice = fresh.stats["welcome_notice"]
+                amount = notice if (isinstance(notice, int) and not isinstance(notice, bool)) else await WelcomeBonusService.get_amount(session)
                 fresh.stats = {k: v for k, v in fresh.stats.items() if k != "welcome_notice"}
                 await session.commit()
-                ref_notice = NEW_USER_TEXT
+                if amount > 0:
+                    ref_notice = new_user_text(amount)
         if args.startswith("ref_") and args[4:].isdigit():
             referrer_tg_id = int(args[4:])
             res = await UserService.apply_referral(session, fresh_user, referrer_tg_id)
@@ -190,7 +216,7 @@ async def cmd_start(
     text = await append_private_ad(text, message.bot, fresh_user)
     await message.answer(
         text,
-        reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
+        reply_markup=main_menu_kb(message.from_user.id, is_admin=is_admin),
     )
 
 
@@ -224,53 +250,24 @@ async def cb_home(
     is_bot_admin: bool = False,
 ) -> None:
     await state.clear()
-    welcome_txt = WELCOME_TEXT
-    pack_lim = 1
-    fresh_user = db_user
-    async with get_session() as session:
-        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
-        gcfg = await GameplayService.get_game_config(session)
-        pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
-        custom_w = await SettingsService.get_value(session, "welcome_text", WELCOME_TEXT)
-        if custom_w:
-            welcome_txt = str(custom_w)
-        fresh = await session.get(User, db_user.id)
-        if fresh is not None:
-            fresh_user = fresh
+    fresh_user, welcome_txt = await _load_home_context(db_user)
     is_admin = is_bot_admin or is_admin_user(callback.from_user)
     home_txt = await append_private_ad(_home_text(fresh_user, welcome_txt), callback.bot, fresh_user)
     await edit_or_answer(
         callback,
         home_txt,
-        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
+        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin),
     )
-
-
-@router.callback_query(NavCb.filter(F.target == "grp_play"))
-async def cb_group_menu(callback: CallbackQuery, callback_data: NavCb) -> None:
-    group = callback_data.target
-    async with get_session() as session:
-        gcfg = await GameplayService.get_game_config(session)
-    pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
-    await edit_or_answer(
-        callback,
-        GROUP_MENUS[group],
-        reply_markup=group_menu_kb(callback.from_user.id, group, pack_daily_limit=pack_lim),
-    )
-    await callback.answer()
 
 
 @router.callback_query(NavCb.filter(F.target.in_({"grp_trade", "grp_vip"})))
 async def cb_old_group_menu(callback: CallbackQuery, db_user: User, is_bot_admin: bool = False) -> None:
     """Eski xabarlardagi tugmalar uchun: bosh menyuga qaytaradi."""
-    async with get_session() as session:
-        gcfg = await GameplayService.get_game_config(session)
-    pack_lim = max(0, int(gcfg.get("pack_daily_limit", 1)))
     is_admin = is_bot_admin or is_admin_user(callback.from_user)
     await edit_or_answer(
         callback,
         _home_text(db_user),
-        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin, pack_daily_limit=pack_lim),
+        reply_markup=main_menu_kb(callback.from_user.id, is_admin=is_admin),
     )
 
 

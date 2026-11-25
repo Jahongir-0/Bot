@@ -237,7 +237,10 @@ async def cb_give_start(callback: CallbackQuery, state: FSMContext, db_user: Use
         InlineKeyboardButton(text="🎴 Karta yuborish", callback_data=GiveCb(owner_id=oid, action="start_card").pack()),
         InlineKeyboardButton(text="🪙 Coin yuborish", callback_data=GiveCb(owner_id=oid, action="start_coin").pack()),
     )
-    kb.row(InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=oid, target="home").pack()))
+    kb.row(
+        InlineKeyboardButton(text="⬅️ SAVDO MARKAZI", callback_data=NavCb(owner_id=oid, target="savdo").pack()),
+        InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=oid, target="home").pack()),
+    )
     await edit_or_answer(
         callback,
         "🎁 <b>SOVG‘A BERISH</b>\n"

@@ -6,7 +6,7 @@ from models.event import Event
 from models.group import Group
 from models.user import User
 from utils.timeutils import fmt_tashkent
-from utils.constants import PROFILE_BACKGROUNDS, PROFILE_FRAMES, get_rarity_meta
+from utils.constants import PROFILE_BACKGROUNDS, get_rarity_meta
 
 
 def esc(value: object) -> str:

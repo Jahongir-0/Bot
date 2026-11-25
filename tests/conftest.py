@@ -20,6 +20,11 @@ os.environ.setdefault("REDIS_URL", "")
 
 from database.seed import seed_initial_data  # noqa: E402
 from database.session import Base, create_engine_from_url  # noqa: E402
+from services.settings_service import SettingsService  # noqa: E402
+
+# Testlar tarixiy ravishda 100 coin bilan boshlanadigan foydalanuvchiga tayanadi.
+# Real standart (2000) admin paneldan o'zgartiriladi, shuning uchun testda aniq qiymat belgilanadi.
+TEST_WELCOME_BONUS = 100
 
 
 @pytest.fixture(scope="session")
@@ -38,6 +43,8 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as session:
         await seed_initial_data(session)
+        await SettingsService.set_value(session, "welcome_bonus_coins", TEST_WELCOME_BONUS)
+        await session.commit()
         yield session
 
     await engine.dispose()

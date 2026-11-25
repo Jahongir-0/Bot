@@ -1,0 +1,4 @@
+Quyidagi fayllarni repodan o'chiring (ular yangi fayllar bilan almashtirilgan):
+admin/handlers.py
+admin/v2_handlers.py
+handlers/v2_features.py

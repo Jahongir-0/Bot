@@ -444,7 +444,6 @@ DEFAULT_SETTINGS: Dict[str, object] = {
         "inviter_coins": 2000,
         "invitee_coins": 2000,
     },
-    "group_add_reward_coins": 1000,
     "group_reward_config": {
         "enabled": True,          # guruhga qo'shgani uchun mukofot berilsinmi
         "per_member": True,       # True: haqiqiy a'zolar soni x per_member_coins; False: qat'iy flat_coins

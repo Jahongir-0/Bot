@@ -11,6 +11,31 @@ Production-ready, asynchronous Telegram bot built with **Python 3.11+**, **aiogr
 - **Telegram Stars (`XTR`) Coin Shop**: HMAC-signed payloads, `PreCheckoutQuery` verification, and idempotent payment crediting.
 - **Full Admin Panel (`/admin`)**: Card CRUD + safe soft-delete migration, user management, coin +/-, global ban, group settings, events, and broadcast.
 
+## Loyiha tuzilmasi
+
+```
+app/            Ishga tushirish: main.py, bot_factory.py, scheduler.py (drop, viktorina, eventlar jadvali)
+config/         Sozlamalar (.env)
+database/       Ulanish, sessiya, redis, seed
+models/         SQLAlchemy modellari
+services/       Biznes mantiq (har bir fayl bitta sohaga javob beradi)
+handlers/       Foydalanuvchi paneli — har bir fayl bitta bo‘lim:
+                start, hub (savdo markazi va o‘yinlar markazi), profile, collection, market, auction, trade,
+                transfer (sovg‘a: karta/coin), search, games, quiz, quests, event, pack, daily, ranking, vip, ...
+admin/handlers/ Admin paneli (asosiy): home, cards, groups, users, bot_settings, stars, events
+admin/v2/       Admin paneli (kengaytirilgan): cards, rbac, channels, ranks, quiz, games, auction, season, ...
+keyboards/      Inline tugmalar
+middlewares/    Foydalanuvchi, ban, throttling
+utils/          Yordamchi funksiyalar, doimiylar, game_catalog.py (mini o‘yinlar ro‘yxati), timeutils.py (Toshkent vaqti)
+tests/          Testlar
+```
+
+Qoidalar:
+- Yangi bo‘lim qo‘shsangiz — `handlers/` yoki `admin/v2/` ichida alohida fayl yarating, `router` e’lon qiling va `handlers/__init__.py` (yoki `admin/v2/__init__.py`) ga ulang.
+- Mini o‘yin qo‘shish: `utils/game_catalog.py` ga o‘yin va uning sozlamalarini yozing — admin paneldagi sahifa avtomatik paydo bo‘ladi.
+- Foydalanuvchiga ko‘rinadigan vaqtlar doim `utils/timeutils.py` orqali Toshkent vaqtida chiqariladi.
+- Yangi foydalanuvchi bonusi, guruh mukofoti, referal, coin yuborish va o‘yin limitlari — admin paneldan o‘zgartiriladi (kodga tegmasdan).
+
 ## Quick Start (Local)
 1. Install Python **3.11+** (the production Docker image uses Python 3.11).
 2. Create a virtualenv and install dependencies:

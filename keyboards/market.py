@@ -75,8 +75,8 @@ def market_list_kb(
     )
     builder.row(
         InlineKeyboardButton(
-            text="⬅️ ORQAGA",
-            callback_data=NavCb(owner_id=owner_id, target="home").pack(),
+            text="⬅️ SAVDO MARKAZI",
+            callback_data=NavCb(owner_id=owner_id, target="savdo").pack(),
         ),
         InlineKeyboardButton(
             text="🏠 BOSH MENU",

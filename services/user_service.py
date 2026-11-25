@@ -12,7 +12,7 @@ from models.transaction import CoinTransaction
 from models.user import User
 from models.user_card import UserCard
 from services.settings_service import SettingsService
-from services.welcome_bonus_service import TX_NEW, WELCOME_BONUS_COINS
+from services.welcome_bonus_service import TX_NEW, WelcomeBonusService
 from utils.constants import Rarity
 
 
@@ -33,12 +33,13 @@ class UserService:
         user = result.scalar_one_or_none()
         now = utcnow()
         if user is None:
+            welcome_coins = await WelcomeBonusService.get_amount(session)
             user = User(
                 telegram_id=telegram_id,
                 username=clean_username,
                 first_name=first_name[:128] if first_name else "Collector",
-                coins=WELCOME_BONUS_COINS,
-                stats={"claims": 0, "trades": 0, "sales": 0, "welcome_notice": True},
+                coins=welcome_coins,
+                stats={"claims": 0, "trades": 0, "sales": 0, "welcome_notice": welcome_coins},
                 last_activity=now,
             )
             try:
@@ -46,17 +47,18 @@ class UserService:
                 async with session.begin_nested():
                     session.add(user)
                     await session.flush()
-                    session.add(
-                        CoinTransaction(
-                            user_id=user.id,
-                            amount=WELCOME_BONUS_COINS,
-                            balance_after=WELCOME_BONUS_COINS,
-                            tx_type=TX_NEW,
-                            description="Yangi foydalanuvchi boshlang‘ich bonusi",
-                            reference_id=f"{TX_NEW}:{user.id}",
-                            meta={},
+                    if welcome_coins > 0:
+                        session.add(
+                            CoinTransaction(
+                                user_id=user.id,
+                                amount=welcome_coins,
+                                balance_after=welcome_coins,
+                                tx_type=TX_NEW,
+                                description="Yangi foydalanuvchi boshlang‘ich bonusi",
+                                reference_id=f"{TX_NEW}:{user.id}",
+                                meta={},
+                            )
                         )
-                    )
                     await session.flush()
             except IntegrityError:
                 result = await session.execute(select(User).where(User.telegram_id == telegram_id))
@@ -356,7 +358,7 @@ class UserService:
         session: AsyncSession,
         group: Group,
         adder: User,
-        coins: Optional[int] = None,
+        coins: int,
         give_epic_card: bool = True,
     ) -> Optional[Tuple[int, Optional[Card]]]:
         """
@@ -373,8 +375,6 @@ class UserService:
         group.add_reward_claimed = True
         group.added_by_user_id = adder.id
 
-        if coins is None:
-            coins = await SettingsService.get_group_add_reward_coins(session)
         coins = max(0, int(coins))
         if coins > 0:
             await UserService.credit_coins(

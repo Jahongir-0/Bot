@@ -21,7 +21,7 @@ from models.v2_features import (
 )
 from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
-from services.user_service import InsufficientCoinsError, UserService
+from services.user_service import UserService
 from utils.constants import MAX_CARD_PRICE, MIN_CARD_PRICE
 
 logger = logging.getLogger(__name__)

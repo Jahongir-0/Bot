@@ -10,7 +10,7 @@ from database.redis_client import get_lock_manager
 from database.session import get_session
 from models.admin import Ban
 from models.base import ensure_utc, utcnow
-from utils.timeutils import fmt_tashkent, to_tashkent
+from utils.timeutils import fmt_tashkent
 from models.group import Group
 from services.community_service import CommunityService
 from services.settings_service import SettingsService

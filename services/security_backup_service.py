@@ -1,13 +1,11 @@
-import csv
 import io
 import json
 import logging
 import os
 import zipfile
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,10 +18,9 @@ from models.market import PendingTransfer
 from models.user import User
 from models.user_card import UserCard
 from models.v2_features import BackupRecord, SecurityIncident
-from services.card_service import CardService
 from services.community_service import CommunityService
 from services.settings_service import SettingsService
-from utils.constants import DEFAULT_ANTICHEAT_CONFIG, MEDIA_TYPES, RARITY_REGISTRY
+from utils.constants import DEFAULT_ANTICHEAT_CONFIG
 
 logger = logging.getLogger(__name__)
 

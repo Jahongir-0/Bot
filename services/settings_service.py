@@ -278,24 +278,6 @@ class SettingsService:
         await SettingsService.set_value(session, "referral_config", cfg)
         return cfg
 
-    @staticmethod
-    async def get_group_add_reward_coins(session: AsyncSession) -> int:
-        val = await SettingsService.get_value(
-            session,
-            "group_add_reward_coins",
-            DEFAULT_SETTINGS["group_add_reward_coins"],
-        )
-        return max(0, int(val))
-
-    @staticmethod
-    async def set_group_add_reward_coins(session: AsyncSession, coins: int) -> int:
-        val = int(coins)
-        if not (0 <= val <= COINS_MAX):
-            raise ValueError(f"Guruh mukofoti 0 dan {COINS_MAX:,} gacha bo‘lishi kerak.")
-        await SettingsService.set_value(session, "group_add_reward_coins", val)
-        return val
-
-
     # ------------------------------------------------------------------
     # Guruhga qo'shgani uchun mukofot sozlamalari (admin paneldan o'zgartiriladi)
     # ------------------------------------------------------------------

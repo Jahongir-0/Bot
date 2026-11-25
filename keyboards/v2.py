@@ -5,10 +5,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from models.card import Card
-from models.group import Group
 from models.user import User
 from models.user_card import UserCard
-from models.v2_features import Achievement, AdminRole, Auction, Quiz, QuizQuestion, SupportTicket
+from models.v2_features import AdminRole, Auction, Quiz, QuizQuestion, SupportTicket
 from utils.callback_data import (
     AchCb,
     AdmV2Cb,
@@ -20,7 +19,6 @@ from utils.callback_data import (
     PackCb,
     QuizCb,
     SupCb,
-    TradeCb,
     VipCb,
     WishCb,
 )
@@ -830,7 +828,10 @@ def packs_menu_kb(owner_id: int, can_open: bool = True) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎮 Mini o‘yinlar", callback_data=GameCb(owner_id=owner_id, act="v").pack()),
             InlineKeyboardButton(text="🛒 Bozor", callback_data=NavCb(owner_id=owner_id, target="market").pack()),
         )
-    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    b.row(
+        InlineKeyboardButton(text="⬅️ O‘yinlar", callback_data=NavCb(owner_id=owner_id, target="grp_play").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
     return b.as_markup()
 
 
@@ -868,7 +869,10 @@ def auctions_list_kb(
             callback_data=AucCb(owner_id=owner_id, act=("v" if my_only else "mine"), p=1).pack(),
         ),
     )
-    b.row(InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()))
+    b.row(
+        InlineKeyboardButton(text="⬅️ Savdo markazi", callback_data=NavCb(owner_id=owner_id, target="savdo").pack()),
+        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
+    )
     return b.as_markup()
 
 
