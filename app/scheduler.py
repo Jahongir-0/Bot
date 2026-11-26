@@ -476,6 +476,14 @@ async def run_scheduler_loop(bot: Bot, stop_event: asyncio.Event) -> None:
                     expired_trades = await AuctionWishlistService.expire_stale_trades(session)
                     if expired or expired_transfers or expired_trades:
                         await session.commit()
+            # Adminlarga jonli harakatlar digesti (~5 daqiqada tekshiriladi, interval sozlamadan)
+            if tick % 10 == 3:
+                try:
+                    from services.history_service import AdminFeedService
+
+                    await AdminFeedService.run(bot)
+                except Exception as exc:
+                    logger.warning("Admin feed xatosi: %s", exc)
             tick += 1
         except Exception as exc:
             logger.exception("Scheduler loop error: %s", exc)

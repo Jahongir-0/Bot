@@ -28,14 +28,24 @@ def level_badge(level: int) -> str:
 
 
 def level_frame(level: int):
-    """(yuqori chiziq, pastki chiziq, nishon matni) yoki None. 5-daraja: yulduzli, 10-daraja: afsona ramkasi."""
+    """(yuqori chiziq, pastki chiziq, nishon matni) yoki None.
+
+    Daraja oshgani sari karta ko'rinishi (ramka) o'zgaradi:
+      2-3: yashil · 4-6: olovli · 7-9: kristal · 10: oltin afsona.
+    """
     level = int(level or 1)
     if level >= 10:
         line = "👑✨━━━━━━━━━━━━✨👑"
         return line, line, "👑 <b>AFSONA KARTA</b> — eng yuqori daraja"
-    if level >= 5:
-        line = "⭐━━━━━━━━━━━━━━⭐"
-        return line, line, "⭐ <b>YULDUZLI KARTA</b> — 5-daraja belgisi"
+    if level >= 7:
+        line = "💠💎━━━━━━━━━━━━💎💠"
+        return line, line, "💠 <b>KRISTAL KARTA</b> — 7-daraja belgisi"
+    if level >= 4:
+        line = "🔥⭐━━━━━━━━━━━━⭐🔥"
+        return line, line, "🔥 <b>OLOVLI KARTA</b> — 4-daraja belgisi"
+    if level >= 2:
+        line = "🌿━━━━━━━━━━━━━━🌿"
+        return line, line, "🌿 <b>YASHIL KARTA</b> — 2-daraja belgisi"
     return None
 
 
@@ -438,3 +448,101 @@ def format_event_message(card: Card, event, tz_name: str = "Asia/Tashkent", stat
         lines.append(f"🏁 Sotilgan: <b>{event.sold_count}/{event.total_copies}</b>")
         lines.append("━━━━━━━━━━━━━━━")
     return "\n".join(lines)
+
+
+def format_card_with_owners(
+    card: Card,
+    owners: List[tuple],
+    *,
+    max_level: int = 10,
+    power_fn=None,
+    rank_price_coins: Optional[int] = None,
+    status_line: str = "",
+) -> str:
+    """Karta + uning HAMMA egalari (username) + eng yuqori daraja egalari.
+
+    owners: [(display_name, level), ...]
+    Karta ko'rinishi (ramka) eng yuqori darajaga qarab o'zgaradi.
+    Photo caption chegarasi (1024) ichida qoladi.
+    """
+    from collections import Counter
+
+    meta = get_rarity_meta(card.rarity)
+    rank_upper = str(meta.name or card.rarity or "BASIC").upper()
+    mtype = getattr(card, "media_type", "Anime") or "Anime"
+    media_part = f"{card.anime_name} · {mtype}" if mtype and mtype != "Anime" else card.anime_name
+    shown_coins = int(rank_price_coins or 0) or int(card.base_value or 0)
+
+    owners_sorted = sorted(owners, key=lambda o: (-int(o[1] or 1), str(o[0]).lower()))
+    top_level = int(owners_sorted[0][1] or 1) if owners_sorted else 1
+    top_owners = [o[0] for o in owners_sorted if int(o[1] or 1) == top_level]
+    dist = Counter(int(lv or 1) for _n, lv in owners_sorted)
+
+    frame = level_frame(top_level)
+    frame_top = f"{frame[0]}\n" if frame else ""
+    frame_bottom = f"\n{frame[1]}" if frame else ""
+    try:
+        from services.card_level_service import CardLevelService
+
+        t_emoji, t_name = CardLevelService.title(top_level)
+    except Exception:
+        t_emoji, t_name = "🌱", ""
+    power = power_fn(top_level) if power_fn else None
+
+    lines = [
+        f"{frame_top}🎴 <b>{esc(card.character_name)}</b>",
+        f"{esc(media_part)}",
+        "",
+        f"{meta.emoji} <b>{esc(rank_upper)}</b>　💎 {fmt_coins(shown_coins)} 🪙",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if owners_sorted:
+        top_cnt = len(top_owners)
+        names = ", ".join(esc(n) for n in top_owners[:4])
+        if top_cnt > 4:
+            names += f" +{top_cnt - 4}"
+        lines.append(f"⭐ Eng yuqori daraja　<b>{top_level}</b> / {int(max_level)}　(×{top_cnt} ta)")
+        lines.append(f"{'👑' if top_level >= max_level else '🏅'} {names}")
+        if power is not None:
+            lines.append(f"💪 Kuch　<b>{fmt_coins(power)}</b>　{t_emoji} {esc(t_name)}")
+        dist_txt = " · ".join(f"Lvl {lv} ×{cnt}" for lv, cnt in sorted(dist.items(), reverse=True)[:6])
+        lines.append(f"📊 {dist_txt}")
+        lines.append("")
+        lines.append(f"👥 <b>Egalari ({len(owners_sorted)} ta):</b>")
+        head = "\n".join(lines)
+        tail = [f"🆔 <code>{esc(card.card_code or f'CRD-{card.id:04d}')}</code>"]
+        if card.is_event_card:
+            total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
+            tail.append(f"🎯 Event karta ({total})")
+        if status_line:
+            tail.append(status_line)
+        budget = 1000 - len(head) - len("\n".join(tail)) - len(frame_bottom) - 40
+        owner_lines: List[str] = []
+        used = 0
+        for idx, (name, lv) in enumerate(owners_sorted, start=1):
+            lv = int(lv or 1)
+            icon = "👑" if lv >= max_level else ("💠" if lv >= 7 else ("🔥" if lv >= 4 else ("🌿" if lv >= 2 else "▫️")))
+            ln = f"{icon} {esc(name)} — Lvl {lv}"
+            if used + len(ln) + 1 > budget:
+                owner_lines.append(f"… va yana {len(owners_sorted) - idx + 1} ta")
+                break
+            owner_lines.append(ln)
+            used += len(ln) + 1
+        lines.extend(owner_lines)
+        lines.append("")
+        lines.extend(tail)
+    else:
+        lines.append("👤 Hozircha egasi yo‘q — guruhlarda topib oling!")
+        lines.append("")
+        lines.append(f"🆔 <code>{esc(card.card_code or f'CRD-{card.id:04d}')}</code>")
+        if card.is_event_card:
+            total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
+            lines.append(f"🎯 Event karta ({total})")
+        if status_line:
+            lines.append(status_line)
+
+    out = ("\n".join(lines) + frame_bottom).strip()
+    if len(out) > 1020:
+        out = out[:1017] + "..."
+    return out

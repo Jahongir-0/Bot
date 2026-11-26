@@ -211,6 +211,37 @@ class SearchService:
         return cards, total
 
     @staticmethod
+    async def get_card_owners_map(
+        session: AsyncSession,
+        card_ids: List[int],
+    ) -> "dict[int, List[Tuple[str, int]]]":
+        """Har bir karta uchun barcha egalar: {card_id: [(@username, level), ...]}.
+
+        Bloklangan va hisobotdan chiqarilgan adminlar ko'rsatilmaydi.
+        Eng yuqori daraja birinchi turadi.
+        """
+        from services.admin_service import AdminService
+
+        out: "dict[int, List[Tuple[str, int]]]" = {int(c): [] for c in card_ids}
+        if not card_ids:
+            return out
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        conds = [UserCard.card_id.in_(list(out.keys())), User.is_banned.is_(False)]
+        if excluded_ids:
+            conds.append(User.id.not_in(excluded_ids))
+        rows = (
+            await session.execute(
+                select(UserCard.card_id, UserCard.level, User)
+                .join(User, User.id == UserCard.user_id)
+                .where(*conds)
+                .order_by(UserCard.level.desc(), UserCard.id.asc())
+            )
+        ).all()
+        for card_id, level, user in rows:
+            out[int(card_id)].append((user.display_name, int(level or 1)))
+        return out
+
+    @staticmethod
     async def inspect_user_card(
         session: AsyncSession,
         user_card_id: int,

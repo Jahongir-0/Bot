@@ -273,6 +273,25 @@ async def cb_help(callback: CallbackQuery) -> None:
     await edit_or_answer(callback, HELP_TEXT, reply_markup=back_home_kb(callback.from_user.id))
 
 
+ADMIN_HOWTO = (
+    "📌 <b>Botni qanday admin qilasiz?</b>\n"
+    "Guruh sozlamalari → <b>Administratorlar</b> → <b>Administrator qo‘shish</b> → botni tanlang → tasdiqlang."
+)
+
+
+def _need_admin_text(group_title: str, for_group: bool) -> str:
+    who = "Guruh a’zolari, iltimos," if for_group else "Siz"
+    return (
+        f"⚠️ <b>Botni ADMIN qiling!</b>\n\n"
+        f"🎴 Bot <b>{esc(group_title)}</b> guruhiga qo‘shildi, lekin hozircha <b>admin emas</b>.\n"
+        f"{who} botni <b>admin qilmaguningizcha</b> botni qo‘shgan foydalanuvchiga "
+        f"<b>mukofot (coin) berilmaydi</b> va bot guruhdagi xabarlarni to‘liq ko‘ra olmaydi "
+        f"(karta topish, drop va reyting to‘g‘ri ishlashi uchun admin huquqi kerak).\n\n"
+        f"{ADMIN_HOWTO}\n\n"
+        f"✅ Bot admin bo‘lishi bilan mukofot avtomatik beriladi."
+    )
+
+
 @router.my_chat_member()
 async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
     if event.chat.type not in ("group", "supergroup"):
@@ -280,18 +299,20 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
     old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
     just_added = new_status in ("member", "administrator") and old_status not in ("member", "administrator")
+    became_admin = new_status == "administrator" and old_status != "administrator"
     reward_result = None
     decision = None
     stats = None
     already_rewarded = False
-    adder_tg_id = None
+    adder_tg_id = None  # mukofot oluvchining Telegram ID si (botni qo'shgan kishi)
+    adder_name = None
+    adder_username = None
     group_title = event.chat.title or "Anime Group"
 
     async with get_session() as session:
-        adder_user = None
+        actor_user = None  # shu hodisani qilgan kishi (qo'shgan yoki admin qilgan)
         if event.from_user and not event.from_user.is_bot:
-            adder_tg_id = event.from_user.id
-            adder_user = await UserService.upsert_user(
+            actor_user = await UserService.upsert_user(
                 session=session,
                 telegram_id=event.from_user.id,
                 username=event.from_user.username,
@@ -303,7 +324,7 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
             telegram_chat_id=event.chat.id,
             title=group_title,
             username=event.chat.username,
-            user_id=adder_user.id if adder_user is not None else None,
+            user_id=actor_user.id if actor_user is not None else None,
         )
         if new_status in ("member", "administrator"):
             group.is_active = True
@@ -316,21 +337,37 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
                 group.member_count = stats.real
                 group.member_count_updated_at = utcnow()
             await DropService.ensure_daily_schedule_for_group(session, group)
-            if just_added:
-                if adder_user is not None and group.added_by_user_id is None:
-                    group.added_by_user_id = adder_user.id  # kim qo'shgani admin kartochkasida ko'rinadi
+
+            if just_added and actor_user is not None and group.added_by_user_id is None:
+                group.added_by_user_id = actor_user.id  # kim qo'shgani admin kartochkasida ko'rinadi
+
+            # Mukofot oluvchi: botni qo'shgan kishi (bo'lmasa admin qilgan kishi)
+            reward_user = None
+            if group.added_by_user_id is not None:
+                reward_user = await session.get(User, group.added_by_user_id)
+            if reward_user is None:
+                reward_user = actor_user
+            if reward_user is not None:
+                adder_tg_id = reward_user.telegram_id
+                adder_name = reward_user.first_name
+                adder_username = reward_user.username
+
+            if became_admin:
+                # MUKOFOT faqat bot ADMIN bo'lgandan keyin beriladi
                 already_rewarded = bool(group.add_reward_claimed)
-                if adder_user is not None and not already_rewarded:
+                if reward_user is not None and not already_rewarded:
                     decision = await GroupPolicyService.decide_reward(session, stats.real if stats else None)
                     if decision.eligible:
                         reward_result = await UserService.reward_group_adder(
                             session,
                             group,
-                            adder_user,
+                            reward_user,
                             coins=decision.coins,
                             give_epic_card=decision.give_epic_card,
                         )
-                # Adminlarga: kim, qachon, qaysi guruhga qo'shdi (+ username/havola)
+
+            if just_added or became_admin:
+                # Adminlarga: kim, qachon, qaysi guruhga qo'shdi / admin qildi
                 try:
                     await GroupPolicyService.notify_admins_bot_added(
                         event.bot,
@@ -339,11 +376,13 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
                         chat_title=group_title,
                         chat_username=event.chat.username,
                         adder_tg_id=adder_tg_id,
-                        adder_name=event.from_user.full_name if event.from_user else None,
-                        adder_username=event.from_user.username if event.from_user else None,
+                        adder_name=adder_name or (event.from_user.full_name if event.from_user else None),
+                        adder_username=adder_username or (event.from_user.username if event.from_user else None),
                         stats=stats,
                         decision=decision,
                         already_rewarded=already_rewarded,
+                        phase="admin" if new_status == "administrator" else "added",
+                        just_added=just_added,
                     )
                 except Exception:
                     logger.exception("Adminlarga guruh xabari yuborilmadi")
@@ -361,13 +400,31 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
             RankingService.invalidate_cache()
         await session.commit()
 
-    if just_added:
+    # ---------------------------------------------------------------- guruhga xabar
+    if just_added and new_status != "administrator":
+        # Bot oddiy a'zo sifatida qo'shildi: ADMIN qilish kerakligini tushuntiramiz
+        try:
+            await event.bot.send_message(
+                event.chat.id,
+                f"🎴 <b>Anime Card Collection</b> boti <b>{esc(group_title)}</b> guruhiga qo‘shildi!\n\n"
+                + _need_admin_text(group_title, for_group=True),
+            )
+        except Exception:
+            pass
+        if adder_tg_id:
+            try:
+                await event.bot.send_message(adder_tg_id, _need_admin_text(group_title, for_group=False))
+            except Exception:
+                pass
+        return
+
+    if became_admin:
         welcome_lines = [
-            f"🎴 <b>Anime Card Collection</b> boti <b>{esc(group_title)}</b> guruhiga qo‘shildi!",
+            f"🎴 <b>Anime Card Collection</b> boti <b>{esc(group_title)}</b> guruhida endi <b>admin</b>! ✅",
             "Har kuni tasodifiy vaqtlarda anime kartalari tashlanadi. Karta xabariga <b>REPLY</b> qilib personaj ismini yozing — birinchi to‘g‘ri topgan kartani oladi!",
             "🏆 Guruh reytingi: /top | 🎯 Eventlar: /event",
         ]
-        if reward_result is not None and event.from_user:
+        if reward_result is not None and adder_tg_id:
             coins, epic_card = reward_result
             if epic_card:
                 ec_meta = get_rarity_meta(epic_card.rarity)
@@ -375,12 +432,15 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
             else:
                 extra = ""
             members_note = f" ({stats.real} ta a‘zo uchun)" if stats is not None else ""
+            who_name = adder_name or "Foydalanuvchi"
             welcome_lines.append(
-                f"\n🎁 <b>{esc(event.from_user.first_name)}</b> botni qo‘shgani uchun "
+                f"\n🎁 <b>{esc(who_name)}</b> botni qo‘shib admin qilgani uchun "
                 f"<b>+{fmt_coins(coins)} 🪙</b>{members_note}{extra} mukofot oldi!"
             )
         elif decision is not None and not decision.eligible and decision.reason:
             welcome_lines.append(f"\nℹ️ {esc(decision.reason)} Shunda botni qo‘shgan kishi mukofot oladi.")
+        elif already_rewarded:
+            welcome_lines.append("\nℹ️ Bu guruh uchun qo‘shish mukofoti avval berilgan.")
         try:
             await event.bot.send_message(event.chat.id, "\n".join(welcome_lines))
         except Exception:
@@ -389,7 +449,7 @@ async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
         if reward_result is not None and adder_tg_id:
             coins, epic_card = reward_result
             pm_text = (
-                f"🏰 Botni <b>{esc(group_title)}</b> guruhiga qo‘shganingiz uchun mukofot oldingiz!\n\n"
+                f"🏰 Botni <b>{esc(group_title)}</b> guruhiga qo‘shib, <b>admin</b> qilganingiz uchun mukofot oldingiz!\n\n"
                 f"🪙 Coin: <b>+{fmt_coins(coins)}</b>"
             )
             try:

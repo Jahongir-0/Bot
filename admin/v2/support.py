@@ -1,14 +1,16 @@
 """Aloqa so‘rovlari, xavfsizlik (ban) va jurnallar."""
 
 import logging
+import re
 
 from aiogram import F, Router
+from aiogram.filters import BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
-from admin.filters import IsAdminFilter
+from admin.filters import IsAdminFilter, has_admin_perm
 from admin.v2.common import AdminV2States, _back_home_btn, _cancel_kb, _deny_if_no_perm
 from database.session import get_session
 from models.admin import AdminAction
@@ -154,6 +156,64 @@ async def fsm_v2_support_reply(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
     await message.answer(f"✅ Javob yuborildi (Murojaat #{tid})!")
+
+
+class TicketReplyFilter(BaseFilter):
+    """Admin murojaat xabarining o‘ziga REPLY qilsa — murojaat raqamini (#ID) aniqlaydi."""
+
+    async def __call__(self, message: Message) -> bool | dict:
+        r = message.reply_to_message
+        if message.chat.type != "private" or r is None or r.from_user is None or not r.from_user.is_bot:
+            return False
+        txt = (r.text or r.caption or "")
+        if "MUROJAAT" not in txt.upper():
+            return False
+        m = re.search(r"#(\d+)", txt)
+        if not m:
+            return False
+        return {"reply_ticket_id": int(m.group(1))}
+
+
+@router.message(TicketReplyFilter(), F.text | F.photo | F.video | F.document)
+async def msg_v2_support_quick_reply(message: Message, reply_ticket_id: int, admin_perms: set | None = None) -> None:
+    """Murojaatlar bo‘limiga kirmasdan: kelgan murojaat xabariga REPLY qilib yozilgan javob foydalanuvchiga yuboriladi."""
+    if not has_admin_perm(message.from_user, admin_perms, "support"):
+        await message.answer("⛔ Murojaatlarga javob berish huquqingiz yo‘q.")
+        return
+    body, media_type, media_file_id = _extract_admin_support_payload(message)
+    if not body and not media_file_id:
+        await message.answer("⚠️ Matn yoki rasm/video/fayl bilan javob bering.")
+        return
+    tid = reply_ticket_id
+    async with get_session() as session:
+        t = await CommunityService.reply_ticket(
+            session, tid, "admin", message.from_user.id, body, media_type=media_type, media_file_id=media_file_id
+        )
+        if t is None:
+            await message.answer(f"❌ Murojaat #{tid} topilmadi.")
+            return
+        user = await session.get(User, t.user_id)
+        if user:
+            await CommunityService.notify_user(session, user.id, "support", f"💬 Murojaat #{tid} ga javob", body)
+        await CommunityService.log_audit(
+            session, message.from_user.id, "support_reply", "ticket", str(tid), details={"via": "reply"}
+        )
+        await session.commit()
+    if user:
+        cap = f"💬 <b>Admin javobi (#{tid}):</b>\n\n{esc(body)}"
+        try:
+            if media_type == "photo" and media_file_id:
+                await message.bot.send_photo(user.telegram_id, media_file_id, caption=cap[:1020])
+            elif media_type == "video" and media_file_id:
+                await message.bot.send_video(user.telegram_id, media_file_id, caption=cap[:1020])
+            elif media_type == "document" and media_file_id:
+                await message.bot.send_document(user.telegram_id, media_file_id, caption=cap[:1020])
+            else:
+                await message.bot.send_message(user.telegram_id, cap)
+        except Exception:
+            await message.answer("⚠️ Javob saqlandi, lekin foydalanuvchiga yetkazib bo‘lmadi (bot bloklangan bo‘lishi mumkin).")
+            return
+    await message.answer(f"✅ Javob yuborildi (Murojaat #{tid}).")
 
 
 async def _show_security_home(target, owner_id: int) -> None:

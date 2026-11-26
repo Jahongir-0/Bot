@@ -276,10 +276,6 @@ def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
             text="🎴 O‘zimni kartalarim",
             callback_data=CollectionCb(owner_id=owner_id, action="my_search").pack(),
         ),
-        InlineKeyboardButton(
-            text="📖 Hali hech kimda yo‘q",
-            callback_data=SearchCb(owner_id=owner_id, action="mode", mode="unowned").pack(),
-        ),
     )
     builder.row(
         InlineKeyboardButton(
