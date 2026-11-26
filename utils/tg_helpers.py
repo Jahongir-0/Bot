@@ -295,3 +295,29 @@ async def append_private_ad(text: str, bot: Optional[Bot], db_user=None) -> str:
     except Exception as exc:
         logger.debug("append_private_ad skipped: %s", exc)
     return text
+
+
+async def show_card_with_prompt(target, card, prompt: str, reply_markup=None, title: str = "") -> Optional[Message]:
+    """Admin oqimlarida karta tanlangach: AVVAL karta rasmi va ma'lumotlari, KEYIN so'rov matni.
+
+    Eski (ro'yxat) xabari o'chiriladi, o'rniga karta rasmi + to'liq ma'lumot + so'rov (caption) yuboriladi.
+    Rasm bo'lmasa oddiy matn bo'lib chiqadi.
+    """
+    from utils.formatting import format_card_block
+
+    msg = target.message if isinstance(target, CallbackQuery) else target
+    bot = msg.bot
+    chat_id = msg.chat.id
+    block = format_card_block(card, show_status=True)
+    caption = (f"{title}\n\n" if title else "") + f"{block}\n\n━━━━━━━━━━━━━━━\n{prompt}"
+    if len(caption) > 1020:
+        caption = caption[:1017] + "..."
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    try:
+        return await send_card_message(bot, chat_id, card, caption, reply_markup)
+    except Exception as exc:
+        logger.debug("show_card_with_prompt rasm yuborilmadi: %s", exc)
+        return await bot.send_message(chat_id, caption, reply_markup=reply_markup)

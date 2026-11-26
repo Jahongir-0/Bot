@@ -19,7 +19,7 @@ from services.drop_service import DropService
 from utils.callback_data import AdmV2Cb, AdminCb
 from utils.constants import PAGE_SIZE
 from utils.formatting import esc, format_drop_message
-from utils.tg_helpers import edit_or_answer, get_bot_username, send_card_visual
+from utils.tg_helpers import show_card_with_prompt, edit_or_answer, get_bot_username, send_card_visual
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_v2_groups_drop")
@@ -54,6 +54,29 @@ async def cb_v2_group_pick_card(callback: CallbackQuery, callback_data: AdmV2Cb,
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "drop_sel")))
+async def cb_v2_group_drop_preview(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    """Karta tanlanganda avval rasm va ma'lumot ko'rsatiladi, keyin tasdiqlash so'raladi."""
+    if await _deny_if_no_perm(callback, admin_perms, "groups"):
+        return
+    async with get_session() as session:
+        card = await session.get(Card, callback_data.tid)
+        group = await session.get(Group, int(callback_data.ext)) if callback_data.ext.isdigit() else None
+    if card is None or group is None:
+        await callback.answer("Karta yoki guruh topilmadi.", show_alert=True)
+        return
+    o = callback.from_user.id
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Guruhga tashlash", callback_data=AdmV2Cb(owner_id=o, sec="groups", act="drop_go", tid=card.id, ext=str(group.id)).pack())],
+            [InlineKeyboardButton(text="⬅️ Boshqa karta tanlash", callback_data=AdmV2Cb(owner_id=o, sec="groups", act="pick_card", tid=group.id, p=1).pack())],
+        ]
+    )
+    await show_card_with_prompt(
+        callback, card, f"👥 Guruh: <b>{esc(group.title)}</b>\nShu kartani guruhga tashlaymizmi?", reply_markup=kb, title="🎴 <b>GURUHGA TASHLASH</b>"
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "drop_go")))
 async def cb_v2_group_drop_selected(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "groups"):
         return

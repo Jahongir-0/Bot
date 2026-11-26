@@ -1,5 +1,5 @@
 import math
-from typing import Dict, List, Set, Tuple
+from typing import Optional, Dict, List, Set, Tuple
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -32,13 +32,26 @@ from utils.constants import ADMIN_PERMISSION_SECTIONS, PROFILE_BACKGROUNDS, PROF
 
 
 ADMIN_HUB_CATEGORIES: List[Tuple[str, str, str, Tuple[str, ...]]] = [
-    ("cards_evt", "🎴 Kartalar", "Kartalar, ranklar, eventlar va auksionlar — karta bilan bog‘liq hamma narsa", ("cards", "ranks", "events", "auction")),
-    ("community", "👥 Foydalanuvchilar", "Foydalanuvchilar, guruhlar, kanallar va adminlar", ("users", "groups", "channels", "admins")),
+    ("cards_evt", "🎴 Kartalar", "Kartalar markazi: boshqarish, drop, ranklar, bot do‘koni, auksion, eventlar, komissiya", ("cards", "ranks", "events", "auction")),
+    ("community", "👥 Foydalanuvchilar", "Foydalanuvchilar, guruhlar, kanallar, adminlar, referal va VIP", ("users", "groups", "channels", "admins")),
     ("history", "📜 Tarix va hisobot", "Kim nima qildi, savdolar, komissiya, hisobotlar va jurnal", ("history", "report", "stats", "logs")),
-    ("gameplay", "🎮 O‘yin va iqtisod", "Viktorina, mini-o‘yinlar, Stars, mavsum, do‘kon va komissiyalar", ("quiz", "games", "stars", "season")),
+    ("gameplay", "🎮 O‘yin va mukofot", "Viktorina, mini-o‘yinlar, Stars, mavsum, kunlik bonus va coin sovg‘alar", ("quiz", "games", "stars", "season")),
     ("comms", "📣 Aloqa", "Murojaatlar (reply bilan javob), xabar yuborish va reklama", ("support", "message", "reklama")),
-    ("system", "⚙️ Tizim", "Bot sozlamalari, xavfsizlik va zaxira", ("settings", "security", "memory")),
+    ("system", "⚙️ Tizim", "Bot sozlamalari, xavfsizlik, zaxira va texnik rejim", ("settings", "security", "memory")),
 ]
+
+# Toifa ichidagi qo'shimcha tugmalar: (matn, callback turi, qiymat, kerakli ruxsat)
+_HUB_EXTRAS = {
+    "community": [
+        ("🤝 Referal & Guruh mukofoti", "legacy", ("settings", "rewards_menu"), "settings"),
+        ("💎 VIP narxlari", "legacy", ("settings", "vip_menu"), "settings"),
+        ("👋 Kirish matni", "legacy", ("settings", "welcome_edit"), "settings"),
+    ],
+    "gameplay": [
+        ("🎁 Kunlik bonus", "legacy", ("settings", "daily_menu"), "settings"),
+        ("💸 Coin yuborish", "legacy", ("settings", "cg_menu"), "settings"),
+    ],
+}
 
 
 def _admin_section_cb(owner_id: int, sec_key: str) -> str:
@@ -87,33 +100,14 @@ def admin_v2_hub_kb(owner_id: int, cat_key: str, allowed_sections: Set[str]) -> 
                     callback_data=_admin_section_cb(owner_id, sec_key),
                 )
             )
-    if cat_key == "cards_evt" and "cards" in allowed_sections:
-        btns.append(
-            InlineKeyboardButton(
-                text="💡 Karta takliflari",
-                callback_data=SuggestCb(owner_id=owner_id, act="adm", p=1).pack(),
+    for text, kind, val, need in _HUB_EXTRAS.get(cat_key, []):
+        if need in allowed_sections and kind == "legacy":
+            btns.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=AdminCb(owner_id=owner_id, section=val[0], action=val[1]).pack(),
+                )
             )
-        )
-    if cat_key == "gameplay" and "settings" in allowed_sections:
-        btns.append(
-            InlineKeyboardButton(
-                text="🏛 Bot Do‘koni",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="bs").pack(),
-            )
-        )
-        btns.append(
-            InlineKeyboardButton(
-                text="💸 Komissiyalar",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="comm").pack(),
-            )
-        )
-    if cat_key == "system" and "settings" in allowed_sections:
-        btns.append(
-            InlineKeyboardButton(
-                text="💸 Komissiyalar",
-                callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="comm").pack(),
-            )
-        )
     for i in range(0, len(btns), 2):
         builder.row(*btns[i : i + 2])
     builder.row(
@@ -123,27 +117,56 @@ def admin_v2_hub_kb(owner_id: int, cat_key: str, allowed_sections: Set[str]) -> 
     return builder.as_markup()
 
 
-def admin_v2_cards_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
+def admin_v2_cards_menu_kb(owner_id: int, allowed: Optional[Set[str]] = None) -> InlineKeyboardMarkup:
+    """🎴 KARTALAR MARKAZI: karta bilan bog'liq hamma narsa shu yerda (boshqarish, drop, savdo, eventlar, sozlamalar)."""
     b = InlineKeyboardBuilder()
-    b.row(
-        InlineKeyboardButton(text="➕ Karta qo‘shish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="add_menu").pack()),
-        InlineKeyboardButton(text="👁 Kartalarni ko‘rish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_start", ext="sent_group", p=1).pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="✏️ Karta tahrirlash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="edit_list", p=1).pack()),
-        InlineKeyboardButton(text="🗑 Karta o‘chirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="del_list", p=1).pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🎬 Anime bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles_start", ext="anime", p=1).pack()),
-        InlineKeyboardButton(text="📖 Manga bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles_start", ext="manga", p=1).pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="🔍 Qidirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="search").pack()),
-        InlineKeyboardButton(text="♻️ O‘chirilganlar", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_start", ext="deleted", p=1).pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="💡 Karta takliflari", callback_data=SuggestCb(owner_id=owner_id, act="adm", p=1).pack()),
-    )
+
+    def ok(sec: str) -> bool:
+        return allowed is None or sec in allowed
+
+    def adm(act: str, sec: str = "cards", **kw) -> str:
+        return AdmV2Cb(owner_id=owner_id, sec=sec, act=act, **kw).pack()
+
+    def legacy(section: str, action: str) -> str:
+        return AdminCb(owner_id=owner_id, section=section, action=action).pack()
+
+    def rows(items: List[Tuple[str, str, str]]) -> None:
+        btns = [InlineKeyboardButton(text=t, callback_data=cb) for t, cb, sec in items if ok(sec)]
+        for i in range(0, len(btns), 2):
+            b.row(*btns[i : i + 2])
+
+    # 1. Boshqarish
+    rows([
+        ("➕ Karta qo‘shish", adm("add_menu"), "cards"),
+        ("👁 Kartalarni ko‘rish", adm("view_start", ext="sent_group", p=1), "cards"),
+        ("✏️ Tahrirlash", adm("edit_list", p=1), "cards"),
+        ("🗑 O‘chirish", adm("del_list", p=1), "cards"),
+        ("🎬 Anime bo‘limi", adm("titles_start", ext="anime", p=1), "cards"),
+        ("📖 Manga bo‘limi", adm("titles_start", ext="manga", p=1), "cards"),
+        ("🔍 Qidirish", adm("search"), "cards"),
+        ("♻️ O‘chirilganlar", adm("view_start", ext="deleted", p=1), "cards"),
+    ])
+    # 2. Drop va ranklar
+    rows([
+        ("⭐ Ranklar", adm("v", sec="ranks"), "ranks"),
+        ("🎯 Drop, narx, daraja", adm("v", sec="crules"), "cards"),
+        ("📡 Drop qoidalari", legacy("settings", "drop_rules"), "settings"),
+        ("🎯 Navbatdagi karta", legacy("priority", "view"), "settings"),
+    ])
+    # 3. Savdo va tadbirlar
+    rows([
+        ("🏛 Bot do‘koni", adm("bs", sec="econ"), "settings"),
+        ("🔨 Auksion", adm("v", sec="auction"), "auction"),
+        ("🎯 Eventlar", AdminCb(owner_id=owner_id, section="evt", action="menu").pack(), "events"),
+        ("💸 Komissiyalar", adm("comm", sec="econ"), "settings"),
+        ("🛒 Bozor savdolari", adm("mk", sec="hist", ext="d7"), "history"),
+        ("💡 Karta takliflari", SuggestCb(owner_id=owner_id, act="adm", p=1).pack(), "cards"),
+    ])
+    # 4. Kartaga bog'liq mukofotlar
+    rows([
+        ("🎁 Kunlik bonus (karta)", legacy("settings", "daily_menu"), "settings"),
+        ("🎁 Paket limiti", legacy("settings", "pack_limit"), "settings"),
+    ])
     b.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),

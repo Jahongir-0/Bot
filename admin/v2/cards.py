@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
-from admin.filters import IsAdminFilter, has_admin_perm
+from admin.filters import resolve_admin_perms, IsAdminFilter, has_admin_perm
 from admin.v2.common import AdminV2States, _cancel_kb, _deny_if_no_perm
 from database.session import get_session
 from keyboards.v2 import (
@@ -60,8 +60,9 @@ async def cb_v2_cards_menu(callback: CallbackQuery, state: FSMContext, admin_per
     admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
     await edit_or_answer(
         callback,
-        "🎴 <b>KARTALAR BO‘LIMI</b>\n━━━━━━━━━━━━━━━\nKerakli amalni tanlang:",
-        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id),
+        "🎴 <b>KARTALAR MARKAZI</b>\n━━━━━━━━━━━━━━━\n"
+        "Karta bilan bog‘liq hamma narsa shu yerda: boshqarish, drop va ranklar, bot do‘koni, auksion, eventlar, komissiya.",
+        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id, resolve_admin_perms(callback.from_user, admin_perms)),
     )
 
 

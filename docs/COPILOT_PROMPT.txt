@@ -1,0 +1,8 @@
+Repozitoriydagi Telegram bot (aiogram 3, SQLAlchemy) uchun quyidagi o'zgarishlarni qo'lla va main ga push qil:
+1. Qidiruv (handlers/search.py, services/search_service.py, utils/formatting.py, keyboards/market.py): karta egalari + eng yuqori daraja, daraja ramkalari, "Hali hech kimda yo'q" ro'yxati olib tashlandi, inline qidiruv yo'riqnomasi.
+2. Admin kartalar (admin/v2/cards.py, keyboards/v2.py, utils/admin_nav.py, admin/handlers/cards.py): ko'rish/tahrirlash/o'chirishda filtrli ro'yxat va orqaga qaytganda o'sha sarlavha/sahifa.
+3. JSON + ketma-ket rasmlar (admin/v2/json_import.py, admin/v2/__init__.py).
+4. Tarix va hisobot (admin/v2/history.py, services/history_service.py, app/scheduler.py, utils/constants.py).
+5. Guruhga qo'shish (handlers/start.py, services/group_policy_service.py): mukofot faqat bot admin bo'lgandan keyin.
+6. Murojaatga REPLY bilan javob (admin/v2/support.py, handlers/support.py).
+Fayllarni zip ichidagi shu yo'llar bilan almashtir (yangilari: yangi fayl), `python -m compileall .` va `pytest` ishlat, xato bo'lsa tuzat, keyin commit "Bot yangilanishi: qidiruv, admin panel, JSON import, tarix" va push qil.

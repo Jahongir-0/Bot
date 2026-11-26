@@ -21,7 +21,7 @@ from services.settings_service import SettingsService
 from utils.callback_data import AdmV2Cb, AdminCb, BotStoreCb, SuggestCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc
-from utils.tg_helpers import NotCommandFilter, edit_or_answer
+from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_v2_economy")
@@ -181,13 +181,12 @@ async def cb_admin_bot_store(
         await state.update_data(owner_tg_id=owner_id, bs_card_id=card.id, bs_card_name=card.character_name)
         meta = get_rarity_meta(card.rarity)
         sug_price = int(card.base_value or meta.default_base_value)
-        await edit_or_answer(
+        await show_card_with_prompt(
             callback,
-            f"🏛 <b>BOT DO‘KONIGA QO‘SHISH</b>\n\n"
-            f"🎴 Karta: <b>{esc(card.character_name)}</b> ({meta.emoji} {esc(meta.name)})\n"
-            f"💡 Tavsiya narx: <code>{sug_price}</code> 🪙\n\n"
-            f"Sotish narxini (coin) yozing:\n<i>Bekor: /cancel</i>",
+            card,
+            f"💡 Tavsiya narx: <code>{sug_price}</code> 🪙\n\nSotish narxini (coin) yozing:\n<i>Bekor: /cancel</i>",
             reply_markup=_cancel_kb(owner_id, "econ", "bs"),
+            title="🏛 <b>BOT DO‘KONIGA QO‘SHISH</b>",
         )
         return
 
