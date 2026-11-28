@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from datetime import timedelta
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from admin.filters import IsAdminFilter
 from admin.v2.common import AdminV2States, _back_home_btn, _cancel_kb, _deny_if_no_perm
@@ -37,9 +37,20 @@ router.callback_query.filter(IsAdminFilter())
 async def _show_auctions_home(target, owner_id: int) -> None:
     async with get_session() as session:
         items, total = await AuctionWishlistService.list_active_auctions(session, page=1, page_size=15)
-    lines = [f"🔨 <b>AUKSIONLAR BOSHQARUVI</b> ({total} ta faol)\n"]
+        ended = int((await session.execute(select(func.count(Auction.id)).where(Auction.status == "ended"))).scalar_one() or 0)
+        cancelled = int((await session.execute(select(func.count(Auction.id)).where(Auction.status.in_(("cancelled", "no_bids"))))).scalar_one() or 0)
+    lines = [
+        "🔨 <b>AUKSIONLAR</b>\n━━━━━━━━━━━━━━━",
+        f"🟢 Faol: <b>{total}</b> · 🏁 Yakunlangan: <b>{ended}</b> · ❌ Bekor/stavkasiz: <b>{cancelled}</b>\n",
+    ]
     b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="➕ Yangi Auksion", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="pick_card", p=1).pack()))
+    b.row(InlineKeyboardButton(text="➕ Yangi auksion", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="pick_card", p=1).pack()))
+    b.row(
+        InlineKeyboardButton(text="📜 Tarix (tugaganlar)", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="hist", p=1).pack()),
+        InlineKeyboardButton(text="🔍 Qidirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="srch").pack()),
+    )
+    if items:
+        lines.append("<b>Faol auksionlar:</b>")
     for auc, c in items:
         lines.append(f"• <b>#{auc.id}</b> {esc(c.character_name)} — {auc.current_price:,} 🪙 ({auc.bid_count} stavka)")
         b.row(
@@ -50,8 +61,56 @@ async def _show_auctions_home(target, owner_id: int) -> None:
         )
     if not items:
         lines.append("📭 Hozircha faol auksionlar yo‘q.")
-    b.row(_back_home_btn(owner_id))
+    b.row(
+        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="hub", act="v", ext="cards_evt").pack()),
+        _back_home_btn(owner_id),
+    )
     await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+_STATUS_LBL = {"active": "🟢 faol", "ended": "🏁 yakunlangan", "cancelled": "❌ bekor", "no_bids": "⚪ stavkasiz"}
+
+
+async def _show_auction_history(target, owner_id: int, page: int) -> None:
+    per = 10
+    page = max(1, page)
+    async with get_session() as session:
+        total = int((await session.execute(select(func.count(Auction.id)).where(Auction.status != "active"))).scalar_one() or 0)
+        rows = (
+            await session.execute(
+                select(Auction, Card)
+                .join(Card, Card.id == Auction.card_id)
+                .where(Auction.status != "active")
+                .order_by(Auction.id.desc())
+                .offset((page - 1) * per)
+                .limit(per)
+            )
+        ).all()
+    lines = [f"📜 <b>AUKSIONLAR TARIXI</b>\nJami: <b>{total}</b> | sahifa {page}\n━━━━━━━━━━━━━━━"]
+    b = InlineKeyboardBuilder()
+    for auc, c in rows:
+        lines.append(f"• <b>#{auc.id}</b> {esc(c.character_name)} — {int(auc.current_price):,} 🪙 · {_STATUS_LBL.get(auc.status, auc.status)}")
+        b.row(
+            InlineKeyboardButton(
+                text=f"#{auc.id} {c.character_name[:20]} · {int(auc.current_price):,} 🪙 · {_STATUS_LBL.get(auc.status, auc.status)}"[:60],
+                callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="det", tid=auc.id).pack(),
+            )
+        )
+    if not rows:
+        lines.append("📭 Tarix bo‘sh.")
+    pages = max(1, -(-total // per))
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="hist", p=page - 1).pack()))
+    nav.append(InlineKeyboardButton(text=f"{page}/{pages}", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="hist", p=page).pack()))
+    if page < pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="hist", p=page + 1).pack()))
+    b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="⬅️ Auksionlar", callback_data=AdmV2Cb(owner_id=owner_id, sec="auction", act="v").pack()),
+        _back_home_btn(owner_id),
+    )
+    await edit_or_answer(target, "\n".join(lines)[:4000], reply_markup=b.as_markup())
 
 
 async def _show_auction_detail(target, owner_id: int, auction_id: int) -> None:
@@ -131,6 +190,21 @@ async def cb_v2_auction(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
     if act == "det":
         await state.clear()
         await _show_auction_detail(callback, owner_id, callback_data.tid)
+        return
+
+    if act == "hist":
+        await state.clear()
+        await _show_auction_history(callback, owner_id, callback_data.p)
+        return
+
+    if act == "srch":
+        await state.set_state(AdminV2States.waiting_auc_search)
+        await state.update_data(owner_tg_id=owner_id)
+        await edit_or_answer(
+            callback,
+            "🔍 <b>AUKSION QIDIRISH</b>\n\nKarta nomini yoki auksion raqamini yozing (masalan: <code>Gojo</code> yoki <code>#12</code>):\n<i>Bekor: /cancel</i>",
+            reply_markup=_cancel_kb(owner_id, "auction", "v"),
+        )
         return
 
     if act == "ext_h":
@@ -335,3 +409,35 @@ async def fsm_v2_auc_step(message: Message, state: FSMContext) -> None:
             await session.commit()
     await message.answer(msg)
     await _show_auctions_home(message, message.from_user.id)
+
+
+@router.message(AdminV2States.waiting_auc_search, NotCommandFilter())
+async def fsm_v2_auction_search(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    q = (message.text or "").strip().lstrip("#")
+    await state.clear()
+    o = message.from_user.id
+    async with get_session() as session:
+        conds = [Card.character_name.ilike(f"%{q}%"), Card.anime_name.ilike(f"%{q}%")]
+        if q.isdigit():
+            conds.append(Auction.id == int(q))
+        rows = (
+            await session.execute(
+                select(Auction, Card).join(Card, Card.id == Auction.card_id).where(or_(*conds)).order_by(Auction.id.desc()).limit(15)
+            )
+        ).all()
+    b = InlineKeyboardBuilder()
+    for auc, c in rows:
+        b.row(
+            InlineKeyboardButton(
+                text=f"#{auc.id} {c.character_name[:20]} · {int(auc.current_price):,} 🪙 · {_STATUS_LBL.get(auc.status, auc.status)}"[:60],
+                callback_data=AdmV2Cb(owner_id=o, sec="auction", act="det", tid=auc.id).pack(),
+            )
+        )
+    b.row(InlineKeyboardButton(text="⬅️ Auksionlar", callback_data=AdmV2Cb(owner_id=o, sec="auction", act="v").pack()), _back_home_btn(o))
+    await message.answer(
+        f"🔍 Topildi: <b>{len(rows)}</b> ta" if rows else f"📭 <code>{esc(q)}</code> bo‘yicha auksion topilmadi.",
+        reply_markup=b.as_markup(),
+    )

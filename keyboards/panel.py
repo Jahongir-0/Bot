@@ -131,7 +131,7 @@ PANEL: Dict[str, dict] = {
         "parent": None,
         "items": [
             ("👥 Foydalanuvchilar", _old("users", "menu"), "users"),
-            ("🏘 Guruhlar", _old("groups", "list", page=1), "groups"),
+            ("🏘 Guruhlar", _v2("grp"), "groups"),
             ("🛡 Adminlar", _v2("admins"), "admins"),
             ("📣 Kanallar", _v2("channels"), "channels"),
             ("🤝 Referal", _old("settings", "rewards_menu"), "settings"),
@@ -156,6 +156,7 @@ PANEL: Dict[str, dict] = {
         "items": [
             ("📜 Tarix va hisobotlar", _v2("hist"), "history"),
             ("📊 Statistika", _old("stats", "view"), "stats"),
+            ("📈 Davr bo‘yicha hisobot", _v2("hist", "rep", ext="d7"), "history"),
             ("📈 Faollik hisoboti", _v2("report"), "report"),
             ("📋 Jurnal", _v2("logs"), "logs"),
         ],

@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from models.card import Card
 from models.limited_event import LimitedEvent
-from utils.callback_data import AdminCb, EvtCb, NavCb
+from utils.callback_data import AdmV2Cb, AdminCb, EvtCb, NavCb
 from utils.constants import get_rarity_meta
 
 
@@ -68,7 +68,13 @@ def admin_evt_menu_kb(owner_id: int, events: List[Tuple[LimitedEvent, Card]]) ->
             callback_data=AdminCb(owner_id=owner_id, section="events", action="bonus_menu").pack(),
         )
     )
-    _back_row(builder, owner_id, AdminCb(owner_id=owner_id, section="home").pack())
+    builder.row(
+        InlineKeyboardButton(
+            text="📜 Barcha eventlar (tarix)",
+            callback_data=AdminCb(owner_id=owner_id, section="evt", action="hist", page=1).pack(),
+        )
+    )
+    _back_row(builder, owner_id, AdmV2Cb(owner_id=owner_id, sec="hub", act="v", ext="cards_evt").pack())
     return builder.as_markup()
 
 

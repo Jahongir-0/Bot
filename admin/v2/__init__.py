@@ -17,6 +17,7 @@ from admin.v2 import (
     broadcast,
     report,
     history,
+    groups_hub,
     backup,
     support,
     economy,
@@ -38,6 +39,7 @@ router.include_router(reklama.router)
 router.include_router(broadcast.router)
 router.include_router(report.router)
 router.include_router(history.router)
+router.include_router(groups_hub.router)
 router.include_router(backup.router)
 router.include_router(support.router)
 router.include_router(economy.router)

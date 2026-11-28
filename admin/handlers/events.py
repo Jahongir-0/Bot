@@ -258,6 +258,43 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
         await _render_evt_menu(callback)
         return
 
+    if action == "hist":
+        await state.clear()
+        page = max(1, callback_data.page)
+        per = 10
+        async with get_session() as session:
+            await EventService.close_expired(session)
+            await session.commit()
+            events = await EventService.get_recent_events(session, limit=500)
+        total = len(events)
+        chunk = events[(page - 1) * per : page * per]
+        lines = [f"📜 <b>BARCHA EVENTLAR</b>\nJami: <b>{total}</b> | sahifa {page}\n━━━━━━━━━━━━━━━"]
+        kb = InlineKeyboardBuilder()
+        for ev, card in chunk:
+            lines.append(
+                f"{_EVT_STATUS.get(ev.status, ev.status)} <b>#{ev.id} {esc(card.character_name)}</b> "
+                f"— {ev.sold_count}/{ev.total_copies} · {_local_dt(ev.ends_at):%d.%m.%Y}"
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"#{ev.id} {card.character_name[:22]} · {ev.sold_count}/{ev.total_copies}"[:60],
+                    callback_data=AdminCb(owner_id=admin_id, section="evt", action="detail", target_id=ev.id).pack(),
+                )
+            )
+        if not chunk:
+            lines.append("📭 Eventlar yo‘q.")
+        pages = max(1, -(-total // per))
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdminCb(owner_id=admin_id, section="evt", action="hist", page=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{pages}", callback_data=AdminCb(owner_id=admin_id, section="evt", action="hist", page=page).pack()))
+        if page < pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=AdminCb(owner_id=admin_id, section="evt", action="hist", page=page + 1).pack()))
+        kb.row(*nav)
+        kb.row(InlineKeyboardButton(text="⬅️ Eventlar", callback_data=AdminCb(owner_id=admin_id, section="evt", action="menu").pack()))
+        await edit_or_answer(callback, "\n".join(lines)[:4000], reply_markup=kb.as_markup())
+        return
+
     if action == "pick":
         await state.clear()
         async with get_session() as session:

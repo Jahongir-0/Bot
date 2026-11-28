@@ -12,6 +12,7 @@ from utils.callback_data import AdmV2Cb, AdminCb
 
 class AdminV2States(StatesGroup):
     waiting_page_jump = State()
+    waiting_auc_search = State()
     # Cards
     waiting_zip_cards = State()
     waiting_batch_text = State()

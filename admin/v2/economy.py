@@ -80,7 +80,13 @@ async def _show_bot_store_home(target, owner_id: int) -> None:
         InlineKeyboardButton(text="💸 Komissiyalar", callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="comm").pack()),
         InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data=AdminCb(owner_id=owner_id, section="settings", action="view").pack()),
     )
-    b.row(_back_home_btn(owner_id))
+    b.row(
+        InlineKeyboardButton(text="📜 Do‘kon tarixi (xarid/sotuv)", callback_data=AdmV2Cb(owner_id=owner_id, sec="hist", act="tx", ext="d30-store").pack()),
+    )
+    b.row(
+        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="hub", act="v", ext="cards_evt").pack()),
+        _back_home_btn(owner_id),
+    )
     await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
