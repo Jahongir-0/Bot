@@ -410,8 +410,16 @@ async def _flush_later(message: Message, state: FSMContext) -> None:
         return
     try:
         await _flush(message, state)
-    except Exception:
+    except Exception as exc:
         logger.exception("json_import flush xatosi")
+        try:
+            await message.answer(
+                f"❌ <b>Xatolik:</b> <code>{esc(type(exc).__name__)}: {esc(str(exc)[:300])}</code>\n"
+                "Rasmlar saqlanib turibdi. «✅ Tugatish va saqlash» ni qayta bosib ko‘ring.",
+                reply_markup=_photos_kb(message.from_user.id),
+            )
+        except Exception:
+            pass
 
 
 async def _doc_to_photo_id(bot, chat_id: int, document):
@@ -445,7 +453,7 @@ async def _flush(message: Message, state: FSMContext) -> None:
         warns: List[str] = []
         for _mid, kind, ref, caption in items:
             try:
-                fid, uid = ref if kind == "photo" else await _doc_to_photo_id(message.bot, message.chat.id, ref)
+                fid, src_uid = ref if kind == "photo" else await _doc_to_photo_id(message.bot, message.chat.id, ref)
             except Exception as exc:
                 warns.append(f"rasm o‘qilmadi: {str(exc)[:60]}")
                 continue
@@ -460,7 +468,7 @@ async def _flush(message: Message, state: FSMContext) -> None:
                 warns.append("ortiqcha rasm (hamma kartaga rasm bor)")
                 continue
             slots[idx] = fid
-            uids[idx] = uid
+            uids[idx] = src_uid
             placed.append(idx)
         await state.update_data(slots=slots, uids=uids, skipped=sorted(skipped))
 
@@ -574,7 +582,7 @@ async def cb_jq_done(callback: CallbackQuery, state: FSMContext) -> None:
 # 5. Saqlash
 # --------------------------------------------------------------------------
 async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = None) -> None:
-    uid = user_id or message.from_user.id
+    uid_tg = user_id or message.from_user.id
     data = await state.get_data()
     records: List[dict] = data.get("records") or []
     slots: List[Optional[str]] = data.get("slots") or []
@@ -585,70 +593,101 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
     added: List[str] = []
     missing: List[str] = []
     dup_imgs: List[str] = []
-    async with get_session() as session:
-        ranks = await GameplayService.get_rank_definitions(session)
-        sync_runtime_ranks(ranks)
-        rank_by_name = {str(r["name"]).lower(): r for r in ranks}
-        # Takroriy = BIR XIL RASM (nom/rank emas): bir personajning turli rasmli kartalari ruxsat
-        known_uids = {
-            str(m.get("src_uid"))
-            for (m,) in (
-                await session.execute(select(Card.metadata_json).where(Card.is_deleted.is_(False)))
-            ).all()
-            if isinstance(m, dict) and m.get("src_uid")
-        }
-        for i, rec in enumerate(records):
-            fid = slots[i] if i < len(slots) else None
-            if not fid:
-                missing.append(f"{i + 1}. {rec['character_name']}")
-                continue
-            uid = uids[i] if i < len(uids) else None
-            if uid and uid in known_uids:
-                dup_imgs.append(f"{i + 1}. {rec['character_name']}")
-                continue
-            if uid:
-                known_uids.add(uid)
-            rarity = rec["rarity"]
-            r_obj = rank_by_name.get(rarity.lower())
-            meta_r = get_rarity_meta(rarity)
-            base_val = int(rec.get("base_value") or (r_obj.get("base_value") if r_obj else meta_r.default_base_value) or meta_r.default_base_value)
-            drop_lim = int(rec.get("drop_limit") or (r_obj.get("drop_limit") if r_obj else meta_r.default_drop_limit) or meta_r.default_drop_limit)
-            drop_w = int((r_obj.get("drop_probability") if r_obj else meta_r.default_drop_weight) or meta_r.default_drop_weight)
-            card = await CardService.create_card(
-                session,
-                character_name=rec["character_name"],
-                anime_name=rec["media_name"],
-                image=fid,
-                rarity=rarity,
-                base_value=base_val,
-                drop_weight=drop_w,
-                drop_limit=drop_lim,
-                media_type=rec["media_type"],
-                aliases=rec.get("aliases") or None,
-                metadata_json={**(rec.get("meta") or {}), **({"src_uid": uid} if uid else {})},
-            )
-            card.image_file_id = fid
-            added.append(f"{rec['character_name']} ({rarity})")
-        if added:
-            await CommunityService.log_audit(
-                session, uid, "json_import_cards", "card", str(len(added)), details={"names": added[:30]}
-            )
-        await session.commit()
-    _BUF.pop(uid, None)
+    failed: List[str] = []
+    progress = await message.answer(f"⏳ Saqlanmoqda… (0/{len(records)})")
+    try:
+        async with get_session() as session:
+            ranks = await GameplayService.get_rank_definitions(session)
+            sync_runtime_ranks(ranks)
+            rank_by_name = {str(r["name"]).lower(): r for r in ranks}
+            # Takroriy = BIR XIL RASM (nom/rank emas): bir personajning turli rasmli kartalari ruxsat
+            known_uids = set()
+            for m in (await session.execute(select(Card.metadata_json).where(Card.is_deleted.is_(False)))).scalars().all():
+                if isinstance(m, dict) and m.get("src_uid"):
+                    known_uids.add(str(m["src_uid"]))
+            for i, rec in enumerate(records):
+                fid = slots[i] if i < len(slots) else None
+                if not fid:
+                    missing.append(f"{i + 1}. {rec['character_name']}")
+                    continue
+                src_uid = uids[i] if i < len(uids) else None
+                if src_uid and src_uid in known_uids:
+                    dup_imgs.append(f"{i + 1}. {rec['character_name']}")
+                    continue
+                try:
+                    async with session.begin_nested():
+                        rarity = rec["rarity"]
+                        r_obj = rank_by_name.get(rarity.lower())
+                        meta_r = get_rarity_meta(rarity)
+                        base_val = int(rec.get("base_value") or (r_obj.get("base_value") if r_obj else 0) or meta_r.default_base_value)
+                        drop_lim = int(rec.get("drop_limit") or (r_obj.get("drop_limit") if r_obj else 0) or meta_r.default_drop_limit)
+                        drop_w = int((r_obj.get("drop_probability") if r_obj else 0) or meta_r.default_drop_weight)
+                        card = await CardService.create_card(
+                            session,
+                            character_name=rec["character_name"],
+                            anime_name=rec["media_name"],
+                            image=fid,
+                            rarity=rarity,
+                            base_value=base_val,
+                            drop_weight=drop_w,
+                            drop_limit=drop_lim,
+                            media_type=rec["media_type"],
+                            aliases=rec.get("aliases") or None,
+                            metadata_json={**(rec.get("meta") or {}), **({"src_uid": src_uid} if src_uid else {})},
+                        )
+                        card.image_file_id = fid
+                    if src_uid:
+                        known_uids.add(src_uid)
+                    added.append(f"{rec['character_name']} ({rarity})")
+                except Exception as exc:
+                    logger.exception("json_import: karta saqlanmadi #%s", i + 1)
+                    failed.append(f"{i + 1}. {rec['character_name']} — {type(exc).__name__}: {str(exc)[:80]}")
+            if added:
+                try:
+                    await CommunityService.log_audit(
+                        session, uid_tg, "json_import_cards", "card", str(len(added)), details={"names": added[:30]}
+                    )
+                except Exception:
+                    logger.exception("json_import: audit yozilmadi")
+            await session.commit()
+    except Exception as exc:
+        logger.exception("json_import: saqlash xatosi")
+        await message.answer(
+            f"❌ <b>Saqlashda xatolik:</b> <code>{esc(type(exc).__name__)}: {esc(str(exc)[:300])}</code>\n"
+            "Rasmlar yo‘qolmadi — «✅ Tugatish va saqlash» ni qayta bosib ko‘ring.",
+            reply_markup=_photos_kb(uid_tg),
+        )
+        return
+    try:
+        await progress.delete()
+    except Exception:
+        pass
+    _BUF.pop(uid_tg, None)
     await state.clear()
 
     lines = [
-        "✅ <b>JSON IMPORT YAKUNLANDI</b>",
+        "✅ <b>JSON IMPORT YAKUNLANDI</b>" if added else "⚠️ <b>Hech narsa qo‘shilmadi</b>",
         f"➕ Qo‘shildi: <b>{len(added)}</b> ta",
         f"⏭ Rasmsiz (qo‘shilmadi): <b>{len(missing)}</b> ta",
         f"♻️ Takroriy rasm (o‘tkazildi): <b>{len(dup_imgs)}</b> ta",
+        f"❌ Xato: <b>{len(failed)}</b> ta",
     ]
-    if dup_imgs:
-        lines.append("\n<b>Bu rasmlar botda allaqachon bor:</b>")
-        lines.extend(f"• {esc(m)}" for m in dup_imgs[:20])
-    if missing:
-        lines.append("\n<b>Rasmsiz qolganlar:</b>")
-        lines.extend(f"• {esc(m)}" for m in missing[:20])
-        if len(missing) > 20:
-            lines.append(f"… va yana {len(missing) - 20} ta")
-    await message.answer("\n".join(lines), reply_markup=admin_v2_cards_menu_kb(uid))
+    for title, items in (("Rasmsiz qolganlar", missing), ("Bu rasmlar botda allaqachon bor", dup_imgs), ("Xatolar", failed)):
+        if items:
+            lines.append(f"\n<b>{title}:</b>")
+            lines.extend(f"• {esc(m)}" for m in items[:15])
+            if len(items) > 15:
+                lines.append(f"… va yana {len(items) - 15} ta")
+    if added:
+        lines.append("\n👁 Yangi kartalar <b>«Tushmaganlar»</b> bo‘limida turadi (hali guruhga tushmagan).")
+    await message.answer("\n".join(lines))
+    # Karta qo'shish menyusi qayta chiqadi — keyingisini darrov qo'shish mumkin
+    from keyboards.v2 import admin_v2_add_choice_kb
+
+    kb = admin_v2_add_choice_kb(uid_tg)
+    if added:
+        kb.inline_keyboard.insert(
+            0,
+            [InlineKeyboardButton(text="👁 Yangi qo‘shilganlarni ko‘rish", callback_data=AdmV2Cb(owner_id=uid_tg, sec="cards", act="view_start", ext="not_sent", p=1).pack())],
+        )
+    await message.answer("➕ <b>KARTA QO‘SHISH</b>\n──────────────\nKartalarni qanday usulda qo‘shasiz?", reply_markup=kb)
