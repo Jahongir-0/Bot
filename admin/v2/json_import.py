@@ -7,8 +7,7 @@ Oqim:
    Bot rasmlarni yuborilish tartibi (message_id) bo'yicha 1, 2, 3... kartalarga joylaydi.
    • Rasm izohiga raqam yozilsa (masalan «7») — aynan shu raqamli kartaga joylanadi.
    • Fayl (document) ko'rinishida yuborilgan rasmlar ham qabul qilinadi.
-4. Hamma kartaga rasm to'lganda (yoki «Tugatish» bosilganda) kartalar yaratiladi va
-   oraliq shovqin xabarlar avtomatik tozalanadi.
+4. Hamma kartaga rasm to'lganda (yoki «Tugatish» bosilganda) kartalar yaratiladi.
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ from services.gameplay_service import GameplayService
 from utils.callback_data import AdmV2Cb
 from utils.constants import MEDIA_TYPES, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, safe_delete
+from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_v2_json_import")
@@ -128,26 +127,6 @@ def _cb(owner_id: int, act: str) -> str:
     return AdmV2Cb(owner_id=owner_id, sec="cards", act=act).pack()
 
 
-async def _track_temp(state: FSMContext, *msg_ids: int) -> None:
-    data = await state.get_data()
-    cur = list(data.get("temp_msg_ids") or [])
-    for mid in msg_ids:
-        if mid and mid not in cur:
-            cur.append(int(mid))
-    await state.update_data(temp_msg_ids=cur[-60:])
-
-
-async def _cleanup_temp(bot, chat_id: int, state: FSMContext, keep_list: bool = False) -> None:
-    data = await state.get_data()
-    ids = list(data.get("temp_msg_ids") or [])
-    status_id = data.get("status_msg_id")
-    if status_id and int(status_id) not in ids:
-        ids.append(int(status_id))
-    for mid in ids:
-        await safe_delete(bot, chat_id, int(mid))
-    await state.update_data(temp_msg_ids=[], status_msg_id=None)
-
-
 def _photos_kb(owner_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -221,7 +200,7 @@ def _extract_json_payload(raw_text: str) -> Any:
     ends = [i for i in (txt.rfind("}"), txt.rfind("]")) if i != -1]
     if starts and ends and max(ends) > min(starts):
         txt = txt[min(starts) : max(ends) + 1]
-    txt = re.sub(r",\s*([}\]])", r"\1", txt)
+    txt = re.sub(r",\s*([}\]])", r"\1", txt)  # ortiqcha vergullar
     txt = txt.replace("“", '"').replace("”", '"')
     return json.loads(txt)
 
@@ -235,7 +214,7 @@ async def cb_jsonq_start(callback: CallbackQuery, state: FSMContext, admin_perms
         return
     await state.clear()
     await state.set_state(JsonImportStates.waiting_json)
-    await state.update_data(owner_tg_id=callback.from_user.id, temp_msg_ids=[])
+    await state.update_data(owner_tg_id=callback.from_user.id)
     owner = callback.from_user.id
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -243,7 +222,7 @@ async def cb_jsonq_start(callback: CallbackQuery, state: FSMContext, admin_perms
             [InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=_cb(owner, "add_menu"))],
         ]
     )
-    sent = await edit_or_answer(
+    await edit_or_answer(
         callback,
         "📄 <b>JSON + RASMLAR (ketma-ket)</b>\n━━━━━━━━━━━━━━━\n"
         "1️⃣ Rasmsiz <b>.json</b> faylni yuboring (yoki JSON matnini tashlang).\n"
@@ -252,8 +231,6 @@ async def cb_jsonq_start(callback: CallbackQuery, state: FSMContext, admin_perms
         "🤖 JSON ni AI ga tuzdirish uchun pastdagi ko‘rsatmani oling.\n<i>Bekor qilish: /cancel</i>",
         reply_markup=kb,
     )
-    if sent and hasattr(sent, "message_id"):
-        await _track_temp(state, sent.message_id)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "jq_prompt")))
@@ -283,31 +260,26 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
     if message.document:
         fname = (message.document.file_name or "").lower()
         if not fname.endswith((".json", ".txt")):
-            w = await message.answer("⚠️ Faqat <code>.json</code> fayl (yoki JSON matni) yuboring.")
-            await _track_temp(state, w.message_id)
+            await message.answer("⚠️ Faqat <code>.json</code> fayl (yoki JSON matni) yuboring.")
             return
         if (message.document.file_size or 0) > 3 * 1024 * 1024:
-            w = await message.answer("⚠️ Fayl 3 MB dan kichik bo‘lishi kerak.")
-            await _track_temp(state, w.message_id)
+            await message.answer("⚠️ Fayl 3 MB dan kichik bo‘lishi kerak.")
             return
         buf = io.BytesIO()
         await message.bot.download(message.document, destination=buf)
         raw = buf.getvalue().decode("utf-8-sig", errors="replace")
     if not raw:
-        w = await message.answer("⚠️ JSON fayl yoki matn yuboring.")
-        await _track_temp(state, w.message_id)
+        await message.answer("⚠️ JSON fayl yoki matn yuboring.")
         return
     try:
         parsed = _extract_json_payload(raw)
     except Exception as exc:
-        w = await message.answer(f"❌ JSON o‘qilmadi: <code>{esc(str(exc)[:200])}</code>\nAI ga «faqat to‘g‘ri JSON ber» deb ayting.")
-        await _track_temp(state, w.message_id)
+        await message.answer(f"❌ JSON o‘qilmadi: <code>{esc(str(exc)[:200])}</code>\nAI ga «faqat to‘g‘ri JSON ber» deb ayting.")
         return
     if isinstance(parsed, dict):
         parsed = parsed.get("cards") if isinstance(parsed.get("cards"), list) else [parsed]
     if not isinstance(parsed, list) or not parsed:
-        w = await message.answer("❌ JSON ichida kartalar ro‘yxati topilmadi.")
-        await _track_temp(state, w.message_id)
+        await message.answer("❌ JSON ichida kartalar ro‘yxati topilmadi.")
         return
 
     from services.card_zip_import import _MEDIA_LOOKUP, _pick, resolve_rank
@@ -354,7 +326,6 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
         )
 
     if not records:
-        await _cleanup_temp(message.bot, message.chat.id, state)
         await state.clear()
         extra = ("\n" + "\n".join(f"• {p}" for p in problems[:10])) if problems else ""
         await message.answer(
@@ -363,8 +334,6 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Oldingi JSON ko'rsatma xabarini tozalaymiz
-    await _cleanup_temp(message.bot, message.chat.id, state)
     await state.set_state(JsonImportStates.waiting_photos)
     await state.update_data(
         owner_tg_id=message.from_user.id,
@@ -372,25 +341,27 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
         slots=[None] * len(records),
         uids=[None] * len(records),
         skipped=[],
-        temp_msg_ids=[],
-        status_msg_id=None,
     )
-    head = f"📋 <b>JSON qabul qilindi:</b> {len(records)} ta karta"
+    head = (
+        f"📋 <b>JSON qabul qilindi:</b> {len(records)} ta karta\n"
+        f"❌ Xato (o‘tkazib yuborildi): {len(problems)}\n"
+        "ℹ️ Bir personajning bir xil rankdagi bir nechta karta (turli rasm) ham qo‘shiladi — takroriy faqat BIR XIL RASM bo‘lsa aniqlanadi."
+    )
     if problems:
-        head += f" · ❌ {len(problems)} ta xato:\n" + "\n".join(f"• {p}" for p in problems[:8])
-    m_head = await message.answer(head)
-    new_ids = [m_head.message_id]
+        head += "\n⚠️ Bu kartalar ro‘yxatda YO‘Q (ularning rasmini yubormang):\n" + "\n".join(f"• {p}" for p in problems[:8])
+    await message.answer(head)
     for chunk in _chunks(_numbered_lines(records, [None] * len(records), set())):
-        mc = await message.answer(chunk)
-        new_ids.append(mc.message_id)
-    m_guide = await message.answer(
-        f"🖼 <b>Rasmlarni shu tartibda yuboring</b> (1 → {len(records)}).\n"
-        "• Bir yo‘la albom yoki bittalab yuborishingiz mumkin.\n"
-        "• Izohga raqam yozsangiz (masalan <code>7</code>) — aynan shu kartaga joylanadi.\n\n"
-        f"👉 Navbatdagi: <b>1. {esc(records[0]['character_name'])}</b>",
+        await message.answer(chunk)
+    await message.answer(
+        f"🖼 <b>Endi rasmlarni shu tartibda yuboring</b> (1 → {len(records)}).\n\n"
+        "• Bir yo‘la ko‘p rasm belgilab yuborishingiz mumkin (albom) — bot ularni yuborilgan ketma-ketlikda "
+        "1, 2, 3… kartalarga joylaydi.\n"
+        "• Bittalab ham yuborsangiz bo‘ladi — bot navbatdagi kartaga qo‘yadi.\n"
+        "• Rasm izohiga <b>raqam</b> yozsangiz (masalan <code>7</code>), u aynan 7-kartaga joylanadi.\n"
+        "• Rasmni <b>fayl</b> ko‘rinishida yuborsangiz ham qabul qilinadi.\n\n"
+        f"👉 Birinchi navbat: <b>1. {esc(records[0]['character_name'])}</b>",
         reply_markup=_photos_kb(message.from_user.id),
     )
-    await state.update_data(temp_msg_ids=new_ids, status_msg_id=m_guide.message_id)
 
 
 # --------------------------------------------------------------------------
@@ -412,8 +383,7 @@ async def fsm_jsonq_photo(message: Message, state: FSMContext) -> None:
     elif _is_image_doc(message):
         item = (message.message_id, "doc", message.document, message.caption)
     else:
-        w = await message.answer("⚠️ Rasm (foto yoki rasm fayli) yuboring.")
-        await _track_temp(state, w.message_id)
+        await message.answer("⚠️ Rasm (foto yoki rasm fayli) yuboring.")
         return
     _BUF.setdefault(uid, []).append(item)
     old = _TASKS.get(uid)
@@ -427,14 +397,10 @@ async def fsm_jsonq_text_hint(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
-    old_status = data.get("status_msg_id")
-    if old_status:
-        await safe_delete(message.bot, message.chat.id, int(old_status))
-    sent = await message.answer(
-        "🖼 Hozir <b>rasm</b> yuboring (foto yoki rasm fayli). Holatni ko‘rish uchun «📋 Holat / ro‘yxat» ni bosing.",
+    await message.answer(
+        "🖼 Hozir <b>rasm</b> yuborish kerak (foto yoki rasm fayli). Holatni ko‘rish uchun «📋 Holat / ro‘yxat» ni bosing.",
         reply_markup=_photos_kb(message.from_user.id),
     )
-    await state.update_data(status_msg_id=sent.message_id)
 
 
 async def _flush_later(message: Message, state: FSMContext) -> None:
@@ -447,12 +413,11 @@ async def _flush_later(message: Message, state: FSMContext) -> None:
     except Exception as exc:
         logger.exception("json_import flush xatosi")
         try:
-            w = await message.answer(
+            await message.answer(
                 f"❌ <b>Xatolik:</b> <code>{esc(type(exc).__name__)}: {esc(str(exc)[:300])}</code>\n"
                 "Rasmlar saqlanib turibdi. «✅ Tugatish va saqlash» ni qayta bosib ko‘ring.",
                 reply_markup=_photos_kb(message.from_user.id),
             )
-            await _track_temp(state, w.message_id)
         except Exception:
             pass
 
@@ -505,16 +470,13 @@ async def _flush(message: Message, state: FSMContext) -> None:
             slots[idx] = fid
             uids[idx] = src_uid
             placed.append(idx)
-        old_status = data.get("status_msg_id")
-        if old_status:
-            await safe_delete(message.bot, message.chat.id, int(old_status))
-        await state.update_data(slots=slots, uids=uids, skipped=sorted(skipped), status_msg_id=None)
+        await state.update_data(slots=slots, uids=uids, skipped=sorted(skipped))
 
         lines = []
-        for i in placed[:20]:
+        for i in placed[:25]:
             lines.append(f"✅ {i + 1}. {esc(records[i]['character_name'])}")
-        if len(placed) > 20:
-            lines.append(f"… va yana {len(placed) - 20} ta")
+        if len(placed) > 25:
+            lines.append(f"… va yana {len(placed) - 25} ta")
         txt = f"🖼 <b>{len(placed)} ta rasm joylandi</b>\n" + "\n".join(lines)
         if warns:
             txt += "\n\n⚠️ " + "; ".join(sorted(set(warns)))
@@ -522,11 +484,12 @@ async def _flush(message: Message, state: FSMContext) -> None:
         filled = sum(1 for v in slots if v)
         txt += f"\n\n📊 To‘ldi: <b>{filled}/{len(records)}</b>"
         if nxt is None:
+            txt += "\n🎉 Hamma kartaga rasm joylandi — saqlayapman…"
+            await message.answer(txt)
             await _finish(message, state)
             return
         txt += f"\n👉 Navbatdagi: <b>{nxt + 1}. {esc(records[nxt]['character_name'])}</b>"
-        st_msg = await message.answer(txt, reply_markup=_photos_kb(uid))
-        await state.update_data(status_msg_id=st_msg.message_id)
+        await message.answer(txt, reply_markup=_photos_kb(uid))
 
 
 # --------------------------------------------------------------------------
@@ -593,21 +556,13 @@ async def cb_jq_list(callback: CallbackQuery, state: FSMContext) -> None:
         return
     head = f"📋 <b>Holat:</b> {filled}/{len(records)} rasm joylangan\n✅ rasm bor · ⬜ kutilmoqda · ⏭ o‘tkazilgan"
     chunks = _chunks(_numbered_lines(records, slots, skipped))
-    new_ids: List[int] = []
     for i, ch in enumerate(chunks):
-        m = await callback.message.answer(
-            (head + "\n\n" if i == 0 else "") + ch,
-            reply_markup=_photos_kb(callback.from_user.id) if i == len(chunks) - 1 else None,
-        )
-        new_ids.append(m.message_id)
-    await _track_temp(state, *new_ids)
+        await callback.message.answer((head + "\n\n" if i == 0 else "") + ch, reply_markup=_photos_kb(callback.from_user.id) if i == len(chunks) - 1 else None)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "jq_cancel")))
 async def cb_jq_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     _BUF.pop(callback.from_user.id, None)
-    if callback.message:
-        await _cleanup_temp(callback.bot, callback.message.chat.id, state)
     await state.clear()
     await callback.answer("Bekor qilindi.")
     await edit_or_answer(callback, "❌ JSON import bekor qilindi.", reply_markup=admin_v2_cards_menu_kb(callback.from_user.id))
@@ -645,6 +600,7 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
             ranks = await GameplayService.get_rank_definitions(session)
             sync_runtime_ranks(ranks)
             rank_by_name = {str(r["name"]).lower(): r for r in ranks}
+            # Takroriy = BIR XIL RASM (nom/rank emas): bir personajning turli rasmli kartalari ruxsat
             known_uids = set()
             for m in (await session.execute(select(Card.metadata_json).where(Card.is_deleted.is_(False)))).scalars().all():
                 if isinstance(m, dict) and m.get("src_uid"):
@@ -696,18 +652,16 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
             await session.commit()
     except Exception as exc:
         logger.exception("json_import: saqlash xatosi")
-        await safe_delete(message.bot, message.chat.id, progress.message_id)
-        w = await message.answer(
+        await message.answer(
             f"❌ <b>Saqlashda xatolik:</b> <code>{esc(type(exc).__name__)}: {esc(str(exc)[:300])}</code>\n"
             "Rasmlar yo‘qolmadi — «✅ Tugatish va saqlash» ni qayta bosib ko‘ring.",
             reply_markup=_photos_kb(uid_tg),
         )
-        await _track_temp(state, w.message_id)
         return
-
-    # Barcha oraliq ro'yxat/holat/progress xabarlarini o'chiramiz
-    await safe_delete(message.bot, message.chat.id, progress.message_id)
-    await _cleanup_temp(message.bot, message.chat.id, state)
+    try:
+        await progress.delete()
+    except Exception:
+        pass
     _BUF.pop(uid_tg, None)
     await state.clear()
 
@@ -726,7 +680,8 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
                 lines.append(f"… va yana {len(items) - 15} ta")
     if added:
         lines.append("\n👁 Yangi kartalar <b>«Tushmaganlar»</b> bo‘limida turadi (hali guruhga tushmagan).")
-
+    await message.answer("\n".join(lines))
+    # Karta qo'shish menyusi qayta chiqadi — keyingisini darrov qo'shish mumkin
     from keyboards.v2 import admin_v2_add_choice_kb
 
     kb = admin_v2_add_choice_kb(uid_tg)
@@ -735,4 +690,4 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
             0,
             [InlineKeyboardButton(text="👁 Yangi qo‘shilganlarni ko‘rish", callback_data=AdmV2Cb(owner_id=uid_tg, sec="cards", act="view_start", ext="not_sent", p=1).pack())],
         )
-    await message.answer("\n".join(lines), reply_markup=kb)
+    await message.answer("➕ <b>KARTA QO‘SHISH</b>\n──────────────\nKartalarni qanday usulda qo‘shasiz?", reply_markup=kb)

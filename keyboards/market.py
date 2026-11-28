@@ -16,7 +16,6 @@ from utils.callback_data import (
     MarketCb,
     NavCb,
     OfferCb,
-    PageJumpCb,
     RankingCb,
     SearchCb,
     StarsCb,
@@ -62,11 +61,7 @@ def market_list_kb(
     nav.append(
         InlineKeyboardButton(
             text=f"{page}/{total_pages}",
-            callback_data=PageJumpCb(
-                owner_id=owner_id,
-                key="m_my" if my_only else "m_all",
-                total=total_pages,
-            ).pack(),
+            callback_data=MarketCb(owner_id=owner_id, action=action_name, page=page).pack(),
         )
     )
     if page < total_pages:
@@ -149,7 +144,7 @@ def bot_sell_list_kb(
         nav.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
-                callback_data=PageJumpCb(owner_id=owner_id, key="m_bot", total=total_pages).pack(),
+                callback_data=MarketCb(owner_id=owner_id, action="bot_list", page=page).pack(),
             )
         )
         if page < total_pages:
@@ -281,10 +276,6 @@ def search_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
             text="🎴 O‘zimni kartalarim",
             callback_data=CollectionCb(owner_id=owner_id, action="my_search").pack(),
         ),
-        InlineKeyboardButton(
-            text="📖 Hali hech kimda yo‘q",
-            callback_data=SearchCb(owner_id=owner_id, action="mode", mode="unowned").pack(),
-        ),
     )
     builder.row(
         InlineKeyboardButton(
@@ -408,11 +399,12 @@ def search_results_kb(
         nav.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
-                callback_data=PageJumpCb(
+                callback_data=SearchCb(
                     owner_id=owner_id,
-                    key="s_res",
-                    total=total_pages,
-                    ext=_cb_q(f"{mode}|{q_short}", 22),
+                    action="results",
+                    mode=mode,
+                    query=q_short,
+                    page=page,
                 ).pack(),
             )
         )
@@ -552,11 +544,12 @@ def search_catalog_results_kb(
         nav.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
-                callback_data=PageJumpCb(
+                callback_data=SearchCb(
                     owner_id=owner_id,
-                    key="s_res",
-                    total=total_pages,
-                    ext=_cb_q(f"{mode}|{q_short}", 22),
+                    action="results",
+                    mode=mode,
+                    query=q_short,
+                    page=page,
                 ).pack(),
             )
         )
@@ -694,12 +687,7 @@ def offer_card_pick_kb(
         nav.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
-                callback_data=PageJumpCb(
-                    owner_id=owner_id,
-                    key="o_pk",
-                    total=total_pages,
-                    tid=target_uc_id,
-                ).pack(),
+                callback_data=OfferCb(owner_id=owner_id, action="card_pick", offer_id=target_uc_id, page=page).pack(),
             )
         )
         if page < total_pages:

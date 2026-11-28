@@ -29,7 +29,7 @@ from services.security_backup_service import SecurityBackupService
 from utils.callback_data import AdminCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc, fmt_coins
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, show_card_with_prompt
+from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
 from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
@@ -52,9 +52,7 @@ async def cb_admin_users_menu(callback: CallbackQuery, state: FSMContext) -> Non
     )
 
 
-async def _show_admin_users_list(target, filter_mode: str, page: int, owner_id: int | None = None) -> None:
-    uid = owner_id if owner_id is not None else target.from_user.id
-    page = max(1, int(page))
+async def _show_admin_users_list(callback: CallbackQuery, filter_mode: str, page: int) -> None:
     async with get_session() as session:
         users, total = await AdminService.get_users_paginated(
             session, filter_mode=filter_mode, page=page, page_size=PAGE_SIZE
@@ -68,9 +66,9 @@ async def _show_admin_users_list(target, filter_mode: str, page: int, owner_id: 
     if not users:
         text += "\n\n📭 Ro‘yxat bo‘sh."
     await edit_or_answer(
-        target,
+        callback,
         text,
-        reply_markup=admin_users_list_kb(uid, users, filter_mode, page, total, page_size=PAGE_SIZE),
+        reply_markup=admin_users_list_kb(callback.from_user.id, users, filter_mode, page, total, page_size=PAGE_SIZE),
     )
 
 
@@ -346,11 +344,11 @@ async def fsm_admin_coin_delta(message: Message, state: FSMContext) -> None:
     await _render_admin_user(message, message.from_user.id, uid)
 
 
-async def _render_admin_give_card_pick(target, owner_id: int, target_user_id: int, page: int = 1) -> None:
-    page = max(1, int(page))
+@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "give_pick")))
+async def cb_admin_give_card_pick(callback: CallbackQuery, callback_data: AdminCb) -> None:
     async with get_session() as session:
         cards, total = await AdminService.get_undropped_cards_paginated(
-            session, page=page, page_size=PAGE_SIZE
+            session, page=callback_data.page, page_size=PAGE_SIZE
         )
     txt = (
         f"➕ <b>FOYDALANUVCHIGA KARTA BERISH</b>\n"
@@ -359,63 +357,33 @@ async def _render_admin_give_card_pick(target, owner_id: int, target_user_id: in
         else "📭 Hozircha guruhga tashlanmagan bo‘sh kartalar yo‘q."
     )
     await edit_or_answer(
-        target,
+        callback,
         txt,
         reply_markup=admin_pick_card_for_user_kb(
-            owner_id, target_user_id, cards, page, total, page_size=PAGE_SIZE
+            callback.from_user.id, callback_data.target_id, cards, callback_data.page, total, page_size=PAGE_SIZE
         ),
     )
 
 
-@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "give_pick")))
-async def cb_admin_give_card_pick(callback: CallbackQuery, callback_data: AdminCb) -> None:
-    await _render_admin_give_card_pick(callback, callback.from_user.id, callback_data.target_id, page=callback_data.page)
-
-
 @router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "give_prev")))
 async def cb_admin_give_card_preview(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    """Berishdan oldin karta rasmi va ma'lumotini ko'rsatadi."""
     card_id = int(callback_data.extra) if callback_data.extra.isdigit() else 0
     async with get_session() as session:
         card = await session.get(Card, card_id)
         u = await session.get(User, callback_data.target_id)
     if card is None or u is None:
-        await callback.answer("❌ Karta yoki foydalanuvchi topilmadi.", show_alert=True)
+        await callback.answer("Karta yoki foydalanuvchi topilmadi.", show_alert=True)
         return
-    owner_id = callback.from_user.id
+    o = callback.from_user.id
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Ha, berish",
-                    callback_data=AdminCb(
-                        owner_id=owner_id,
-                        section="users",
-                        action="give_exec",
-                        target_id=u.id,
-                        extra=str(card.id),
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Boshqa karta",
-                    callback_data=AdminCb(
-                        owner_id=owner_id,
-                        section="users",
-                        action="give_pick",
-                        target_id=u.id,
-                        page=max(1, callback_data.page),
-                    ).pack(),
-                )
-            ],
+            [InlineKeyboardButton(text="✅ Karta berish", callback_data=AdminCb(owner_id=o, section="users", action="give_exec", target_id=u.id, extra=str(card.id)).pack())],
+            [InlineKeyboardButton(text="⬅️ Boshqa karta", callback_data=AdminCb(owner_id=o, section="users", action="give_pick", target_id=u.id, page=1).pack())],
         ]
     )
     await show_card_with_prompt(
-        callback,
-        card,
-        f"👤 Qabul qiluvchi: <b>{esc(u.display_name)}</b>\n\nShu kartani foydalanuvchiga berasizmi?",
-        reply_markup=kb,
-        title="🎁 <b>KARTA BERISH TASDIG‘I</b>",
+        callback, card, f"👤 Kimga: <b>{esc(u.display_name)}</b>\nShu kartani berasizmi?", reply_markup=kb, title="➕ <b>KARTA BERISH</b>"
     )
 
 

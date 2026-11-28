@@ -24,8 +24,8 @@ from admin.v2 import (
 
 router = Router(name="admin_v2")
 router.include_router(hub.router)
-router.include_router(json_import.router)
 router.include_router(cards.router)
+router.include_router(json_import.router)
 router.include_router(groups_drop.router)
 router.include_router(rbac.router)
 router.include_router(channels.router)

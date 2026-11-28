@@ -54,11 +54,11 @@ def remember(owner_id: int, act: str, tid: int = 0, ext: str = "", p: int = 1) -
     _slot(owner_id)["last"] = {"act": act, "tid": int(tid), "ext": str(ext), "p": max(1, int(p))}
 
 
-def back_callback(owner_id: int, fallback: str | None = None) -> str:
+def back_callback(owner_id: int) -> str:
     """«Ro'yxatga qaytish» tugmasi uchun callback_data (oxirgi ro'yxat yoki kartalar menyusi)."""
     last = _slot(owner_id).get("last")
     if not last:
-        return fallback or AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()
+        return AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()
     return AdmV2Cb(
         owner_id=owner_id, sec="cards", act=last["act"], tid=last["tid"], ext=last["ext"], p=last["p"]
     ).pack()

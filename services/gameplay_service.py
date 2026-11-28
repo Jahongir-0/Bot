@@ -1293,6 +1293,9 @@ class GameplayService:
     # ------------------------------------------------------------------
     @staticmethod
     async def pick_daily_random_card(session: AsyncSession, user: User) -> Optional[Card]:
+        # Admin paneldagi asosiy tugma («Kunlik bonusda karta berish») o'chiq bo'lsa karta berilmaydi
+        if not await SettingsService.get_daily_card_enabled(session):
+            return None
         cfg = await SettingsService.get_value(session, "daily_random_card", DEFAULT_DAILY_RANDOM_CARD)
         if not isinstance(cfg, dict) or not cfg.get("enabled", True):
             return None

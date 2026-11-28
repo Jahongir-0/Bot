@@ -6,8 +6,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedPhoto,
@@ -29,21 +27,20 @@ from keyboards.market import (
 from models.user import User
 from services.auction_wishlist_service import AuctionWishlistService
 from services.card_level_service import CardLevelService
-from services.community_service import CommunityService
 from services.gameplay_service import GameplayService
 from services.search_service import SearchService
 from services.settings_service import SettingsService
 from utils.callback_data import NavCb, SearchCb
 from utils.constants import PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
-from utils.formatting import esc, event_tag, fmt_coins, format_card_with_owners, format_v25_card_caption, header
-from utils.tg_helpers import (
-    NotCommandFilter,
-    edit_or_answer,
-    get_bot_username,
-    is_super_admin,
-    safe_delete,
-    send_card_message,
+from utils.formatting import (
+    esc,
+    event_tag,
+    fmt_coins,
+    format_card_with_owners,
+    format_v25_card_caption,
+    header,
 )
+from utils.tg_helpers import NotCommandFilter, edit_or_answer, safe_delete, send_card_message
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
@@ -269,13 +266,10 @@ async def cb_search_results(
     state: FSMContext,
 ) -> None:
     query = callback_data.query
-    if callback_data.mode not in ("random", "rarity"):
+    if callback_data.mode not in ("random", "rarity", "unowned"):
         data = await state.get_data()
         saved_q = data.get("last_search_query", "")
-        if callback_data.mode == "unowned":
-            if query or (callback_data.page > 1 and saved_q):
-                query = query or saved_q
-        elif saved_q and (not query or saved_q.startswith(query)):
+        if saved_q and (not query or saved_q.startswith(query)):
             query = saved_q
     await _render_results(
         callback,
@@ -352,7 +346,7 @@ async def cb_search_catalog_inspect(
         w = await AuctionWishlistService.is_wishlisted(session, db_user.id, card.id)
         lvl_cfg = await CardLevelService.get_config(session)
         rcfg = await SettingsService.get_rarity_config(session)
-        owners_map = await SearchService.get_card_owners_map(session, [card.id])
+        owners = (await SearchService.get_card_owners_map(session, [card.id])).get(card.id, [])
 
     extra = (
         "🎯 Limitli event kartasi"
@@ -360,12 +354,11 @@ async def cb_search_catalog_inspect(
         else f"🔁 Guruhlarga tashlanishi: <b>{card.dropped_count}/{card.drop_limit}</b>"
     )
     rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-    max_lvl = int(lvl_cfg.get("max_level", 10))
     caption = format_card_with_owners(
         card,
-        owners_map.get(card.id, []),
-        max_level=max_lvl,
-        power_fn=lambda lv, r=card.rarity: CardLevelService.power(r, lv, lvl_cfg),
+        owners,
+        max_level=int(lvl_cfg.get("max_level", 10)),
+        power_fn=lambda lv: CardLevelService.power(card.rarity, lv, lvl_cfg),
         rank_price_coins=rank_val,
         status_line=f"📖 {extra}",
     )
@@ -385,158 +378,8 @@ async def cb_search_catalog_inspect(
 
 @router.inline_query()
 async def inline_card_search(inline_query: InlineQuery) -> None:
-    """Inline qidiruv: @bot <so'rov>, hamda adminlar uchun @bot admin <so'rov> / @bot user <so'rov>."""
+    """Inline qidiruv: @botusername <so'rov>. Natijada karta egalari va eng yuqori daraja ko'rinadi."""
     q = (inline_query.query or "").strip()
-    q_low = q.lower()
-    is_adm_cards_q = q_low == "admin" or q_low.startswith("admin ")
-    is_adm_users_q = q_low == "user" or q_low.startswith("user ")
-    bot_un = await get_bot_username(inline_query.bot)
-
-    if is_adm_cards_q or is_adm_users_q:
-        try:
-            async with get_session() as session:
-                is_adm, perms = await CommunityService.get_admin_permissions(
-                    session, inline_query.from_user.id, inline_query.from_user.username
-                )
-                is_adm_total = bool(is_adm or is_super_admin(inline_query.from_user))
-                if not is_adm_total:
-                    await inline_query.answer(
-                        [
-                            InlineQueryResultArticle(
-                                id="adm_denied",
-                                title="⛔ Bu inline rejim faqat adminlar uchun",
-                                description="Oddiy qidiruv uchun 'admin' yoki 'user' so'zisiz yozing.",
-                                input_message_content=InputTextMessageContent(
-                                    message_text="🔍 Oddiy qidiruv uchun faqat personaj yoki anime nomini yozing."
-                                ),
-                            )
-                        ],
-                        cache_time=5,
-                        is_personal=True,
-                    )
-                    return
-
-                if is_adm_users_q:
-                    if not (is_super_admin(inline_query.from_user) or "users" in perms):
-                        await inline_query.answer([], cache_time=5, is_personal=True)
-                        return
-                    sub_q = q[4:].strip()
-                    users = await SearchService.search_admin_users(session, sub_q, limit=20)
-                    u_results = []
-                    for u in users:
-                        ban_tag = "🚫 BAN" if u.is_banned else "✅ Faol"
-                        uname = f"@{u.username}" if u.username else "username yo‘q"
-                        body = (
-                            f"👤 <b>{esc(u.display_name)}</b> ({esc(uname)})\n"
-                            f"🆔 TG ID: <code>{u.telegram_id}</code> · DB ID: <code>{u.id}</code>\n"
-                            f"🪙 Coin: <b>{u.coins:,}</b> · 🎴 Karta: <b>{u.total_cards}</b> · {ban_tag}"
-                        )
-                        rm = None
-                        if bot_un:
-                            rm = InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [
-                                        InlineKeyboardButton(
-                                            text="👤 Admin panelda ochish",
-                                            url=f"https://t.me/{bot_un}?start=adm_user_{u.id}",
-                                        )
-                                    ]
-                                ]
-                            )
-                        u_results.append(
-                            InlineQueryResultArticle(
-                                id=f"adm_u_{u.id}",
-                                title=f"👤 {u.display_name} ({uname}) · {ban_tag}",
-                                description=f"ID: {u.telegram_id} · {u.coins:,} 🪙 · {u.total_cards} karta",
-                                input_message_content=InputTextMessageContent(message_text=body),
-                                reply_markup=rm,
-                            )
-                        )
-                    await inline_query.answer(u_results, cache_time=5, is_personal=True)
-                    return
-
-                # is_adm_cards_q
-                if not (is_super_admin(inline_query.from_user) or "cards" in perms):
-                    await inline_query.answer([], cache_time=5, is_personal=True)
-                    return
-                sub_q = q[5:].strip()
-                lvl_cfg = await CardLevelService.get_config(session)
-                rcfg = await SettingsService.get_rarity_config(session)
-                cards = await SearchService.search_admin_cards(session, sub_q, limit=20)
-                owners_map = await SearchService.get_card_owners_map(session, [c.id for c in cards])
-        except Exception as exc:
-            logger.debug("Admin inline query error: %s", exc)
-            await inline_query.answer([], cache_time=3, is_personal=True)
-            return
-
-        max_lvl = int(lvl_cfg.get("max_level", 10))
-        a_results = []
-        for card in cards:
-            meta = get_rarity_meta(card.rarity)
-            rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-            st_txt = f"📤 Drop: {card.dropped_count}/{card.drop_limit} · DB #{card.id}"
-            caption = format_card_with_owners(
-                card,
-                owners_map.get(card.id, []),
-                max_level=max_lvl,
-                power_fn=lambda lv, r=card.rarity: CardLevelService.power(r, lv, lvl_cfg),
-                rank_price_coins=rank_val,
-                status_line=st_txt,
-            )
-            rm = None
-            if bot_un:
-                rm = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="👁 Karta (Admin)",
-                                url=f"https://t.me/{bot_un}?start=adm_card_{card.id}",
-                            ),
-                            InlineKeyboardButton(
-                                text="✏️ Tahrirlash",
-                                url=f"https://t.me/{bot_un}?start=adm_cedit_{card.id}",
-                            ),
-                        ]
-                    ]
-                )
-            fid = (getattr(card, "image_file_id", None) or "").strip()
-            img = (card.image or "").strip()
-            if fid:
-                a_results.append(
-                    InlineQueryResultCachedPhoto(
-                        id=f"admc_{card.id}",
-                        photo_file_id=fid,
-                        title=f"🛡 {meta.emoji} {card.character_name}",
-                        description=f"{card.anime_name} · {card.card_code} · Drop {card.dropped_count}/{card.drop_limit}",
-                        caption=caption,
-                        reply_markup=rm,
-                    )
-                )
-            elif img.startswith("http://") or img.startswith("https://"):
-                a_results.append(
-                    InlineQueryResultPhoto(
-                        id=f"admc_{card.id}",
-                        photo_url=img,
-                        thumbnail_url=img,
-                        title=f"🛡 {meta.emoji} {card.character_name}",
-                        description=f"{card.anime_name} · {card.card_code} · Drop {card.dropped_count}/{card.drop_limit}",
-                        caption=caption,
-                        reply_markup=rm,
-                    )
-                )
-            else:
-                a_results.append(
-                    InlineQueryResultArticle(
-                        id=f"admc_{card.id}",
-                        title=f"🛡 {meta.emoji} {card.character_name} ({card.card_code})",
-                        description=f"{card.anime_name} · Drop {card.dropped_count}/{card.drop_limit}",
-                        input_message_content=InputTextMessageContent(message_text=caption),
-                        reply_markup=rm,
-                    )
-                )
-        await inline_query.answer(a_results, cache_time=5, is_personal=True)
-        return
-
     try:
         async with get_session() as session:
             lvl_cfg = await CardLevelService.get_config(session)
@@ -554,7 +397,6 @@ async def inline_card_search(inline_query: InlineQuery) -> None:
         await inline_query.answer([], cache_time=5)
         return
 
-    max_lvl = int(lvl_cfg.get("max_level", 10))
     results = []
     guide_text = (
         "🔍 Qanday qidiriladi?\n"
@@ -579,8 +421,8 @@ async def inline_card_search(inline_query: InlineQuery) -> None:
         caption = format_card_with_owners(
             card,
             owners,
-            max_level=max_lvl,
-            power_fn=lambda lv, r=card.rarity: CardLevelService.power(r, lv, lvl_cfg),
+            max_level=int(lvl_cfg.get("max_level", 10)),
+            power_fn=lambda lv, c=card: CardLevelService.power(c.rarity, lv, lvl_cfg),
             rank_price_coins=rank_val,
             status_line="",
         )
@@ -625,4 +467,3 @@ async def inline_card_search(inline_query: InlineQuery) -> None:
             )
 
     await inline_query.answer(results, cache_time=10, is_personal=False)
-

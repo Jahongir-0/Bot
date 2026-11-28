@@ -31,7 +31,7 @@ from services.settings_service import SettingsService
 from utils.callback_data import AdmV2Cb
 from utils.constants import MEDIA_TYPES, get_rarity_meta, list_rarities, sync_runtime_ranks
 from utils.formatting import esc
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, safe_delete
+from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
 logger = logging.getLogger(__name__)
 
@@ -129,28 +129,12 @@ async def _render_status(message: Message, state: FSMContext, owner_id: int) -> 
     await state.update_data(q_status_id=sent.message_id)
 
 
-async def _clear_q_trash(bot, chat_id: int, state: FSMContext, *extra_ids: int) -> None:
-    data = await state.get_data()
-    ids = list(data.get("q_trash_ids") or [])
-    for k in ("q_prompt_id", "q_ask_msg_id"):
-        if data.get(k):
-            ids.append(int(data[k]))
-    for mid in extra_ids:
-        if mid:
-            ids.append(int(mid))
-    for mid in dict.fromkeys(ids):
-        await safe_delete(bot, chat_id, mid)
-    await state.update_data(q_trash_ids=[], q_prompt_id=None, q_ask_msg_id=None)
-
-
 # ---------------------------------------------------------------- start / setup
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "start")))
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "new")))
 async def cb_start(callback: CallbackQuery, state: FSMContext, admin_perms: Optional[set] = None) -> None:
     if not await _perm_ok(callback, admin_perms):
         return
-    if callback.message:
-        await _clear_q_trash(callback.bot, callback.message.chat.id, state)
     await state.clear()
     async with get_session() as session:
         sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
@@ -172,17 +156,7 @@ async def cb_type(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMCon
         await callback.answer("Tur topilmadi", show_alert=True)
         return
     await state.set_state(QuickAddStates.media_name)
-    await state.update_data(
-        q_type=mtype,
-        q_added=0,
-        q_dups=0,
-        q_recent=[],
-        q_queue=[],
-        q_status_id=None,
-        q_trash_ids=[],
-        q_prompt_id=callback.message.message_id if callback.message else None,
-        q_ask_msg_id=None,
-    )
+    await state.update_data(q_type=mtype, q_added=0, q_dups=0, q_recent=[], q_queue=[], q_status_id=None)
     await edit_or_answer(
         callback,
         f"⚡ 2/3 — <b>{esc(mtype)}</b> nomini yozing.\nMasalan: <i>Naruto</i>, <i>Solo Leveling</i>\n\n<i>Bekor qilish: /cancel</i>",
@@ -194,16 +168,12 @@ async def cb_type(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMCon
 async def msg_media_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if not (1 <= len(name) <= 120):
-        w = await message.answer("⚠️ Nom 1 dan 120 gacha belgi bo‘lsin.")
-        data = await state.get_data()
-        await state.update_data(q_trash_ids=(list(data.get("q_trash_ids") or []) + [message.message_id, w.message_id])[-20:])
+        await message.answer("⚠️ Nom 1 dan 120 gacha belgi bo‘lsin.")
         return
-    await _clear_q_trash(message.bot, message.chat.id, state, message.message_id)
     async with get_session() as session:
         sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
     await state.update_data(q_media=name)
-    sent = await message.answer("⚡ 3/3 — Bu rasmlar qaysi rank bo‘lsin?", reply_markup=_rank_kb(message.from_user.id))
-    await state.update_data(q_prompt_id=sent.message_id)
+    await message.answer("⚡ 3/3 — Bu rasmlar qaysi rank bo‘lsin?", reply_markup=_rank_kb(message.from_user.id))
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "rank_pick")))
@@ -225,7 +195,7 @@ async def cb_rank(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMCon
     if rarity is None or not data.get("q_media"):
         await callback.answer("Avval asar nomini kiriting (⚡ Tezkor qo‘shishni qaytadan boshlang).", show_alert=True)
         return
-    await state.update_data(q_rank=rarity, q_status_id=callback.message.message_id, q_prompt_id=None)
+    await state.update_data(q_rank=rarity, q_status_id=callback.message.message_id)
     if await state.get_state() != QuickAddStates.name.state:
         await state.set_state(QuickAddStates.photos)
     data = await state.get_data()
@@ -290,12 +260,11 @@ async def _process_queue(message: Message, state: FSMContext, admin_tg_id: int) 
                 await state.set_state(QuickAddStates.name)
                 waiting = len(queue)
                 extra = f" (navbatda yana {waiting - 1} ta rasm bor)" if waiting > 1 else ""
-                ask_msg = await message.answer_photo(
+                await message.answer_photo(
                     file_id,
                     caption=f"❓ <b>Bu kim?</b> Personaj ismini yozing{extra}.",
                     reply_markup=_skip_kb(admin_tg_id),
                 )
-                await state.update_data(q_ask_msg_id=ask_msg.message_id)
             return
         result = await _add_one(data, file_id, cname, admin_tg_id)
         recent = list(data.get("q_recent", []))
@@ -319,8 +288,7 @@ async def msg_photo(message: Message, state: FSMContext) -> None:
     async with _lock(message.from_user.id):
         data = await state.get_data()
         if not data.get("q_media") or not data.get("q_rank"):
-            w = await message.answer("⚠️ Avval rankni tanlang (yuqoridagi tugmalar).")
-            await state.update_data(q_trash_ids=(list(data.get("q_trash_ids") or []) + [w.message_id])[-20:])
+            await message.answer("⚠️ Avval rankni tanlang (yuqoridagi tugmalar).")
             return
         caption = (message.caption or "").strip()[:128] or None
         queue = list(data.get("q_queue", []))
@@ -331,22 +299,17 @@ async def msg_photo(message: Message, state: FSMContext) -> None:
 
 @router.message(QuickAddStates.photos, F.document)
 @router.message(QuickAddStates.name, F.document)
-async def msg_document_hint(message: Message, state: FSMContext) -> None:
-    w = await message.answer("⚠️ Rasmni <b>fayl</b> sifatida emas, oddiy <b>rasm</b> sifatida yuboring (siqilgan holda).")
-    data = await state.get_data()
-    await state.update_data(q_trash_ids=(list(data.get("q_trash_ids") or []) + [message.message_id, w.message_id])[-20:])
+async def msg_document_hint(message: Message) -> None:
+    await message.answer("⚠️ Rasmni <b>fayl</b> sifatida emas, oddiy <b>rasm</b> sifatida yuboring (siqilgan holda).")
 
 
 @router.message(QuickAddStates.name, F.text, NotCommandFilter())
 async def msg_name(message: Message, state: FSMContext) -> None:
     character = (message.text or "").strip()
     if not (1 <= len(character) <= 128):
-        w = await message.answer("⚠️ Ism 1 dan 128 gacha belgi bo‘lsin.")
-        data = await state.get_data()
-        await state.update_data(q_trash_ids=(list(data.get("q_trash_ids") or []) + [message.message_id, w.message_id])[-20:])
+        await message.answer("⚠️ Ism 1 dan 128 gacha belgi bo‘lsin.")
         return
     async with _lock(message.from_user.id):
-        await _clear_q_trash(message.bot, message.chat.id, state, message.message_id)
         data = await state.get_data()
         queue = list(data.get("q_queue", []))
         if not queue:
@@ -370,8 +333,10 @@ async def cb_skip(callback: CallbackQuery, state: FSMContext, admin_perms: Optio
         await state.update_data(q_queue=queue)
         await state.set_state(QuickAddStates.photos)
         await callback.answer("O‘tkazib yuborildi")
-        if callback.message:
-            await _clear_q_trash(callback.bot, callback.message.chat.id, state, callback.message.message_id)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await _process_queue(callback.message, state, callback.from_user.id)
 
 
@@ -379,14 +344,12 @@ async def cb_skip(callback: CallbackQuery, state: FSMContext, admin_perms: Optio
 async def cb_done(callback: CallbackQuery, state: FSMContext, admin_perms: Optional[set] = None) -> None:
     if not await _perm_ok(callback, admin_perms):
         return
-    if callback.message:
-        await _clear_q_trash(callback.bot, callback.message.chat.id, state)
     data = await state.get_data()
     await state.clear()
     owner_id = callback.from_user.id
     b = InlineKeyboardBuilder()
     b.row(_btn(owner_id, "⚡ Yana qo‘shish", "start"))
-    b.row(InlineKeyboardButton(text="🎴 Kartalar markazi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()))
+    b.row(InlineKeyboardButton(text="🎴 Kartalar bo‘limi", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()))
     await edit_or_answer(
         callback,
         "🏁 <b>TUGADI</b>\n\n"

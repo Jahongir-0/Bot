@@ -73,11 +73,6 @@ class AdminStates(StatesGroup):
     edit_drop_rule_field = State()
     edit_welcome_text = State()
     edit_vip_price = State()
-    edit_vip_field = State()
-    add_vip_name = State()
-    add_vip_coins = State()
-    add_vip_stars = State()
-    add_vip_days = State()
     edit_pack_limit = State()
 
     # Stars

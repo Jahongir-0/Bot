@@ -117,7 +117,7 @@ class CoinGiftService:
                     amount,
                     TX_SENT,
                     f"Coin yuborildi → {recipient.display_name}"[:255],
-                    meta={"to_user_id": to_user_id, "fee": fee, "commission": fee},
+                    meta={"to_user_id": to_user_id, "fee": fee},
                 )
             except InsufficientCoinsError:
                 return False, "Coinlaringiz yetarli emas.", 0, 0
@@ -127,7 +127,7 @@ class CoinGiftService:
                 received,
                 TX_RECEIVED,
                 f"Coin olindi ← {sender.display_name}"[:255],
-                meta={"from_user_id": from_user_id, "fee": fee, "commission": fee},
+                meta={"from_user_id": from_user_id, "fee": fee},
             )
             await session.flush()
             return True, "OK", received, int(new_balance)

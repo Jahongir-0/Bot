@@ -17,7 +17,6 @@ from handlers.market import router as market_router
 from handlers.notifications import router as notifications_router
 from handlers.offer import router as offer_router
 from handlers.pack import router as pack_router
-from handlers.page_jump import router as page_jump_router
 from handlers.premium_emoji_admin import router as premium_emoji_router
 from handlers.profile import router as profile_router
 from handlers.quests import router as quests_router
@@ -64,4 +63,3 @@ def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(notifications_router)
     dp.include_router(support_router)
     dp.include_router(trade_router)
-    dp.include_router(page_jump_router)

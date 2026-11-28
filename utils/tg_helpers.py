@@ -298,7 +298,11 @@ async def append_private_ad(text: str, bot: Optional[Bot], db_user=None) -> str:
 
 
 async def show_card_with_prompt(target, card, prompt: str, reply_markup=None, title: str = "") -> Optional[Message]:
-    """Admin oqimlarida karta tanlangach: AVVAL karta rasmi va ma'lumotlari, KEYIN so'rov matni."""
+    """Admin oqimlarida karta tanlangach: AVVAL karta rasmi va ma'lumotlari, KEYIN so'rov matni.
+
+    Eski (ro'yxat) xabari o'chiriladi, o'rniga karta rasmi + to'liq ma'lumot + so'rov (caption) yuboriladi.
+    Rasm bo'lmasa oddiy matn bo'lib chiqadi.
+    """
     from utils.formatting import format_card_block
 
     msg = target.message if isinstance(target, CallbackQuery) else target
@@ -317,4 +321,3 @@ async def show_card_with_prompt(target, card, prompt: str, reply_markup=None, ti
     except Exception as exc:
         logger.debug("show_card_with_prompt rasm yuborilmadi: %s", exc)
         return await bot.send_message(chat_id, caption, reply_markup=reply_markup)
-

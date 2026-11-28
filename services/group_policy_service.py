@@ -7,13 +7,12 @@ from typing import List, Optional
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
-from sqlalchemy import delete, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from models.base import utcnow
-from models.schedule import ActiveDrop, DropSchedule
-from models.group import Group, GroupMember
+from models.group import Group
 from models.v2_features import AdminRole
 from services.settings_service import SettingsService
 from utils.formatting import esc, fmt_coins
@@ -255,72 +254,3 @@ class GroupPolicyService:
             except Exception as exc:
                 logger.info("admin %s ga guruh xabari yuborilmadi: %s", aid, exc)
             await asyncio.sleep(0.05)
-
-    @staticmethod
-    async def migrate_group_chat_id(session: AsyncSession, old_cid: int, new_cid: int) -> bool:
-        """Guruh superguruhga ko‘chganda telegram_chat_id ni xavfsiz yangilaydi.
-
-        Agar yangi new_cid allaqachon alohida Group qatorida mavjud bo‘lsa,
-        UniqueViolationError chiqmasligi uchun bog‘liq yozuvlarni ko‘chirib, eski qatorni o‘chiradi.
-        """
-        old_cid = int(old_cid)
-        new_cid = int(new_cid)
-        if old_cid == new_cid:
-            return False
-
-        async with session.begin_nested():
-            old_group = (
-                await session.execute(select(Group).where(Group.telegram_chat_id == old_cid))
-            ).scalar_one_or_none()
-            if old_group is None:
-                return False
-
-            new_group = (
-                await session.execute(
-                    select(Group).where(Group.telegram_chat_id == new_cid, Group.id != old_group.id)
-                )
-            ).scalar_one_or_none()
-
-            if new_group is None:
-                old_group.telegram_chat_id = new_cid
-                await session.flush()
-                return True
-
-            await session.execute(
-                update(DropSchedule).where(DropSchedule.group_id == old_group.id).values(group_id=new_group.id)
-            )
-            await session.execute(
-                update(ActiveDrop).where(ActiveDrop.group_id == old_group.id).values(group_id=new_group.id)
-            )
-            existing_uids = set(
-                (
-                    await session.execute(
-                        select(GroupMember.user_id).where(GroupMember.group_id == new_group.id)
-                    )
-                ).scalars().all()
-            )
-            if existing_uids:
-                await session.execute(
-                    delete(GroupMember).where(
-                        GroupMember.group_id == old_group.id,
-                        GroupMember.user_id.in_(existing_uids),
-                    )
-                )
-            await session.execute(
-                update(GroupMember).where(GroupMember.group_id == old_group.id).values(group_id=new_group.id)
-            )
-
-            if old_group.added_by_user_id and not new_group.added_by_user_id:
-                new_group.added_by_user_id = old_group.added_by_user_id
-            if old_group.add_reward_claimed and not new_group.add_reward_claimed:
-                new_group.add_reward_claimed = True
-            if old_group.member_count and int(new_group.member_count or 0) < int(old_group.member_count):
-                new_group.member_count = old_group.member_count
-
-            old_group.is_active = False
-            old_group.drop_enabled = False
-            old_group.bot_status = "migrated"
-            old_group.status_reason = f"Migrated to {new_cid}"
-            await session.flush()
-            return True
-

@@ -30,61 +30,11 @@ def _slugify(value: str, prefix: str) -> str:
     return f"{prefix}_{digest}"
 
 
-STATIC_BIO_FIELDS = (
-    "description",
-    "birthday",
-    "age",
-    "height",
-    "weight",
-    "personality",
-    "history",
-    "abilities",
-)
-
-
 class CardService:
     @staticmethod
     async def generate_next_card_code(session: AsyncSession) -> str:
         max_id = (await session.execute(select(func.max(Card.id)))).scalar_one_or_none() or 0
         return f"CRD-{max_id + 1:04d}"
-
-    @staticmethod
-    async def get_canonical_character_card(
-        session: AsyncSession, anime_name: str, character_name: str
-    ) -> Optional[Card]:
-        an = normalize_name(anime_name).lower()
-        ch = normalize_name(character_name).lower()
-        if not an or not ch:
-            return None
-        return (
-            await session.execute(
-                select(Card)
-                .where(
-                    func.lower(func.trim(Card.anime_name)) == an,
-                    func.lower(func.trim(Card.character_name)) == ch,
-                )
-                .order_by(Card.is_deleted.asc(), Card.id.asc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-
-    @staticmethod
-    async def get_effective_about(session: AsyncSession, card: Card) -> Tuple[dict, List[str]]:
-        """Personaj bio maydonlari canonical nusxada bitta saqlanadi; o'qishda birlashtiriladi."""
-        own_meta = dict(getattr(card, "metadata_json", None) or {})
-        own_aliases = [str(a) for a in (getattr(card, "aliases", None) or []) if str(a).strip()]
-        canon = await CardService.get_canonical_character_card(session, card.anime_name, card.character_name)
-        if canon is None or canon.id == card.id:
-            return own_meta, own_aliases
-
-        canon_meta = dict(getattr(canon, "metadata_json", None) or {})
-        merged_meta = dict(canon_meta)
-        merged_meta.update({k: v for k, v in own_meta.items() if v})
-        if own_aliases:
-            merged_aliases = own_aliases
-        else:
-            merged_aliases = [str(a) for a in (getattr(canon, "aliases", None) or []) if str(a).strip()]
-        return merged_meta, merged_aliases
 
     @staticmethod
     async def create_card(
@@ -120,31 +70,19 @@ class CardService:
             anime_name, anime_id = existing_anime[0], existing_anime[1]
 
         character_id = _slugify(character_name, "chr")
-        canon_char = await CardService.get_canonical_character_card(session, anime_name, character_name)
-        incoming_meta = dict(metadata_json or {})
-        clean_aliases: List[str] = []
-        seen_alias = set()
-        for a in (aliases or []):
-            s = str(a).strip()
-            if s and s.casefold() not in seen_alias:
-                seen_alias.add(s.casefold())
-                clean_aliases.append(s)
-
-        if canon_char is not None:
-            character_name, character_id = canon_char.character_name, canon_char.character_id
-            canon_meta = dict(canon_char.metadata_json or {})
-            canon_changed = False
-            for k in STATIC_BIO_FIELDS:
-                if incoming_meta.get(k) and not canon_meta.get(k):
-                    canon_meta[k] = incoming_meta[k]
-                    canon_changed = True
-            if canon_changed:
-                canon_char.metadata_json = canon_meta
-
-            # Takroriy bio matnlarini keyingi nusxalarda qayta saqlamaymiz (bazada joy tejaladi)
-            for k in STATIC_BIO_FIELDS:
-                if canon_meta.get(k) or incoming_meta.get(k):
-                    incoming_meta.pop(k, None)
+        existing_char = (
+            await session.execute(
+                select(Card.character_name, Card.character_id)
+                .where(
+                    func.lower(func.trim(Card.anime_name)) == anime_name.lower(),
+                    func.lower(func.trim(Card.character_name)) == character_name.lower(),
+                )
+                .order_by(Card.id.asc())
+                .limit(1)
+            )
+        ).first()
+        if existing_char is not None:
+            character_name, character_id = existing_char[0], existing_char[1]
 
         card = Card(
             card_code=code,
@@ -162,9 +100,9 @@ class CardService:
             is_available=True,
             is_deleted=False,
             media_type=media_type or "Anime",
-            aliases=clean_aliases,
+            aliases=aliases or [],
             card_state="AVAILABLE",
-            metadata_json=incoming_meta,
+            metadata_json=metadata_json or {},
             battle_stats=battle_stats or {},
         )
         session.add(card)
@@ -251,21 +189,9 @@ class CardService:
             max(0.01, sum(_weight(c) for c in grp) / len(grp))
             for grp in anime_groups
         ]
-        chosen_anime = random.choices(anime_groups, weights=anime_weights, k=1)[0]
-
-        by_char = {}
-        for card in chosen_anime:
-            ckey = card.character_id or (card.character_name or "").strip().casefold()
-            by_char.setdefault(ckey, []).append(card)
-        char_groups = list(by_char.values())
-        random.shuffle(char_groups)
-        char_weights = [
-            max(0.01, sum(_weight(c) for c in grp) / len(grp))
-            for grp in char_groups
-        ]
-        chosen_char = random.choices(char_groups, weights=char_weights, k=1)[0]
-        random.shuffle(chosen_char)
-        return random.choices(chosen_char, weights=[_weight(c) for c in chosen_char], k=1)[0]
+        chosen_group = random.choices(anime_groups, weights=anime_weights, k=1)[0]
+        random.shuffle(chosen_group)
+        return random.choices(chosen_group, weights=[_weight(c) for c in chosen_group], k=1)[0]
 
     @staticmethod
     async def get_card_stats(session: AsyncSession, card_id: int) -> Tuple[int, int]:

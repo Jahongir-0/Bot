@@ -184,12 +184,3 @@ class SuggestCb(CallbackData, prefix="sug"):
     p: int = 1
     ext: str = ""
 
-
-class PageJumpCb(CallbackData, prefix="pj"):
-    owner_id: int
-    key: str
-    total: int
-    tid: int = 0
-    ext: str = ""
-
-

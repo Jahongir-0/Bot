@@ -113,30 +113,23 @@ async def cb_auction_mine(callback: CallbackQuery, callback_data: AucCb, db_user
     await callback.answer()
 
 
-async def _render_auction_new_pick(target, owner_id: int, db_user: User, page: int = 1) -> None:
-    page = max(1, page)
+@router.callback_query(AucCb.filter(F.act == "new"))
+async def cb_auction_new(callback: CallbackQuery, callback_data: AucCb, db_user: User) -> None:
+    page = max(1, callback_data.p)
     async with get_session() as session:
         rows, total = await AuctionWishlistService.list_user_sellable_cards(session, db_user.id, page=page, page_size=8)
     if not rows:
-        if isinstance(target, CallbackQuery):
-            await target.answer("📭 Auksionga qo‘yish uchun bo‘sh kartangiz yo‘q (qulflanganlar chiqmaydi).", show_alert=True)
-        else:
-            await _show_auctions(target, owner_id, page=1)
+        await callback.answer("📭 Auksionga qo‘yish uchun bo‘sh kartangiz yo‘q (qulflanganlar chiqmaydi).", show_alert=True)
         return
     await edit_or_answer(
-        target,
+        callback,
         (
             f"{header('🔨 <b>AUKSIONGA KARTA QO‘YISH</b>')}\n"
             f"📦 Bo‘sh kartalar: <b>{total}</b> ta\n\n"
             "👇 Qaysi kartangizni auksionga qo‘ymoqchisiz?"
         ),
-        reply_markup=user_auction_pick_card_kb(owner_id, rows, page=page, total=total),
+        reply_markup=user_auction_pick_card_kb(callback.from_user.id, rows, page=page, total=total),
     )
-
-
-@router.callback_query(AucCb.filter(F.act == "new"))
-async def cb_auction_new(callback: CallbackQuery, callback_data: AucCb, db_user: User) -> None:
-    await _render_auction_new_pick(callback, callback.from_user.id, db_user, page=max(1, callback_data.p))
     await callback.answer()
 
 

@@ -116,10 +116,14 @@ async def cb_offer_coin_ask(
     )
 
 
-async def _render_offer_card_pick(
-    target, owner_id: int, db_user: User, target_uc_id: int, page: int
+@router.callback_query(OfferCb.filter(F.action == "card_pick"))
+async def cb_offer_card_pick(
+    callback: CallbackQuery,
+    callback_data: OfferCb,
+    db_user: User,
 ) -> None:
-    page = max(1, page)
+    target_uc_id = int(callback_data.offer_id)
+    page = max(1, int(callback_data.page))
     async with get_session() as session:
         cond = [UserCard.user_id == db_user.id, UserCard.is_locked.is_(False)]
         total = int((await session.execute(select(func.count(UserCard.id)).where(*cond))).scalar_one() or 0)
@@ -135,35 +139,21 @@ async def _render_offer_card_pick(
         ).all()
 
     if not rows:
-        if isinstance(target, CallbackQuery):
-            await target.answer("📭 Taklif qilish uchun bo‘sh kartalaringiz yo‘q.", show_alert=True)
-        else:
-            await edit_or_answer(target, "📭 Taklif qilish uchun bo‘sh kartalaringiz yo‘q.", reply_markup=back_home_kb(owner_id, "market"))
+        await callback.answer("📭 Taklif qilish uchun bo‘sh kartalaringiz yo‘q.", show_alert=True)
         return
 
     await edit_or_answer(
-        target,
+        callback,
         f"🎴 <b>KARTA TAKLIF QILISH</b>\n\n"
         f"Almashish uchun bermoqchi bo‘lgan kartangizni tanlang ({total} ta bo‘sh karta):",
         reply_markup=offer_card_pick_kb(
-            owner_id,
+            callback.from_user.id,
             target_uc_id,
             [(r[0], r[1]) for r in rows],
             page=page,
             total=total,
             page_size=PAGE_SIZE,
         ),
-    )
-
-
-@router.callback_query(OfferCb.filter(F.action == "card_pick"))
-async def cb_offer_card_pick(
-    callback: CallbackQuery,
-    callback_data: OfferCb,
-    db_user: User,
-) -> None:
-    await _render_offer_card_pick(
-        callback, callback.from_user.id, db_user, int(callback_data.offer_id), max(1, int(callback_data.page))
     )
 
 

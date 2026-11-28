@@ -22,7 +22,7 @@ from services.auction_wishlist_service import AuctionWishlistService
 from utils.callback_data import AdmV2Cb
 from utils.constants import PAGE_SIZE
 from utils.formatting import esc
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, show_card_with_prompt
+from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
 from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
@@ -52,19 +52,6 @@ async def _show_auctions_home(target, owner_id: int) -> None:
         lines.append("📭 Hozircha faol auksionlar yo‘q.")
     b.row(_back_home_btn(owner_id))
     await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
-
-
-async def _render_auction_pick_card(target, owner_id: int, page: int = 1) -> None:
-    page = max(1, page)
-    async with get_session() as session:
-        cards, total = await AdminService.get_undropped_cards_paginated(session, page=page, page_size=PAGE_SIZE)
-    back_cb = AdmV2Cb(owner_id=owner_id, sec="auction", act="v").pack()
-    txt = f"🔨 <b>AUKSION UCHUN KARTA TANLANG</b>\nHali tashlanmagan kartalar ({total} ta):" if cards else "📭 Auksion uchun bo‘sh kartalar yo‘q."
-    await edit_or_answer(
-        target,
-        txt,
-        reply_markup=admin_undropped_cards_kb(owner_id, cards, "auction", "new_card", page, total, back_cb, page_size=PAGE_SIZE),
-    )
 
 
 async def _show_auction_detail(target, owner_id: int, auction_id: int) -> None:
@@ -195,21 +182,30 @@ async def cb_v2_auction(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
         return
 
     if act == "pick_card":
-        await _render_auction_pick_card(callback, owner_id, page=max(1, callback_data.p))
+        page = max(1, callback_data.p)
+        async with get_session() as session:
+            cards, total = await AdminService.get_undropped_cards_paginated(session, page=page, page_size=PAGE_SIZE)
+        back_cb = AdmV2Cb(owner_id=owner_id, sec="auction", act="v").pack()
+        txt = f"🔨 <b>AUKSION UCHUN KARTA TANLANG</b>\nHali tashlanmagan kartalar ({total} ta):" if cards else "📭 Auksion uchun bo‘sh kartalar yo‘q."
+        await edit_or_answer(
+            callback,
+            txt,
+            reply_markup=admin_undropped_cards_kb(owner_id, cards, "auction", "new_card", page, total, back_cb, page_size=PAGE_SIZE),
+        )
         return
 
     if act == "new_card":
         async with get_session() as session:
-            card = await session.get(Card, callback_data.tid)
-        if card is None:
+            auc_card = await session.get(Card, callback_data.tid)
+        if auc_card is None or auc_card.is_deleted:
             await callback.answer("Karta topilmadi.", show_alert=True)
             return
         await state.set_state(AdminV2States.waiting_auc_price)
-        await state.update_data(owner_tg_id=owner_id, auc_card_id=card.id)
+        await state.update_data(owner_tg_id=owner_id, auc_card_id=callback_data.tid)
         await show_card_with_prompt(
             callback,
-            card,
-            "Eng kam (boshlang‘ich) coin narxini yozing (masalan: <code>2000</code>):",
+            auc_card,
+            "Eng kam (boshlang‘ich) coin narxini yozing (masalan: <code>2000</code>):\n<i>Bekor: /cancel</i>",
             reply_markup=_cancel_kb(owner_id, "auction", "v"),
             title="🔨 <b>YANGI AUKSION (1/3)</b>",
         )

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import Bot
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.base import utcnow
@@ -29,30 +29,11 @@ logger = logging.getLogger(__name__)
 
 PERIODS = [("d1", "24 soat"), ("d7", "7 kun"), ("d30", "30 kun"), ("all", "Hammasi")]
 
-COMMISSION_TYPES = (
-    "market_sell",
-    "offer_accepted_sale",
-    "paid_transfer_sell",
-    "auction_sale",
-    "coin_gift_sent",
-)
+COMMISSION_TYPES = ("market_sell", "offer_accepted_sale", "paid_transfer_sell", "auction_sale")
 
 TX_CATEGORIES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "all": ("Hammasi", ()),
-    "market": (
-        "🛒 Bozor/Taklif/Sovg‘a",
-        (
-            "market_buy",
-            "market_sell",
-            "offer_accepted_sale",
-            "offer_escrow",
-            "offer_refund",
-            "paid_transfer_buy",
-            "paid_transfer_sell",
-            "coin_gift_sent",
-            "coin_gift_received",
-        ),
-    ),
+    "market": ("🛒 Bozor/Taklif/Sovg‘a", ("market_buy", "market_sell", "offer_accepted_sale", "offer_escrow", "offer_refund", "paid_transfer_buy", "paid_transfer_sell")),
     "auction": ("🔨 Auksion", ("auction_win", "auction_sale", "auction_bid", "auction_refund")),
     "store": ("🏛 Do‘kon/Event", ("bot_store_buy", "bot_market_sell", "event_buy", "card_migration_refund")),
     "reward": ("🎁 Mukofotlar", ("daily_bonus", "quest_reward", "group_add_reward", "referral_bonus", "referral_welcome", "card_drop_reward")),
@@ -69,8 +50,6 @@ TX_LABELS = {
     "offer_refund": "↩️ Taklif qaytarildi",
     "paid_transfer_buy": "🎁 Pullik sovg‘ani oldi",
     "paid_transfer_sell": "🎁 Pullik sovg‘a berdi",
-    "coin_gift_sent": "🪙 Coin sovg‘a yubordi",
-    "coin_gift_received": "🪙 Coin sovg‘a oldi",
     "auction_win": "🔨 Auksionda yutdi",
     "auction_sale": "🔨 Auksionda sotdi",
     "bot_store_buy": "🏛 Bot do‘konidan oldi",
@@ -100,23 +79,9 @@ def period_label(period: str) -> str:
 
 def _known_types() -> List[str]:
     out: List[str] = []
-    for _key, (_t, types) in TX_CATEGORIES.items():
+    for key, (_t, types) in TX_CATEGORIES.items():
         out.extend(types)
     return out
-
-
-def _extract_commission(meta: Any) -> int:
-    if not isinstance(meta, dict):
-        return 0
-    for k in ("commission", "fee", "fee_coins"):
-        if meta.get(k) is not None:
-            try:
-                val = int(meta.get(k) or 0)
-                if val > 0:
-                    return val
-            except (TypeError, ValueError):
-                pass
-    return 0
 
 
 def _tx_conds(since: Optional[datetime], category: str = "all", user_id: Optional[int] = None) -> list:
@@ -221,7 +186,10 @@ class HistoryService:
         by_type: Dict[str, int] = {}
         total = 0
         for tx_type, meta in rows:
-            fee = _extract_commission(meta)
+            try:
+                fee = int((meta or {}).get("commission") or 0)
+            except (TypeError, ValueError):
+                fee = 0
             if fee > 0:
                 by_type[tx_type] = by_type.get(tx_type, 0) + fee
                 total += fee
@@ -257,9 +225,12 @@ class HistoryService:
         label = TX_LABELS.get(tx.tx_type, tx.tx_type)
         who = f"{esc(user.display_name)} · " if (show_user and user is not None) else ""
         fee = ""
-        f = _extract_commission(tx.meta)
-        if f > 0:
-            fee = f" (komissiya {f:,})"
+        try:
+            f = int((tx.meta or {}).get("commission") or 0)
+            if f > 0:
+                fee = f" (komissiya {f:,})"
+        except (TypeError, ValueError):
+            pass
         desc = esc((tx.description or "")[:38])
         return (
             f"<code>{fmt_tashkent(tx.created_at, '%d.%m %H:%M')}</code> {who}{sign} <b>{abs(int(tx.amount)):,}</b> 🪙\n"
@@ -275,11 +246,8 @@ class HistoryService:
         total = int((await session.execute(select(func.count(CardListing.id)).where(*conds))).scalar_one() or 0)
         listings = (
             await session.execute(
-                select(CardListing)
-                .where(*conds)
-                .order_by(CardListing.sold_at.desc().nullslast(), CardListing.id.desc())
-                .offset((max(1, page) - 1) * per_page)
-                .limit(per_page)
+                select(CardListing).where(*conds).order_by(CardListing.sold_at.desc().nullslast(), CardListing.id.desc())
+                .offset((max(1, page) - 1) * per_page).limit(per_page)
             )
         ).scalars().all()
         if not listings:
@@ -298,7 +266,10 @@ class HistoryService:
         ).all()
         fees: Dict[str, int] = {}
         for ref, meta in fee_rows:
-            fees[str(ref)] = _extract_commission(meta)
+            try:
+                fees[str(ref)] = int((meta or {}).get("commission") or 0)
+            except (TypeError, ValueError):
+                fees[str(ref)] = 0
         out = []
         for l in listings:
             seller = users.get(l.seller_id)
@@ -400,7 +371,12 @@ class HistoryService:
                 select(CoinTransaction.meta).where(CoinTransaction.user_id == user.id, CoinTransaction.tx_type.in_(COMMISSION_TYPES))
             )
         ).scalars().all()
-        fee_paid = sum(_extract_commission(meta) for meta in fee_rows)
+        fee_paid = 0
+        for meta in fee_rows:
+            try:
+                fee_paid += int((meta or {}).get("commission") or 0)
+            except (TypeError, ValueError):
+                pass
         groups_added = int((await session.execute(select(func.count(Group.id)).where(Group.added_by_user_id == user.id))).scalar_one() or 0)
         tickets = int((await session.execute(select(func.count(SupportTicket.id)).where(SupportTicket.user_id == user.id))).scalar_one() or 0)
         return {
@@ -460,6 +436,7 @@ class AdminFeedService:
             if cfg.get("skip_rewards", True):
                 conds.append(CoinTransaction.tx_type.not_in(_FEED_SKIP_TYPES))
             if last_id == 0:
+                # birinchi ishga tushishda eski tarixni yubormaymiz
                 max_id = int((await session.execute(select(func.max(CoinTransaction.id)))).scalar_one() or 0)
                 cfg["last_tx_id"] = max_id
                 cfg["last_sent"] = now.isoformat()
@@ -476,6 +453,7 @@ class AdminFeedService:
                 )
             ).all()
             new_last = max([int(t.id) for t, _u in rows], default=last_id)
+            # offer_escrow/refund shovqin — digestda ko'rsatilmaydi
             shown = [(t, u) for t, u in rows if t.tx_type not in ("offer_escrow", "offer_refund")]
             cfg["last_tx_id"] = max(new_last, last_id)
             cfg["last_sent"] = now.isoformat()

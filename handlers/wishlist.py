@@ -82,8 +82,9 @@ async def cb_wishlist_del(callback: CallbackQuery, callback_data: WishCb, db_use
     await _show_wishlist(callback, callback.from_user.id, db_user, page=max(1, callback_data.p))
 
 
-async def _render_wishlist_top(target, owner_id: int, page: int = 1) -> None:
-    page = max(1, page)
+@router.callback_query(WishCb.filter(F.act == "top"))
+async def cb_wishlist_top(callback: CallbackQuery, callback_data: WishCb) -> None:
+    page = max(1, callback_data.p)
     async with get_session() as session:
         top, total = await AuctionWishlistService.get_most_wanted_page(
             session, page=page, page_size=WISH_PAGE_SIZE
@@ -96,15 +97,10 @@ async def _render_wishlist_top(target, owner_id: int, page: int = 1) -> None:
     if not top:
         lines.append("📭 Hozircha bo‘sh.")
     await edit_or_answer(
-        target,
+        callback,
         "\n".join(lines),
-        reply_markup=wishlist_top_kb(owner_id, top, page=page, total=total, page_size=WISH_PAGE_SIZE),
+        reply_markup=wishlist_top_kb(callback.from_user.id, top, page=page, total=total, page_size=WISH_PAGE_SIZE),
     )
-
-
-@router.callback_query(WishCb.filter(F.act == "top"))
-async def cb_wishlist_top(callback: CallbackQuery, callback_data: WishCb) -> None:
-    await _render_wishlist_top(callback, callback.from_user.id, page=max(1, callback_data.p))
 
 
 # ------------------------------------------------------------------
