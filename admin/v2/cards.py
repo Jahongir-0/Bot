@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
-from admin.filters import IsAdminFilter, has_admin_perm
+from admin.filters import resolve_admin_perms, IsAdminFilter, has_admin_perm
 from admin.v2.common import AdminV2States, _cancel_kb, _deny_if_no_perm
 from database.session import get_session
 from keyboards.v2 import (
@@ -35,6 +35,7 @@ from services.community_service import CommunityService
 from services.event_service import EventService
 from services.gameplay_service import GameplayService
 from services.security_backup_service import SecurityBackupService
+from utils import admin_nav
 from utils.callback_data import AdmV2Cb, AdminCb
 from utils.constants import MEDIA_TYPES, PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
 from utils.formatting import esc, format_card_about, format_card_block
@@ -56,10 +57,12 @@ async def cb_v2_cards_menu(callback: CallbackQuery, state: FSMContext, admin_per
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
     await state.clear()
+    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
     await edit_or_answer(
         callback,
-        "🎴 <b>KARTALAR BO‘LIMI</b>\n━━━━━━━━━━━━━━━\nKerakli amalni tanlang:",
-        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id),
+        "🎴 <b>KARTALAR MARKAZI</b>\n━━━━━━━━━━━━━━━\n"
+        "Karta bilan bog‘liq hamma narsa shu yerda: boshqarish, drop va ranklar, bot do‘koni, auksion, eventlar, komissiya.",
+        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id, resolve_admin_perms(callback.from_user, admin_perms)),
     )
 
 
@@ -247,6 +250,8 @@ async def cb_v2_batch_prompt(callback: CallbackQuery, state: FSMContext, admin_p
         "<i>(yoki 4 ustun: Personaj | Asar nomi | Rank | Rasm URL — turi Anime bo‘ladi)</i>\n\n"
         "2️⃣ <b>JSON:</b> <code>[{\"character_name\": ..., \"media_type\": \"Anime\", \"media_name\": ..., \"rank_id\": 1, \"image\": \"https://...\"}]</code>\n"
         "3️⃣ <b>CSV:</b> sarlavhali yoki 5 ustunli CSV\n\n"
+        "💡 <b>JSON da rasm URL yo‘q bo‘lsa</b> — «📄 JSON + rasmlar ketma-ket» usulidan foydalaning: "
+        "JSON ni tashlaysiz, rasmlarni esa botga ketma-ket yuborasiz.\n\n"
         f"⭐ <b>Ranklar:</b> {esc(ranks_hint)}\n"
         "<i>Bekor qilish: /cancel</i>",
         reply_markup=_cancel_kb(callback.from_user.id, "cards", "add_menu"),
@@ -358,9 +363,12 @@ async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
         ranks = await GameplayService.get_rank_definitions(session)
         sync_runtime_ranks(ranks)
         rank_by_name = {str(r["name"]).lower(): r for r in ranks}
+        # Takroriy = bir xil RASM (URL / file_id). Bir personajning turli rasmli kartalari ruxsat.
         existing_keys = {
-            (str(c).strip().lower(), str(a).strip().lower(), str(r).strip().lower())
-            for c, a, r in (await session.execute(select(Card.character_name, Card.anime_name, Card.rarity).where(Card.is_deleted.is_(False)))).all()
+            str(v).strip().lower()
+            for row in (await session.execute(select(Card.image, Card.image_file_id).where(Card.is_deleted.is_(False)))).all()
+            for v in row
+            if v
         }
 
         added = 0
@@ -398,7 +406,7 @@ async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
                 failed_reasons.append(f"#{ln} ({char_name}): rasm URL (https://...) yoki Telegram file_id bo‘lishi kerak.")
                 continue
 
-            dup_key = (char_name.lower(), anime_name.lower(), rarity.lower())
+            dup_key = img_ref.strip().lower()
             if dup_key in existing_keys:
                 dups += 1
                 continue
@@ -438,6 +446,8 @@ async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
         f"♻️ Takroriy (o‘tkazildi): <b>{dups}</b> ta",
         f"❌ Xato: <b>{len(failed_reasons)}</b> ta",
     ]
+    if failed_reasons and any("rasm" in fr for fr in failed_reasons):
+        lines.append("\n💡 Rasm URL siz JSON uchun: Karta qo‘shish → «📄 JSON + rasmlar ketma-ket».")
     if failed_reasons:
         lines.append("\n<b>Sabablar:</b>")
         for fr in failed_reasons[:8]:
@@ -445,39 +455,93 @@ async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
     await message.answer("\n".join(lines), reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_tabs")))
-async def cb_v2_view_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "cards"):
-        return
-    tab = callback_data.ext or "all"
-    page = max(1, callback_data.p)
+_TAB_TITLES = {
+    "sent_group": "GURUHGA TUSHGANLAR (oxirgi yuborilganlar yuqorida)",
+    "not_sent": "HALI TUSHMAGANLAR (guruhga tashlanmagan)",
+    "owned": "FOYDALANUVCHILARDA BOR KARTALAR",
+    "in_auction": "AUKSIONDA TURGAN KARTALAR",
+    "anime": "ANIME KARTALARI",
+    "manga": "MANGA / MANHWA / MANHUA",
+    "movie": "KINO / SERIAL",
+    "cartoon": "MULTFILM / KOMIKS",
+    "event": "EVENT KARTALARI",
+    "other": "BOSHQA KARTALAR",
+    "deleted": "O‘CHIRILGAN KARTALAR",
+    "all": "BARCHA KARTALAR",
+}
+
+
+async def _render_cards_tab(callback: CallbackQuery, tab: str, page: int) -> None:
+    owner = callback.from_user.id
+    page = max(1, page)
     async with get_session() as session:
         cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=page, page_size=PAGE_SIZE)
     if not cards and total > 0 and page > 1:
         page = 1
         async with get_session() as session:
             cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=1, page_size=PAGE_SIZE)
-    tab_titles = {
-        "sent_group": "GURUHGA TUSHGANLAR (oxirgi yuborilganlar yuqorida)",
-        "not_sent": "HALI TUSHMAGANLAR (guruhga tashlanmagan)",
-        "owned": "FOYDALANUVCHILARDA BOR KARTALAR",
-        "in_auction": "AUKSIONDA TURGAN KARTALAR",
-        "anime": "ANIME KARTALARI",
-        "manga": "MANGA / MANHWA / MANHUA",
-        "movie": "KINO / SERIAL",
-        "cartoon": "MULTFILM / KOMIKS",
-        "event": "EVENT KARTALARI",
-        "other": "BOSHQA KARTALAR",
-        "deleted": "O‘CHIRILGAN KARTALAR",
-        "all": "BARCHA KARTALAR",
-    }
-    txt = f"👁 <b>{tab_titles.get(tab, tab.upper())}</b> (Jami: <b>{total}</b> ta | 20/sahifa)"
+    admin_nav.remember(owner, "view_tabs", ext=tab, p=page)
+    mode = admin_nav.get_mode(owner)
+    txt = (
+        f"{admin_nav.MODE_TITLES[mode]}\n"
+        f"📂 <b>{_TAB_TITLES.get(tab, tab.upper())}</b>\n"
+        f"Jami: <b>{total}</b> ta | sahifa {page} | 20/sahifa"
+    )
+    if mode == admin_nav.MODE_EDIT:
+        txt += "\n\n👇 Tahrirlash uchun kartani tanlang:"
+    elif mode == admin_nav.MODE_DEL:
+        txt += "\n\n👇 O‘chirish uchun kartani tanlang:"
     if not cards:
         txt += "\n\n📭 Bu bo‘limda kartalar yo‘q."
     await edit_or_answer(
         callback,
         txt,
-        reply_markup=admin_v2_view_cards_kb(callback.from_user.id, cards, tab, page, total, page_size=PAGE_SIZE),
+        reply_markup=admin_v2_view_cards_kb(owner, cards, tab, page, total, page_size=PAGE_SIZE),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_tabs")))
+async def cb_v2_view_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    await _render_cards_tab(callback, callback_data.ext or "all", callback_data.p)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_start")))
+async def cb_v2_view_start(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    """Menyudan «Kartalarni ko‘rish» / «O‘chirilganlar» — ko‘rish rejimini boshlaydi."""
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
+    await _render_cards_tab(callback, callback_data.ext or "sent_group", 1)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "titles_start")))
+async def cb_v2_titles_start(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
+    await _render_media_titles(callback, callback_data.ext or "anime", 1)
+
+
+async def _render_media_titles(callback: CallbackQuery, mgroup: str, page: int) -> None:
+    owner = callback.from_user.id
+    page = max(1, page)
+    async with get_session() as session:
+        titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
+    admin_nav.remember(owner, "titles", ext=mgroup, p=page)
+    mode = admin_nav.get_mode(owner)
+    txt = (
+        f"{admin_nav.MODE_TITLES[mode]}\n"
+        f"📁 <b>{esc(mgroup.upper())} NOMLARI</b> (karta soni bo‘yicha | Jami: <b>{total}</b> ta)\n\n"
+        "Ichiga kirish uchun nomni tanlang:"
+    )
+    if not titles:
+        txt = f"{admin_nav.MODE_TITLES[mode]}\n📁 <b>{esc(mgroup.upper())} NOMLARI</b>\n\n📭 Hozircha kartalar yo‘q."
+    await edit_or_answer(
+        callback,
+        txt,
+        reply_markup=admin_v2_media_titles_kb(owner, titles, mgroup, page, total, page_size=PAGE_SIZE),
     )
 
 
@@ -485,57 +549,46 @@ async def cb_v2_view_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admi
 async def cb_v2_media_titles(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    mgroup = callback_data.ext or "anime"
-    page = max(1, callback_data.p)
-    async with get_session() as session:
-        titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
-    txt = f"📁 <b>{esc(mgroup.upper())} NOMLARI</b> (Karta soni bo‘yicha | Jami: <b>{total}</b> ta)\n\nIchiga kirish uchun nomni tanlang:"
-    if not titles:
-        txt = f"📁 <b>{esc(mgroup.upper())} NOMLARI</b>\n\n📭 Hozircha kartalar yo‘q."
-    await edit_or_answer(
-        callback,
-        txt,
-        reply_markup=admin_v2_media_titles_kb(callback.from_user.id, titles, mgroup, page, total, page_size=PAGE_SIZE),
-    )
+    await _render_media_titles(callback, callback_data.ext or "anime", callback_data.p)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "mtitle")))
 async def cb_v2_media_title_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
+    owner = callback.from_user.id
     mgroup = callback_data.ext or "anime"
     page = max(1, callback_data.p)
     async with get_session() as session:
         title, cards, total = await AdminService.get_v2_cards_by_media_title(
             session, media_group=mgroup, rep_card_id=callback_data.tid, page=page, page_size=PAGE_SIZE
         )
-    txt = f"🎬 <b>{esc(title or mgroup.upper())}</b> (Jami: <b>{total}</b> ta karta)\n\nTahrirlash yoki ko‘rish uchun kartani tanlang:"
+    # Sarlavha ichidagi sahifa eslab qolinadi: kartadan orqaga qaytganda shu sarlavhada davom etamiz
+    admin_nav.remember(owner, "mtitle", tid=callback_data.tid, ext=mgroup, p=page)
+    mode = admin_nav.get_mode(owner)
+    hint = {
+        admin_nav.MODE_VIEW: "Ko‘rish uchun kartani tanlang:",
+        admin_nav.MODE_EDIT: "Tahrirlash uchun kartani tanlang:",
+        admin_nav.MODE_DEL: "O‘chirish uchun kartani tanlang:",
+    }[mode]
+    txt = f"{admin_nav.MODE_TITLES[mode]}\n🎬 <b>{esc(title or mgroup.upper())}</b> (Jami: <b>{total}</b> ta karta)\n\n{hint}"
     if not cards:
         txt += "\n\n📭 Topilmadi."
     await edit_or_answer(
         callback,
         txt,
-        reply_markup=admin_v2_title_cards_kb(callback.from_user.id, cards, callback_data.tid, mgroup, page, total, page_size=PAGE_SIZE),
+        reply_markup=admin_v2_title_cards_kb(owner, cards, callback_data.tid, mgroup, page, total, page_size=PAGE_SIZE),
     )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"edit_list", "del_list"}))))
 async def cb_v2_cards_action_list(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    """Tahrirlash / o‘chirish: «Kartalarni ko‘rish» dagi bir xil filtrli (tab, sarlavha) ro‘yxat ochiladi."""
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    mode = callback_data.act
-    page = max(1, callback_data.p)
-    async with get_session() as session:
-        cards, total = await AdminService.get_v2_cards_by_tab(session, tab="all", page=page, page_size=PAGE_SIZE)
-    hdr = "✏️ <b>KARTA TAHRIRLASH</b>" if mode == "edit_list" else "🗑 <b>KARTA O‘CHIRISH</b>"
-    txt = f"{hdr} (Jami: <b>{total}</b> ta | 20/sahifa)\n\nKerakli kartani tanlang yoki qidiring:"
-    if not cards:
-        txt += "\n\n📭 Kartalar yo‘q."
-    await edit_or_answer(
-        callback,
-        txt,
-        reply_markup=admin_v2_cards_action_list_kb(callback.from_user.id, cards, mode, page, total, page_size=PAGE_SIZE),
-    )
+    mode = admin_nav.MODE_EDIT if callback_data.act == "edit_list" else admin_nav.MODE_DEL
+    admin_nav.set_mode(callback.from_user.id, mode)
+    await _render_cards_tab(callback, callback_data.ext or "all", callback_data.p)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "del_one")))
@@ -561,8 +614,8 @@ async def cb_v2_delete_one_confirm(callback: CallbackQuery, callback_data: AdmV2
             ],
             [
                 InlineKeyboardButton(
-                    text="⬅️ ORQAGA",
-                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="del_list", p=max(1, callback_data.p)).pack(),
+                    text="⬅️ ORQAGA (ro‘yxat)",
+                    callback_data=admin_nav.back_callback(callback.from_user.id),
                 )
             ],
         ]
@@ -964,7 +1017,9 @@ async def cb_v2_card_search_prompt(callback: CallbackQuery, callback_data: AdmV2
     await edit_or_answer(
         callback,
         "🔍 <b>KARTA QIDIRISH</b>\n\nPersonaj ismi, anime/media nomi, <code>CRD-...</code> yoki DB ID yozing:\n<i>Bekor qilish: /cancel</i>",
-        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=admin_nav.back_callback(callback.from_user.id))]]
+        ),
     )
 
 
@@ -990,7 +1045,7 @@ async def fsm_v2_card_search(message: Message, state: FSMContext) -> None:
                 callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="cards", act=next_act, tid=c.id).pack(),
             )
         )
-    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="cards", act="v").pack()))
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA (ro‘yxat)", callback_data=admin_nav.back_callback(message.from_user.id)))
     await message.answer(f"🔍 Topildi: <b>{total}</b> ta karta (20 tagacha ko‘rsatilmoqda):", reply_markup=b.as_markup())
 
 
@@ -1062,7 +1117,12 @@ async def cb_v2_edit_field_start(callback: CallbackQuery, callback_data: AdmV2Cb
     await edit_or_answer(
         callback,
         prompts.get(field, "Yangi qiymatni yozing:") + "\n<i>Bekor: /cancel</i>",
-        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(
+                text="❌ Bekor (kartaga qaytish)",
+                callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="edit_pick", tid=cid).pack(),
+            )]]
+        ),
     )
 
 

@@ -272,7 +272,7 @@ def admin_pick_card_for_user_kb(
                 callback_data=AdminCb(
                     owner_id=owner_id,
                     section="users",
-                    action="give_exec",
+                    action="give_prev",
                     target_id=target_user_id,
                     extra=str(c.id),
                 ).pack(),

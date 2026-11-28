@@ -236,7 +236,14 @@ async def fsm_slot_priority_card(message: Message, state: FSMContext) -> None:
     if sched is None:
         await message.answer("❌ Slot topilmadi yoki allaqachon yuborilgan.")
         return
-    await message.answer(f"✅ Slot #{slot_id} ga <b>{esc(card.character_name)}</b> qo‘yildi!", reply_markup=admin_home_kb(message.from_user.id))
+    from utils.formatting import format_card_block
+    from utils.tg_helpers import send_card_message
+
+    cap = f"✅ <b>Slot #{slot_id} ga qo‘yildi!</b>\n\n{format_card_block(card, show_status=True)}"
+    try:
+        await send_card_message(message.bot, message.chat.id, card, cap[:1020], admin_home_kb(message.from_user.id))
+    except Exception:
+        await message.answer(cap, reply_markup=admin_home_kb(message.from_user.id))
 
 
 async def _render_group_detail(target, owner_id: int, group_id: int) -> None:
