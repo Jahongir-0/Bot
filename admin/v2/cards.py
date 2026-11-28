@@ -363,9 +363,12 @@ async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
         ranks = await GameplayService.get_rank_definitions(session)
         sync_runtime_ranks(ranks)
         rank_by_name = {str(r["name"]).lower(): r for r in ranks}
+        # Takroriy = bir xil RASM (URL / file_id). Bir personajning turli rasmli kartalari ruxsat.
         existing_keys = {
-            (str(c).strip().lower(), str(a).strip().lower(), str(r).strip().lower())
-            for c, a, r in (await session.execute(select(Card.character_name, Card.anime_name, Card.rarity).where(Card.is_deleted.is_(False)))).all()
+            str(v).strip().lower()
+            for row in (await session.execute(select(Card.image, Card.image_file_id).where(Card.is_deleted.is_(False)))).all()
+            for v in row
+            if v
         }
 
         added = 0
@@ -403,7 +406,7 @@ async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
                 failed_reasons.append(f"#{ln} ({char_name}): rasm URL (https://...) yoki Telegram file_id bo‘lishi kerak.")
                 continue
 
-            dup_key = (char_name.lower(), anime_name.lower(), rarity.lower())
+            dup_key = img_ref.strip().lower()
             if dup_key in existing_keys:
                 dups += 1
                 continue

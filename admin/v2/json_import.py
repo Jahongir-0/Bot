@@ -185,12 +185,23 @@ def _to_list(raw: Any) -> List[str]:
 
 
 def _extract_json_payload(raw_text: str) -> Any:
+    """AI qaytargan JSON ni bardoshli o'qiydi: ```json bloki, oldi-orqasidagi matn, ortiqcha vergullar."""
+    import re
+
     txt = (raw_text or "").strip().lstrip("\ufeff")
-    if txt.startswith("```"):
-        txt = txt.strip("`")
-        if txt.lower().startswith("json"):
-            txt = txt[4:]
-        txt = txt.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", txt, re.S | re.I)
+    if fence:
+        txt = fence.group(1).strip()
+    try:
+        return json.loads(txt)
+    except Exception:
+        pass
+    starts = [i for i in (txt.find("{"), txt.find("[")) if i != -1]
+    ends = [i for i in (txt.rfind("}"), txt.rfind("]")) if i != -1]
+    if starts and ends and max(ends) > min(starts):
+        txt = txt[min(starts) : max(ends) + 1]
+    txt = re.sub(r",\s*([}\]])", r"\1", txt)  # ortiqcha vergullar
+    txt = txt.replace("“", '"').replace("”", '"')
     return json.loads(txt)
 
 
@@ -276,19 +287,9 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
     async with get_session() as session:
         ranks = await GameplayService.get_rank_definitions(session)
         sync_runtime_ranks(ranks)
-        existing = {
-            (str(c).strip().lower(), str(a).strip().lower(), str(r).strip().lower())
-            for c, a, r in (
-                await session.execute(
-                    select(Card.character_name, Card.anime_name, Card.rarity).where(Card.is_deleted.is_(False))
-                )
-            ).all()
-        }
 
     records: List[dict] = []
     problems: List[str] = []
-    dups = 0
-    seen = set()
     for idx, rec in enumerate(parsed[:MAX_RECORDS], start=1):
         if not isinstance(rec, dict):
             problems.append(f"#{idx}: obyekt emas")
@@ -310,11 +311,6 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
         if not rarity:
             problems.append(f"#{idx} {name}: rank_id noto‘g‘ri «{_pick(rec, 'rank_id')}»")
             continue
-        key = (name.lower(), media.lower(), rarity.lower())
-        if key in existing or key in seen:
-            dups += 1
-            continue
-        seen.add(key)
         meta = {k: str(rec.get(k)).strip() for k in OPTIONAL_META if rec.get(k) not in (None, "")}
         records.append(
             {
@@ -333,7 +329,7 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
         await state.clear()
         extra = ("\n" + "\n".join(f"• {p}" for p in problems[:10])) if problems else ""
         await message.answer(
-            f"❌ Qo‘shiladigan karta topilmadi. Takroriy: {dups} ta.{extra}",
+            f"❌ Qo‘shiladigan karta topilmadi.{extra}",
             reply_markup=admin_v2_cards_menu_kb(message.from_user.id),
         )
         return
@@ -343,14 +339,16 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
         owner_tg_id=message.from_user.id,
         records=records,
         slots=[None] * len(records),
+        uids=[None] * len(records),
         skipped=[],
     )
     head = (
         f"📋 <b>JSON qabul qilindi:</b> {len(records)} ta karta\n"
-        f"♻️ Takroriy (o‘tkazildi): {dups} · ❌ Xato: {len(problems)}"
+        f"❌ Xato (o‘tkazib yuborildi): {len(problems)}\n"
+        "ℹ️ Bir personajning bir xil rankdagi bir nechta karta (turli rasm) ham qo‘shiladi — takroriy faqat BIR XIL RASM bo‘lsa aniqlanadi."
     )
     if problems:
-        head += "\n" + "\n".join(f"• {p}" for p in problems[:8])
+        head += "\n⚠️ Bu kartalar ro‘yxatda YO‘Q (ularning rasmini yubormang):\n" + "\n".join(f"• {p}" for p in problems[:8])
     await message.answer(head)
     for chunk in _chunks(_numbered_lines(records, [None] * len(records), set())):
         await message.answer(chunk)
@@ -381,7 +379,7 @@ async def fsm_jsonq_photo(message: Message, state: FSMContext) -> None:
     if data.get("owner_tg_id") != uid:
         return
     if message.photo:
-        item = (message.message_id, "photo", message.photo[-1].file_id, message.caption)
+        item = (message.message_id, "photo", (message.photo[-1].file_id, message.photo[-1].file_unique_id), message.caption)
     elif _is_image_doc(message):
         item = (message.message_id, "doc", message.document, message.caption)
     else:
@@ -416,13 +414,17 @@ async def _flush_later(message: Message, state: FSMContext) -> None:
         logger.exception("json_import flush xatosi")
 
 
-async def _doc_to_photo_id(bot, chat_id: int, document) -> str:
+async def _doc_to_photo_id(bot, chat_id: int, document):
+    """Rasm faylini foto sifatida yuklaydi. (file_id, unikal belgi) qaytaradi."""
+    import hashlib
+
     from services.card_zip_import import _to_jpeg, _upload_photo
 
     buf = io.BytesIO()
     await bot.download(document, destination=buf)
     jpeg = await asyncio.to_thread(_to_jpeg, buf.getvalue())
-    return await _upload_photo(bot, chat_id, jpeg, (document.file_name or "card")[:40])
+    fid = await _upload_photo(bot, chat_id, jpeg, (document.file_name or "card")[:40])
+    return fid, "h" + hashlib.sha256(jpeg).hexdigest()[:40]
 
 
 async def _flush(message: Message, state: FSMContext) -> None:
@@ -437,12 +439,13 @@ async def _flush(message: Message, state: FSMContext) -> None:
         data = await state.get_data()
         records: List[dict] = data["records"]
         slots: List[Optional[str]] = list(data["slots"])
+        uids: List[Optional[str]] = list(data.get("uids") or [None] * len(slots))
         skipped = set(data.get("skipped", []))
         placed: List[int] = []
         warns: List[str] = []
         for _mid, kind, ref, caption in items:
             try:
-                fid = ref if kind == "photo" else await _doc_to_photo_id(message.bot, message.chat.id, ref)
+                fid, uid = ref if kind == "photo" else await _doc_to_photo_id(message.bot, message.chat.id, ref)
             except Exception as exc:
                 warns.append(f"rasm o‘qilmadi: {str(exc)[:60]}")
                 continue
@@ -457,8 +460,9 @@ async def _flush(message: Message, state: FSMContext) -> None:
                 warns.append("ortiqcha rasm (hamma kartaga rasm bor)")
                 continue
             slots[idx] = fid
+            uids[idx] = uid
             placed.append(idx)
-        await state.update_data(slots=slots, skipped=sorted(skipped))
+        await state.update_data(slots=slots, uids=uids, skipped=sorted(skipped))
 
         lines = []
         for i in placed[:25]:
@@ -498,13 +502,15 @@ async def cb_jq_undo(callback: CallbackQuery, state: FSMContext) -> None:
         return
     async with _lock(callback.from_user.id):
         slots = list(data["slots"])
+        uids = list(data.get("uids") or [None] * len(slots))
         filled = [i for i, v in enumerate(slots) if v]
         if not filled:
             await callback.answer("Bekor qilinadigan rasm yo‘q.", show_alert=True)
             return
         last = filled[-1]
         slots[last] = None
-        await state.update_data(slots=slots)
+        uids[last] = None
+        await state.update_data(slots=slots, uids=uids)
     await callback.answer(f"↩️ {last + 1}-karta rasmi bekor qilindi.", show_alert=True)
 
 
@@ -575,17 +581,33 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
     if not records:
         await state.clear()
         return
+    uids = data.get("uids") or [None] * len(records)
     added: List[str] = []
     missing: List[str] = []
+    dup_imgs: List[str] = []
     async with get_session() as session:
         ranks = await GameplayService.get_rank_definitions(session)
         sync_runtime_ranks(ranks)
         rank_by_name = {str(r["name"]).lower(): r for r in ranks}
+        # Takroriy = BIR XIL RASM (nom/rank emas): bir personajning turli rasmli kartalari ruxsat
+        known_uids = {
+            str(m.get("src_uid"))
+            for (m,) in (
+                await session.execute(select(Card.metadata_json).where(Card.is_deleted.is_(False)))
+            ).all()
+            if isinstance(m, dict) and m.get("src_uid")
+        }
         for i, rec in enumerate(records):
             fid = slots[i] if i < len(slots) else None
             if not fid:
                 missing.append(f"{i + 1}. {rec['character_name']}")
                 continue
+            uid = uids[i] if i < len(uids) else None
+            if uid and uid in known_uids:
+                dup_imgs.append(f"{i + 1}. {rec['character_name']}")
+                continue
+            if uid:
+                known_uids.add(uid)
             rarity = rec["rarity"]
             r_obj = rank_by_name.get(rarity.lower())
             meta_r = get_rarity_meta(rarity)
@@ -603,7 +625,7 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
                 drop_limit=drop_lim,
                 media_type=rec["media_type"],
                 aliases=rec.get("aliases") or None,
-                metadata_json=rec.get("meta") or {},
+                metadata_json={**(rec.get("meta") or {}), **({"src_uid": uid} if uid else {})},
             )
             card.image_file_id = fid
             added.append(f"{rec['character_name']} ({rarity})")
@@ -619,7 +641,11 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
         "✅ <b>JSON IMPORT YAKUNLANDI</b>",
         f"➕ Qo‘shildi: <b>{len(added)}</b> ta",
         f"⏭ Rasmsiz (qo‘shilmadi): <b>{len(missing)}</b> ta",
+        f"♻️ Takroriy rasm (o‘tkazildi): <b>{len(dup_imgs)}</b> ta",
     ]
+    if dup_imgs:
+        lines.append("\n<b>Bu rasmlar botda allaqachon bor:</b>")
+        lines.extend(f"• {esc(m)}" for m in dup_imgs[:20])
     if missing:
         lines.append("\n<b>Rasmsiz qolganlar:</b>")
         lines.extend(f"• {esc(m)}" for m in missing[:20])
