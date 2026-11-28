@@ -31,7 +31,7 @@ from services.settings_service import SettingsService
 from utils.callback_data import AdminCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc, format_drop_message, format_group_settings
-from utils.tg_helpers import NotCommandFilter, edit_or_answer, get_bot_username, send_card_visual
+from utils.tg_helpers import NotCommandFilter, edit_or_answer, get_bot_username, send_card_message, send_card_visual
 from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
@@ -118,13 +118,12 @@ async def cb_schedule_overview(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(AdminCb.filter((F.section == "schedule") & (F.action == "groups")))
-@router.callback_query(AdminCb.filter((F.section == "groups") & (F.action == "list")))
-async def cb_admin_groups_list(callback: CallbackQuery, callback_data: AdminCb) -> None:
-    page = max(1, callback_data.page)
-    filter_mode = callback_data.extra or ("active" if callback_data.section == "groups" else "all")
+async def _render_admin_groups_list(
+    target, owner_id: int, section: str, filter_mode: str, page: int = 1
+) -> None:
+    page = max(1, int(page))
     cond = []
-    if callback_data.section == "groups":
+    if section == "groups":
         if filter_mode == "active":
             cond.append(Group.is_active.is_(True))
             cond.append(Group.bot_status == "active")
@@ -141,30 +140,39 @@ async def cb_admin_groups_list(callback: CallbackQuery, callback_data: AdminCb) 
     f_labels = {"active": "FAOL GURUHLAR", "left": "CHIQARILGAN / O‘CHGAN GURUHLAR", "all": "BARCHA GURUHLAR"}
     title = (
         "📅 <b>DROP JADVALI — GURUH TANLANG</b>"
-        if callback_data.section == "schedule"
+        if section == "schedule"
         else f"👥 <b>{f_labels.get(filter_mode, 'GURUHLAR')} ({total} ta)</b>"
     )
-    if not groups and callback_data.section != "groups":
+    if not groups and section != "groups":
         await edit_or_answer(
-            callback,
+            target,
             f"{title}\n\n📭 Hozircha ro‘yxatga olingan guruhlar yo‘q.",
-            reply_markup=admin_home_kb(callback.from_user.id),
+            reply_markup=admin_home_kb(owner_id),
         )
         return
     if not groups:
         title += "\n\n📭 Bu bo‘limda guruhlar yo‘q."
     await edit_or_answer(
-        callback,
+        target,
         title,
         reply_markup=admin_groups_list_kb(
-            callback.from_user.id,
+            owner_id,
             groups,
-            section=callback_data.section,
+            section=section,
             page=page,
             total=total,
             page_size=PAGE_SIZE,
             filter_mode=filter_mode,
         ),
+    )
+
+
+@router.callback_query(AdminCb.filter((F.section == "schedule") & (F.action == "groups")))
+@router.callback_query(AdminCb.filter((F.section == "groups") & (F.action == "list")))
+async def cb_admin_groups_list(callback: CallbackQuery, callback_data: AdminCb) -> None:
+    filter_mode = callback_data.extra or ("active" if callback_data.section == "groups" else "all")
+    await _render_admin_groups_list(
+        callback, callback.from_user.id, callback_data.section, filter_mode, page=max(1, callback_data.page)
     )
 
 
@@ -236,14 +244,11 @@ async def fsm_slot_priority_card(message: Message, state: FSMContext) -> None:
     if sched is None:
         await message.answer("❌ Slot topilmadi yoki allaqachon yuborilgan.")
         return
-    from utils.formatting import format_card_block
-    from utils.tg_helpers import send_card_message
-
-    cap = f"✅ <b>Slot #{slot_id} ga qo‘yildi!</b>\n\n{format_card_block(card, show_status=True)}"
+    confirm_text = f"✅ Slot #{slot_id} ga <b>{esc(card.character_name)}</b> qo‘yildi!"
     try:
-        await send_card_message(message.bot, message.chat.id, card, cap[:1020], admin_home_kb(message.from_user.id))
+        await send_card_message(message.bot, message.chat.id, card, confirm_text, admin_home_kb(message.from_user.id))
     except Exception:
-        await message.answer(cap, reply_markup=admin_home_kb(message.from_user.id))
+        await message.answer(confirm_text, reply_markup=admin_home_kb(message.from_user.id))
 
 
 async def _render_group_detail(target, owner_id: int, group_id: int) -> None:

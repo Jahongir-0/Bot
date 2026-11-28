@@ -17,6 +17,7 @@ from keyboards.market import transfer_confirm_kb
 from models.card import Card
 from models.user import User
 from models.user_card import UserCard
+from services.coin_gift_service import CoinGiftService
 from services.collection_service import CollectionService
 from services.community_service import CommunityService
 from services.settings_service import SettingsService
@@ -39,6 +40,12 @@ class GiveStates(StatesGroup):
     waiting_price = State()
     waiting_name = State()
     choosing = State()
+
+
+class CoinGiftStates(StatesGroup):
+    waiting_recipient = State()
+    waiting_amount = State()
+    confirm = State()
 
 
 GIVE_USAGE = (
@@ -221,13 +228,56 @@ async def cmd_give(message: Message, state: FSMContext, db_user: User) -> None:
 @router.callback_query(NavCb.filter(F.target == "give"))
 async def cb_give_start(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
     await state.clear()
+    async with get_session() as session:
+        cg_cfg = await CoinGiftService.get_config(session)
+        comm_cfg = await SettingsService.get_commission_config(session)
+    _sample_fee, fee_pct = SettingsService.compute_commission(100, comm_cfg, "coin_gift")
+    if fee_pct == 0 and cg_cfg.get("fee_percent", 0) > 0 and (comm_cfg.get("coin_gift") or {}).get("enabled", True):
+        fee_pct = int(cg_cfg.get("fee_percent", 0))
+    coin_line = (
+        f"🪙 Coin yuborish: {'🟢 Yoqilgan' if cg_cfg['enabled'] else '🔴 O‘chirilgan'}"
+        f" (min {cg_cfg['min_amount']:,} 🪙"
+        + (f", komissiya {fee_pct}%" if fee_pct else ", komissiyasiz")
+        + ")"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="🎴 Karta sovg‘a qilish",
+            callback_data=GiveCb(owner_id=callback.from_user.id, action="card_start").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🪙 Coin yuborish",
+            callback_data=GiveCb(owner_id=callback.from_user.id, action="coin_start").pack(),
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Savdo", callback_data=NavCb(owner_id=callback.from_user.id, target="savdo").pack()),
+        InlineKeyboardButton(text="🏠 Bosh Menu", callback_data=NavCb(owner_id=callback.from_user.id, target="home").pack()),
+    )
+    await edit_or_answer(
+        callback,
+        "🎁 <b>SOVG‘A YUBORISH</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Do‘stingizga karta yoki coin yuborishingiz mumkin.\n\n"
+        "🎴 <b>Karta sovg‘a:</b> <code>/give @username Gojo</code>\n"
+        f"{coin_line}\n"
+        "💡 Tez coin yuborish: <code>/givecoin @username 500</code>\n\n"
+        "👇 Nimani yubormoqchisiz?",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(GiveCb.filter(F.action == "card_start"))
+async def cb_give_card_start(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
+    await state.clear()
     await state.set_state(GiveStates.waiting_recipient)
     await state.update_data(from_tg=db_user.telegram_id, price=0, preset_uc_id=0, flow_mode="gift")
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=GiveCb(owner_id=callback.from_user.id, action="cancel", user_card_id=0).pack()))
     await edit_or_answer(
         callback,
-        "🎁 <b>SOVG‘A BERISH</b>\n"
+        "🎴 <b>KARTA SOVG‘A QILISH</b>\n"
         "━━━━━━━━━━━━━━━\n"
         "Do‘stingizga kartangizni sovg‘a qiling.\n\n"
         "1️⃣ Qabul qiluvchining <b>@username</b>, <b>ismi</b> yoki <b>ID</b> raqamini yozing\n"
@@ -553,3 +603,281 @@ async def cb_transfer_cancel(callback: CallbackQuery, callback_data: TransferCb,
         f"❌ {res.message}",
         reply_markup=back_home_kb(callback.from_user.id),
     )
+
+
+# ---------------------------------------------------------------------------
+# Coin sovg'a yuborish (/givecoin + 🎁 Sovg'a -> 🪙 Coin yuborish)
+# ---------------------------------------------------------------------------
+async def _prompt_coin_amount(target, state: FSMContext, db_user: User, recipient: User) -> None:
+    async with get_session() as session:
+        cfg = await CoinGiftService.get_config(session)
+        comm_cfg = await SettingsService.get_commission_config(session)
+        sent_today = await CoinGiftService.sent_today(session, db_user.id)
+        fresh = await session.get(User, db_user.id) or db_user
+    _sf, fee_pct = SettingsService.compute_commission(100, comm_cfg, "coin_gift")
+    if fee_pct == 0 and cfg.get("fee_percent", 0) > 0 and (comm_cfg.get("coin_gift") or {}).get("enabled", True):
+        fee_pct = int(cfg.get("fee_percent", 0))
+    limit_txt = (
+        f"\n📊 Bugungi limit: <b>{sent_today:,} / {cfg['daily_limit']:,} 🪙</b>"
+        if cfg["daily_limit"] > 0
+        else ""
+    )
+    fee_txt = f"\n💸 Komissiya: <b>{fee_pct}%</b>" if fee_pct else "\n💸 Komissiya: <b>0% (bepul)</b>"
+    await state.set_state(CoinGiftStates.waiting_amount)
+    await state.update_data(from_tg=db_user.telegram_id, cg_to_id=recipient.id, cg_to_name=recipient.display_name)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=GiveCb(owner_id=db_user.telegram_id, action="cancel").pack()))
+    await edit_or_answer(
+        target,
+        f"🪙 <b>COIN YUBORISH</b>\n━━━━━━━━━━━━━━━\n"
+        f"👤 Qabul qiluvchi: <b>{esc(recipient.display_name)}</b>\n"
+        f"💰 Balansingiz: <b>{fmt_coins(fresh.coins)}</b> 🪙\n"
+        f"📏 Minimal miqdor: <b>{cfg['min_amount']:,}</b> 🪙"
+        f"{fee_txt}{limit_txt}\n\n"
+        f"✍️ Qancha coin yuborasiz? (son kiriting):\n<i>Bekor qilish: /cancel</i>",
+        reply_markup=kb.as_markup(),
+    )
+
+
+async def _show_coin_confirm(target, state: FSMContext, db_user: User, recipient: User, amount: int) -> None:
+    async with get_session() as session:
+        cfg = await CoinGiftService.get_config(session)
+        comm_cfg = await SettingsService.get_commission_config(session)
+        sent_today = await CoinGiftService.sent_today(session, db_user.id)
+        fresh = await session.get(User, db_user.id) or db_user
+    if not cfg["enabled"]:
+        await edit_or_answer(target, "🔴 Coin yuborish hozircha o‘chirilgan.", reply_markup=back_home_kb(db_user.telegram_id))
+        await state.clear()
+        return
+    if amount < cfg["min_amount"]:
+        await edit_or_answer(target, f"⚠️ Minimal miqdor: <b>{cfg['min_amount']:,}</b> 🪙. Qaytadan son kiriting:")
+        return
+    if amount > fresh.coins:
+        await edit_or_answer(target, f"⚠️ Balansingizda coin yetarli emas (balans: <b>{fmt_coins(fresh.coins)}</b> 🪙). Boshqa miqdor kiriting:")
+        return
+    if cfg["daily_limit"] > 0 and amount > (cfg["daily_limit"] - sent_today):
+        left = max(0, cfg["daily_limit"] - sent_today)
+        await edit_or_answer(target, f"⚠️ Kunlik limitdan oshib ketdi. Bugun yana ko‘pi bilan <b>{left:,} 🪙</b> yubora olasiz.")
+        return
+
+    fee, pct = SettingsService.compute_commission(amount, comm_cfg, "coin_gift")
+    if fee == 0 and cfg.get("fee_percent", 0) > 0 and (comm_cfg.get("coin_gift") or {}).get("enabled", True):
+        pct = int(cfg["fee_percent"])
+        fee = amount * pct // 100
+    received = amount - fee
+    if received <= 0:
+        await edit_or_answer(target, "⚠️ Miqdor komissiyadan kichik bo‘lmasligi kerak.")
+        return
+
+    await state.set_state(CoinGiftStates.confirm)
+    await state.update_data(from_tg=db_user.telegram_id, cg_to_id=recipient.id, cg_amount=amount)
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text=f"✅ Tasdiqlash (-{amount:,} 🪙)",
+            callback_data=GiveCb(owner_id=db_user.telegram_id, action="cg_confirm", user_card_id=recipient.id).pack(),
+        ),
+        InlineKeyboardButton(
+            text="❌ Bekor",
+            callback_data=GiveCb(owner_id=db_user.telegram_id, action="cancel").pack(),
+        ),
+    )
+    fee_line = f"💸 Komissiya ({pct}%): <b>-{fee:,}</b> 🪙\n" if fee > 0 else "💸 Komissiya: <b>0 🪙</b>\n"
+    await edit_or_answer(
+        target,
+        f"🪙 <b>COIN YUBORISHNI TASDIQLANG</b>\n━━━━━━━━━━━━━━━\n"
+        f"👤 Qabul qiluvchi: <b>{esc(recipient.display_name)}</b>\n"
+        f"📤 Yuboriladigan: <b>{amount:,}</b> 🪙\n"
+        f"{fee_line}"
+        f"📥 Qabul qiluvchi oladi: <b>{received:,}</b> 🪙\n\n"
+        f"Tasdiqlaysizmi?",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(GiveCb.filter(F.action == "coin_start"))
+async def cb_coin_gift_start(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
+    async with get_session() as session:
+        cfg = await CoinGiftService.get_config(session)
+    if not cfg["enabled"]:
+        await callback.answer("🔴 Coin yuborish hozircha o‘chirilgan.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(CoinGiftStates.waiting_recipient)
+    await state.update_data(from_tg=db_user.telegram_id)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=GiveCb(owner_id=callback.from_user.id, action="cancel").pack()))
+    await edit_or_answer(
+        callback,
+        "🪙 <b>COIN YUBORISH</b>\n━━━━━━━━━━━━━━━\n"
+        "Qabul qiluvchining <b>@username</b>, <b>ismi</b> yoki <b>Telegram ID</b> raqamini yozing:\n"
+        "<i>Bekor qilish: /cancel</i>",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(Command("givecoin"))
+async def cmd_givecoin(message: Message, state: FSMContext, db_user: User) -> None:
+    await state.clear()
+    async with get_session() as session:
+        cfg = await CoinGiftService.get_config(session)
+    if not cfg["enabled"]:
+        await message.answer("🔴 Coin yuborish hozircha o‘chirilgan.")
+        return
+
+    parts = (message.text or "").split()
+    reply_user = message.reply_to_message.from_user if message.reply_to_message else None
+    recipient_query = ""
+    amount_val: int | None = None
+
+    if reply_user is not None and not reply_user.is_bot and not (len(parts) >= 2 and parts[1].startswith("@")):
+        recipient_query = str(reply_user.id)
+        if len(parts) >= 2 and parts[1].isdigit():
+            amount_val = int(parts[1])
+    elif len(parts) >= 2:
+        recipient_query = parts[1]
+        if len(parts) >= 3 and parts[2].replace(",", "").isdigit():
+            amount_val = int(parts[2].replace(",", ""))
+    else:
+        await state.set_state(CoinGiftStates.waiting_recipient)
+        await state.update_data(from_tg=db_user.telegram_id)
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=GiveCb(owner_id=message.from_user.id, action="cancel").pack()))
+        await message.answer(
+            "🪙 <b>COIN YUBORISH</b>\n\nQabul qiluvchining <b>@username</b>, <b>ismi</b> yoki <b>ID</b> raqamini yozing\n"
+            "yoki tezkor: <code>/givecoin @username 500</code>",
+            reply_markup=kb.as_markup(),
+        )
+        return
+
+    async with get_session() as session:
+        if reply_user is not None and recipient_query == str(reply_user.id):
+            recipient = await UserService.upsert_user(
+                session,
+                telegram_id=reply_user.id,
+                username=reply_user.username,
+                first_name=reply_user.first_name or "Collector",
+            )
+            await session.commit()
+        else:
+            recipient = await UserService.find_user(session, recipient_query)
+    if recipient is None:
+        await message.answer("❌ Foydalanuvchi topilmadi. U botdan kamida bir marta foydalangan bo‘lishi kerak.")
+        return
+    if recipient.id == db_user.id:
+        await message.answer("❌ O‘zingizga coin yubora olmaysiz.")
+        return
+    if amount_val is not None:
+        await _show_coin_confirm(message, state, db_user, recipient, amount_val)
+    else:
+        await _prompt_coin_amount(message, state, db_user, recipient)
+
+
+@router.message(CoinGiftStates.waiting_recipient, NotCommandFilter())
+async def fsm_cg_recipient(message: Message, state: FSMContext, db_user: User) -> None:
+    data = await state.get_data()
+    if data.get("from_tg") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw:
+        return
+    async with get_session() as session:
+        users = await UserService.search_users_list(session, raw, exclude_user_id=db_user.id, limit=8)
+    if not users:
+        await message.answer("❌ Foydalanuvchi topilmadi. Qayta yozing yoki /cancel.")
+        return
+    if len(users) == 1 and (raw.isdigit() or raw.startswith("@")):
+        await _prompt_coin_amount(message, state, db_user, users[0])
+        return
+    b = InlineKeyboardBuilder()
+    for u in users:
+        uname = f" (@{u.username})" if u.username else ""
+        b.row(
+            InlineKeyboardButton(
+                text=f"👤 {u.display_name}{uname}"[:58],
+                callback_data=GiveCb(owner_id=message.from_user.id, action="cg_rcp", user_card_id=u.id).pack(),
+            )
+        )
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=GiveCb(owner_id=message.from_user.id, action="cancel").pack()))
+    await message.answer("👇 Qabul qiluvchini tanlang:", reply_markup=b.as_markup())
+
+
+@router.callback_query(GiveCb.filter(F.action == "cg_rcp"))
+async def cb_cg_choose_recipient(
+    callback: CallbackQuery, callback_data: GiveCb, state: FSMContext, db_user: User
+) -> None:
+    async with get_session() as session:
+        recipient = await session.get(User, callback_data.user_card_id)
+    if recipient is None or recipient.id == db_user.id or recipient.is_banned:
+        await callback.answer("❌ Foydalanuvchi topilmadi.", show_alert=True)
+        return
+    await _prompt_coin_amount(callback, state, db_user, recipient)
+
+
+@router.message(CoinGiftStates.waiting_amount, NotCommandFilter())
+async def fsm_cg_amount(message: Message, state: FSMContext, db_user: User) -> None:
+    data = await state.get_data()
+    if data.get("from_tg") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("⚠️ Faqat musbat butun son kiriting (masalan: <code>500</code>). Bekor: /cancel")
+        return
+    to_id = int(data.get("cg_to_id") or 0)
+    async with get_session() as session:
+        recipient = await session.get(User, to_id)
+    if recipient is None or recipient.is_banned:
+        await state.clear()
+        await message.answer("❌ Qabul qiluvchi topilmadi.")
+        return
+    await _show_coin_confirm(message, state, db_user, recipient, int(raw))
+
+
+@router.callback_query(GiveCb.filter(F.action == "cg_confirm"))
+async def cb_cg_confirm(
+    callback: CallbackQuery, callback_data: GiveCb, state: FSMContext, db_user: User
+) -> None:
+    data = await state.get_data()
+    to_id = int(data.get("cg_to_id") or callback_data.user_card_id or 0)
+    amount = int(data.get("cg_amount") or 0)
+    if data.get("from_tg") != callback.from_user.id or not to_id or amount <= 0:
+        await callback.answer("Sessiya tugagan. Qaytadan boshlang.", show_alert=True)
+        return
+    async with get_session() as session:
+        ok, msg, received, new_bal = await CoinGiftService.send_coins(session, db_user.id, to_id, amount)
+        recipient = await session.get(User, to_id)
+        if ok and recipient is not None:
+            await CommunityService.notify_user(
+                session,
+                recipient.id,
+                "coin_gift",
+                "🪙 Sizga coin sovg‘a keldi!",
+                f"{db_user.display_name} sizga {received:,} 🪙 yubordi.",
+            )
+            await session.commit()
+        else:
+            await session.rollback()
+    await state.clear()
+    if not ok:
+        await callback.answer(f"❌ {msg}", show_alert=True)
+        return
+    if recipient is not None:
+        try:
+            await callback.bot.send_message(
+                recipient.telegram_id,
+                f"🎁 <b>{esc(db_user.display_name)}</b> sizga <b>+{received:,} 🪙</b> sovg‘a yubordi!",
+            )
+        except Exception:
+            pass
+    fee_taken = max(0, amount - received)
+    fee_txt = f"\n💸 Komissiya: <b>{fee_taken:,} 🪙</b>" if fee_taken else ""
+    await edit_or_answer(
+        callback,
+        f"✅ <b>COIN YUBORILDI!</b>\n━━━━━━━━━━━━━━━\n"
+        f"👤 Qabul qiluvchi: <b>{esc(recipient.display_name if recipient else 'Foydalanuvchi')}</b>\n"
+        f"📤 Yuborildi: <b>{amount:,} 🪙</b>{fee_txt}\n"
+        f"📥 Qabul qildi: <b>{received:,} 🪙</b>\n"
+        f"💰 Yangi balansingiz: <b>{new_bal:,} 🪙</b>",
+        reply_markup=back_home_kb(callback.from_user.id),
+    )
+

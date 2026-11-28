@@ -21,7 +21,7 @@ from services.auction_wishlist_service import AuctionWishlistService
 from services.card_level_service import CardLevelService
 from services.community_service import CommunityService
 from services.user_service import UserService
-from utils.callback_data import NavCb, TradeCb
+from utils.callback_data import NavCb, PageJumpCb, TradeCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc, header
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, is_private_chat, send_card_message
@@ -71,7 +71,7 @@ async def _show_sender_cards_for_trade(
         nav = []
         if page > 1:
             nav.append(InlineKeyboardButton(text="⬅️", callback_data=TradeCb(owner_id=owner_tg_id, act="cards", tid=partner.id, p=page - 1).pack()))
-        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=TradeCb(owner_id=owner_tg_id, act="cards", tid=partner.id, p=page).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=PageJumpCb(owner_id=owner_tg_id, key="t_cd", total=total_pages, tid=partner.id).pack()))
         if page < total_pages:
             nav.append(InlineKeyboardButton(text="➡️", callback_data=TradeCb(owner_id=owner_tg_id, act="cards", tid=partner.id, p=page + 1).pack()))
         b.row(*nav)

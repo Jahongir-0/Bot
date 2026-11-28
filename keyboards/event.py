@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from models.card import Card
 from models.limited_event import LimitedEvent
-from utils.callback_data import AdminCb, EvtCb, NavCb
+from utils.callback_data import AdminCb, EvtCb, NavCb, PageJumpCb
 from utils.constants import get_rarity_meta
 
 
@@ -92,7 +92,12 @@ def admin_evt_candidates_kb(
                 text="⬅️", callback_data=AdminCb(owner_id=owner_id, section="evt", action="pick", page=page - 1).pack()
             )
         )
-    nav.append(InlineKeyboardButton(text=f"{page}/{pages}", callback_data="noop"))
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page}/{pages}",
+            callback_data=PageJumpCb(owner_id=owner_id, key="ad_ev", total=pages).pack(),
+        )
+    )
     if page < pages:
         nav.append(
             InlineKeyboardButton(

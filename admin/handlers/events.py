@@ -5,7 +5,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from admin.filters import IsAdminFilter
@@ -32,7 +32,7 @@ from services.settings_service import SettingsService
 from utils.callback_data import AdminCb
 from utils.constants import EVENT_DURATION_HOURS, get_rarity_meta
 from utils.formatting import esc
-from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
+from utils.tg_helpers import NotCommandFilter, edit_or_answer, show_card_with_prompt
 from utils.timeutils import to_tashkent
 
 logger = logging.getLogger(__name__)
@@ -248,6 +248,18 @@ async def _ask_evt_duration(target, state: FSMContext, owner_id: int) -> None:
         await target.answer(text, reply_markup=kb)
 
 
+async def _render_evt_pick(target, admin_id: int, page: int = 1) -> None:
+    page = max(1, int(page))
+    async with get_session() as session:
+        cards, total = await EventService.list_candidates(session, page=page, page_size=10)
+    text = (
+        f"🎁 <b>YANGI EVENT</b> (Mos kartalar: <b>{total}</b> ta)\nEventga qo‘yiladigan kartani tanlang:"
+        if total > 0
+        else "🎁 <b>YANGI EVENT</b>\n\n📭 Hali guruhga tashlanmagan bo‘sh karta yo‘q."
+    )
+    await edit_or_answer(target, text, reply_markup=admin_evt_candidates_kb(admin_id, cards, page, total, 10))
+
+
 @router.callback_query(AdminCb.filter(F.section == "evt"))
 async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: FSMContext) -> None:
     action = callback_data.action
@@ -260,14 +272,7 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
 
     if action == "pick":
         await state.clear()
-        async with get_session() as session:
-            cards, total = await EventService.list_candidates(session, page=callback_data.page, page_size=10)
-        text = (
-            f"🎁 <b>YANGI EVENT</b> (Mos kartalar: <b>{total}</b> ta)\nEventga qo‘yiladigan kartani tanlang:"
-            if total > 0
-            else "🎁 <b>YANGI EVENT</b>\n\n📭 Hali guruhga tashlanmagan bo‘sh karta yo‘q."
-        )
-        await edit_or_answer(callback, text, reply_markup=admin_evt_candidates_kb(admin_id, cards, callback_data.page, total, 10))
+        await _render_evt_pick(callback, admin_id, page=max(1, callback_data.page))
         return
 
     if action == "card":
@@ -277,13 +282,26 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
         if card is None:
             await callback.answer("Bu karta endi mos emas.", show_alert=True)
             return
+        preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
         await state.set_state(AdminStates.evt_copies)
-        await state.update_data(card_id=card.id, card_name=card.character_name, anime_name=card.anime_name, rarity=card.rarity)
+        await state.update_data(
+            card_id=card.id,
+            card_name=card.character_name,
+            anime_name=card.anime_name,
+            rarity=card.rarity,
+            preset_level=preset_lvl,
+        )
+        cancel_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Bekor qilish", callback_data=AdminCb(owner_id=admin_id, section="evt", action="pick", page=1).pack())]
+            ]
+        )
         await show_card_with_prompt(
             callback,
             card,
             "📦 Necha nusxa sotiladi? Sonni kiriting:",
-            title="🎁 <b>YANGI EVENT</b>",
+            reply_markup=cancel_kb,
+            title="🎯 <b>YANGI EVENT</b>",
         )
         return
 

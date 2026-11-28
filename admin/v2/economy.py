@@ -1,6 +1,7 @@
 """Admin Bot Do'koni, komissiya sozlamalari va karta takliflari (inbox)."""
 
 import logging
+import math
 from typing import Optional
 
 from aiogram import F, Router
@@ -18,10 +19,10 @@ from services.auction_wishlist_service import AuctionWishlistService
 from services.bot_store_service import BotStoreService
 from services.community_service import CommunityService
 from services.settings_service import SettingsService
-from utils.callback_data import AdmV2Cb, AdminCb, BotStoreCb, SuggestCb
+from utils.callback_data import AdmV2Cb, AdminCb, BotStoreCb, PageJumpCb, SuggestCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc
-from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
+from utils.tg_helpers import NotCommandFilter, edit_or_answer
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_v2_economy")
@@ -102,18 +103,50 @@ async def _show_bot_store_listings(target, owner_id: int, page: int = 1) -> None
         )
     if not items:
         lines.append("📭 Hozircha Bot Do‘konida faol kartalar yo‘q.")
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=BotStoreCb(owner_id=owner_id, act="adm", p=page - 1).pack()))
-    if page * 8 < total:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=BotStoreCb(owner_id=owner_id, act="adm", p=page + 1).pack()))
-    if nav:
+    total_pages = max(1, math.ceil(total / 8)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=BotStoreCb(owner_id=owner_id, act="adm", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=PageJumpCb(owner_id=owner_id, key="b_adm", total=total_pages).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=BotStoreCb(owner_id=owner_id, act="adm", p=page + 1).pack()))
         b.row(*nav)
     b.row(
         InlineKeyboardButton(text="➕ Karta qo‘shish", callback_data=BotStoreCb(owner_id=owner_id, act="adm_add", p=1).pack()),
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="bs").pack()),
     )
     await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+async def _show_bot_store_add_pick(target, owner_id: int, page: int = 1) -> None:
+    page = max(1, page)
+    async with get_session() as session:
+        cards, total = await AdminService.get_v2_cards_by_tab(session, tab="all", page=page, page_size=10)
+    b = InlineKeyboardBuilder()
+    for c in cards:
+        meta = get_rarity_meta(c.rarity)
+        b.row(
+            InlineKeyboardButton(
+                text=f"{meta.emoji} {c.character_name[:24]} · {c.anime_name[:16]}"[:60],
+                callback_data=BotStoreCb(owner_id=owner_id, act="adm_pick", lid=c.id, p=page).pack(),
+            )
+        )
+    total_pages = max(1, math.ceil(total / 10)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=BotStoreCb(owner_id=owner_id, act="adm_add", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=PageJumpCb(owner_id=owner_id, key="b_add", total=total_pages).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=BotStoreCb(owner_id=owner_id, act="adm_add", p=page + 1).pack()))
+        b.row(*nav)
+    b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="bs").pack()))
+    await edit_or_answer(
+        target,
+        f"➕ <b>BOT DO‘KONIGA KARTA QO‘SHISH</b> (Jami: {total} ta)\nKatalogdan kartani tanlang:",
+        reply_markup=b.as_markup(),
+    )
 
 
 @router.callback_query(BotStoreCb.filter(F.act.in_({"adm", "adm_add", "adm_pick", "adm_del", "adm_lvl1", "disc"})))
@@ -144,31 +177,7 @@ async def cb_admin_bot_store(
         return
 
     if act == "adm_add":
-        page = max(1, callback_data.p)
-        async with get_session() as session:
-            cards, total = await AdminService.get_v2_cards_by_tab(session, tab="all", page=page, page_size=10)
-        b = InlineKeyboardBuilder()
-        for c in cards:
-            meta = get_rarity_meta(c.rarity)
-            b.row(
-                InlineKeyboardButton(
-                    text=f"{meta.emoji} {c.character_name[:24]} · {c.anime_name[:16]}"[:60],
-                    callback_data=BotStoreCb(owner_id=owner_id, act="adm_pick", lid=c.id, p=page).pack(),
-                )
-            )
-        nav = []
-        if page > 1:
-            nav.append(InlineKeyboardButton(text="⬅️", callback_data=BotStoreCb(owner_id=owner_id, act="adm_add", p=page - 1).pack()))
-        if page * 10 < total:
-            nav.append(InlineKeyboardButton(text="➡️", callback_data=BotStoreCb(owner_id=owner_id, act="adm_add", p=page + 1).pack()))
-        if nav:
-            b.row(*nav)
-        b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="econ", act="bs").pack()))
-        await edit_or_answer(
-            callback,
-            f"➕ <b>BOT DO‘KONIGA KARTA QO‘SHISH</b> (Jami: {total} ta)\nKatalogdan kartani tanlang:",
-            reply_markup=b.as_markup(),
-        )
+        await _show_bot_store_add_pick(callback, owner_id, page=max(1, callback_data.p))
         return
 
     if act == "adm_pick":
@@ -181,12 +190,13 @@ async def cb_admin_bot_store(
         await state.update_data(owner_tg_id=owner_id, bs_card_id=card.id, bs_card_name=card.character_name)
         meta = get_rarity_meta(card.rarity)
         sug_price = int(card.base_value or meta.default_base_value)
-        await show_card_with_prompt(
+        await edit_or_answer(
             callback,
-            card,
-            f"💡 Tavsiya narx: <code>{sug_price}</code> 🪙\n\nSotish narxini (coin) yozing:\n<i>Bekor: /cancel</i>",
+            f"🏛 <b>BOT DO‘KONIGA QO‘SHISH</b>\n\n"
+            f"🎴 Karta: <b>{esc(card.character_name)}</b> ({meta.emoji} {esc(meta.name)})\n"
+            f"💡 Tavsiya narx: <code>{sug_price}</code> 🪙\n\n"
+            f"Sotish narxini (coin) yozing:\n<i>Bekor: /cancel</i>",
             reply_markup=_cancel_kb(owner_id, "econ", "bs"),
-            title="🏛 <b>BOT DO‘KONIGA QO‘SHISH</b>",
         )
         return
 
@@ -410,12 +420,14 @@ async def _show_suggestions_inbox(target, owner_id: int, page: int = 1) -> None:
             )
     if not items:
         lines.append("\n📭 Hozircha karta takliflari yo‘q.")
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=SuggestCb(owner_id=owner_id, act="adm", p=page - 1).pack()))
-    if page * 5 < total:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=SuggestCb(owner_id=owner_id, act="adm", p=page + 1).pack()))
-    if nav:
+    total_pages = max(1, math.ceil(total / 5)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=SuggestCb(owner_id=owner_id, act="adm", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=PageJumpCb(owner_id=owner_id, key="sg_a", total=total_pages).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=SuggestCb(owner_id=owner_id, act="adm", p=page + 1).pack()))
         b.row(*nav)
     b.row(
         InlineKeyboardButton(text="🎴 Kartalar", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()),

@@ -59,7 +59,7 @@ def _apply_card_filters(stmt, count_stmt, mode: str, query: str, include_user_ca
         cond = func.lower(Card.rarity).in_(rarity_aliases)
     elif mode == "card_id":
         cond = _card_id_cond(q, include_user_card_id=include_user_card_id)
-    elif mode == "any":
+    elif mode in ("any", "unowned"):
         cond = or_(
             Card.character_name.ilike(pattern),
             Card.anime_name.ilike(pattern),
@@ -211,37 +211,6 @@ class SearchService:
         return cards, total
 
     @staticmethod
-    async def get_card_owners_map(
-        session: AsyncSession,
-        card_ids: List[int],
-    ) -> "dict[int, List[Tuple[str, int]]]":
-        """Har bir karta uchun barcha egalar: {card_id: [(@username, level), ...]}.
-
-        Bloklangan va hisobotdan chiqarilgan adminlar ko'rsatilmaydi.
-        Eng yuqori daraja birinchi turadi.
-        """
-        from services.admin_service import AdminService
-
-        out: "dict[int, List[Tuple[str, int]]]" = {int(c): [] for c in card_ids}
-        if not card_ids:
-            return out
-        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
-        conds = [UserCard.card_id.in_(list(out.keys())), User.is_banned.is_(False)]
-        if excluded_ids:
-            conds.append(User.id.not_in(excluded_ids))
-        rows = (
-            await session.execute(
-                select(UserCard.card_id, UserCard.level, User)
-                .join(User, User.id == UserCard.user_id)
-                .where(*conds)
-                .order_by(UserCard.level.desc(), UserCard.id.asc())
-            )
-        ).all()
-        for card_id, level, user in rows:
-            out[int(card_id)].append((user.display_name, int(level or 1)))
-        return out
-
-    @staticmethod
     async def inspect_user_card(
         session: AsyncSession,
         user_card_id: int,
@@ -283,3 +252,66 @@ class SearchService:
         if card is None or card.is_deleted:
             return None
         return card
+
+    @staticmethod
+    async def get_card_owners_map(
+        session: AsyncSession, card_ids: List[int]
+    ) -> dict[int, List[tuple[str, int]]]:
+        """{card_id: [(egasi_nomi_yoki_username, level), ...]} — himoyalangan adminlar va ban qilinganlar yashiriladi."""
+        if not card_ids:
+            return {}
+        from services.admin_service import AdminService
+
+        excluded_ids = await AdminService.get_excluded_admin_user_ids(session)
+        conds = [UserCard.card_id.in_(card_ids), User.is_banned.is_(False)]
+        if excluded_ids:
+            conds.append(User.id.not_in(excluded_ids))
+        rows = (
+            await session.execute(
+                select(UserCard.card_id, User.username, User.first_name, UserCard.level)
+                .join(User, User.id == UserCard.user_id)
+                .where(*conds)
+            )
+        ).all()
+        out: dict[int, List[tuple[str, int]]] = {}
+        for cid, uname, fname, lv in rows:
+            label = f"@{uname}" if uname else (fname or "Foydalanuvchi")
+            out.setdefault(int(cid), []).append((label, int(lv or 1)))
+        for lst in out.values():
+            lst.sort(key=lambda item: (-item[1], item[0].lower()))
+        return out
+
+    @staticmethod
+    async def search_admin_cards(session: AsyncSession, query: str = "", limit: int = 20) -> List[Card]:
+        """Admin inline qidiruvi (@bot admin ...): barcha (shu jumladan tushmagan) kartalardan qidiradi."""
+        q = (query or "").strip()
+        stmt = select(Card).where(Card.is_deleted.is_(False))
+        if q:
+            rarity_aliases = get_rarity_aliases(q) or [q.lower()]
+            pat = f"%{q}%"
+            stmt = stmt.where(
+                or_(
+                    Card.character_name.ilike(pat),
+                    Card.anime_name.ilike(pat),
+                    func.lower(Card.rarity).in_(rarity_aliases),
+                    _card_id_cond(q, include_user_card_id=False),
+                )
+            )
+        stmt = stmt.order_by(Card.id.desc()).limit(max(1, min(limit, 30)))
+        return list((await session.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def search_admin_users(session: AsyncSession, query: str = "", limit: int = 20) -> List[User]:
+        """Admin inline qidiruvi (@bot user ...): foydalanuvchilarni ID, @username yoki ism bo'yicha topadi."""
+        q = (query or "").strip().lstrip("@")
+        stmt = select(User)
+        if q:
+            pat = f"%{q}%"
+            conds = [User.username.ilike(pat), User.first_name.ilike(pat)]
+            if q.isdigit():
+                conds.append(User.telegram_id == int(q))
+                conds.append(User.id == int(q))
+            stmt = stmt.where(or_(*conds))
+        stmt = stmt.order_by(User.last_activity.desc().nullslast(), User.id.desc()).limit(max(1, min(limit, 30)))
+        return list((await session.execute(stmt)).scalars().all())
+

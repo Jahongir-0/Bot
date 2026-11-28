@@ -40,6 +40,17 @@ async def _show_rbac_menu(target, owner_id: int, is_super: bool) -> None:
     await edit_or_answer(target, "\n".join(lines), reply_markup=admin_rbac_menu_kb(owner_id, roles, is_super))
 
 
+async def _show_rbac_pick_user(target, owner_id: int, page: int = 1) -> None:
+    page = max(1, page)
+    async with get_session() as session:
+        users, total = await AdminService.get_users_paginated(session, filter_mode="all", page=page, page_size=PAGE_SIZE)
+    await edit_or_answer(
+        target,
+        f"👑 <b>YANGI ADMIN QO‘SHISH</b>\n\nBot foydalanuvchilaridan birini tanlang (Jami: {total}):",
+        reply_markup=admin_rbac_pick_user_kb(owner_id, users, page, total, page_size=PAGE_SIZE),
+    )
+
+
 @router.callback_query(AdmV2Cb.filter(F.sec == "admins"))
 async def cb_v2_admins(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "admins"):
@@ -81,14 +92,7 @@ async def cb_v2_admins(callback: CallbackQuery, callback_data: AdmV2Cb, state: F
         return
 
     if act == "add_pick":
-        page = max(1, callback_data.p)
-        async with get_session() as session:
-            users, total = await AdminService.get_users_paginated(session, filter_mode="all", page=page, page_size=PAGE_SIZE)
-        await edit_or_answer(
-            callback,
-            f"👑 <b>YANGI ADMIN QO‘SHISH</b>\n\nBot foydalanuvchilaridan birini tanlang (Jami: {total}):",
-            reply_markup=admin_rbac_pick_user_kb(owner_id, users, page, total, page_size=PAGE_SIZE),
-        )
+        await _show_rbac_pick_user(callback, owner_id, page=max(1, callback_data.p))
         return
 
     if act in ("add_search", "add_id"):

@@ -395,10 +395,11 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                 await asyncio.gather(*[_send_one(c) for c in targets])
 
             async with get_session() as s_done:
-                for old_cid, new_cid in migrated_msgs:
-                    await s_done.execute(
-                        update(Group).where(Group.telegram_chat_id == old_cid).values(telegram_chat_id=new_cid)
-                    )
+                if migrated_msgs:
+                    from services.group_policy_service import GroupPolicyService
+
+                    for old_cid, new_cid in dict.fromkeys(migrated_msgs):
+                        await GroupPolicyService.migrate_group_chat_id(s_done, old_cid, new_cid)
                 row = await s_done.get(ScheduledMessage, sm.id)
                 if row is not None:
                     row.status = "sent"
@@ -427,6 +428,7 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
 
             _bot_un = await get_bot_username(bot)
             q_text, q_markup = build_quiz_announcement(q, len(qs_res[1]) if qs_res else 0, _bot_un)
+            migrated_q_msgs: List[Tuple[int, int]] = []
             sem_q = asyncio.Semaphore(4)
 
             async def _send_quiz_msg(cid: int) -> None:
@@ -439,13 +441,20 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                         except TelegramRetryAfter as exc:
                             await asyncio.sleep(float(exc.retry_after) + 0.5)
                         except TelegramMigrateToChat as exc:
-                            target_cid = int(exc.migrate_to_chat_id)
+                            new_cid = int(exc.migrate_to_chat_id)
+                            migrated_q_msgs.append((target_cid, new_cid))
+                            target_cid = new_cid
                         except Exception:
                             break
                     await asyncio.sleep(0.05)
 
             if q_targets:
                 await asyncio.gather(*[_send_quiz_msg(c) for c in q_targets])
+            if migrated_q_msgs:
+                async with get_session() as s_mig:
+                    for old_cid, new_cid in dict.fromkeys(migrated_q_msgs):
+                        await GroupPolicyService.migrate_group_chat_id(s_mig, old_cid, new_cid)
+                    await s_mig.commit()
 
     # 2. Avtomatik kunlik backup + eski backuplarni tozalash (~24 soatda bir: 2880 tick * 30s)
     if tick > 0 and tick % 2880 == 120:

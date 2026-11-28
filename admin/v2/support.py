@@ -1,6 +1,7 @@
 """Aloqa so‘rovlari, xavfsizlik (ban) va jurnallar."""
 
 import logging
+import math
 import re
 
 from aiogram import F, Router
@@ -22,7 +23,7 @@ from services.community_service import CommunityService
 from services.security_backup_service import SecurityBackupService
 from services.settings_service import SettingsService
 from services.user_service import UserService
-from utils.callback_data import AdmV2Cb
+from utils.callback_data import AdmV2Cb, PageJumpCb
 from utils.formatting import esc
 from utils.tg_helpers import NotCommandFilter, edit_or_answer
 from utils.timeutils import fmt_tashkent
@@ -216,6 +217,7 @@ async def msg_v2_support_quick_reply(message: Message, reply_ticket_id: int, adm
     await message.answer(f"✅ Javob yuborildi (Murojaat #{tid}).")
 
 
+
 async def _show_security_home(target, owner_id: int) -> None:
     async with get_session() as session:
         maint = await SettingsService.get_value(session, "maintenance", {"enabled": False})
@@ -348,11 +350,8 @@ async def fsm_v2_sec_reason(message: Message, state: FSMContext) -> None:
     await _show_security_home(message, message.from_user.id)
 
 
-@router.callback_query(AdmV2Cb.filter(F.sec == "logs"))
-async def cb_v2_logs(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "logs"):
-        return
-    page = max(1, callback_data.p)
+async def _render_v2_logs(target, owner_id: int, page: int = 1) -> None:
+    page = max(1, page)
     per_page = 15
     async with get_session() as session:
         total = int((await session.execute(select(func.count(AdminAction.id)))).scalar_one() or 0)
@@ -368,12 +367,21 @@ async def cb_v2_logs(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perm
     if not logs:
         lines.append("📭 Loglar bo‘sh.")
     b = InlineKeyboardBuilder()
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="logs", act="v", p=page - 1).pack()))
-    if page * per_page < total:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="logs", act="v", p=page + 1).pack()))
-    if nav:
+    total_pages = max(1, math.ceil(total / per_page)) if total > 0 else 1
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="logs", act="v", p=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=PageJumpCb(owner_id=owner_id, key="av_lg", total=total_pages).pack()))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="logs", act="v", p=page + 1).pack()))
         b.row(*nav)
-    b.row(_back_home_btn(callback.from_user.id))
-    await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
+    b.row(_back_home_btn(owner_id))
+    await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(AdmV2Cb.filter(F.sec == "logs"))
+async def cb_v2_logs(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "logs"):
+        return
+    await _render_v2_logs(callback, callback.from_user.id, page=max(1, callback_data.p))

@@ -49,15 +49,16 @@ async def _show_store_menu(callback: CallbackQuery) -> None:
     await edit_or_answer(callback, text, reply_markup=bot_store_menu_kb(callback.from_user.id))
 
 
-async def _show_buy_list(callback: CallbackQuery, page: int = 1) -> None:
+async def _show_buy_list(target, page: int = 1, owner_id: int | None = None) -> None:
     page = max(1, int(page))
+    uid = owner_id if owner_id is not None else target.from_user.id
     async with get_session() as session:
         items, total = await BotStoreService.list_active_listings(session, page=page, page_size=PAGE_SIZE)
     if not items:
         await edit_or_answer(
-            callback,
+            target,
             f"{header('🏛 <b>BOT DO‘KONIDAN OLISH</b>')}\n📭 Hozircha do‘konda faol karta yo‘q.",
-            reply_markup=bot_store_list_kb(callback.from_user.id, [], page=1, total=0, page_size=PAGE_SIZE),
+            reply_markup=bot_store_list_kb(uid, [], page=1, total=0, page_size=PAGE_SIZE),
         )
         return
     lines = [header("🏛 <b>BOT DO‘KONIDAN OLISH</b>"), f"📦 Jami mavjud: <b>{total}</b> ta\n"]
@@ -70,28 +71,29 @@ async def _show_buy_list(callback: CallbackQuery, page: int = 1) -> None:
         )
     lines.append("\n👇 Tafsilotini ko‘rish uchun tanlang:")
     await edit_or_answer(
-        callback,
+        target,
         "\n".join(lines),
         reply_markup=bot_store_list_kb(
-            callback.from_user.id, items, page=page, total=total, page_size=PAGE_SIZE
+            uid, items, page=page, total=total, page_size=PAGE_SIZE
         ),
     )
 
 
-async def _show_sell_list(callback: CallbackQuery, db_user: User, page: int = 1) -> None:
+async def _show_sell_list(target, db_user: User, page: int = 1, owner_id: int | None = None) -> None:
     page = max(1, int(page))
+    uid = owner_id if owner_id is not None else target.from_user.id
     async with get_session() as session:
         quotes, total = await MarketService.get_bot_sellable_cards(
             session=session, user_id=db_user.id, page=page, page_size=PAGE_SIZE
         )
     if not quotes:
         await edit_or_answer(
-            callback,
+            target,
             f"{header('🤖 <b>BOTGA SOTISH</b>')}\n"
             "📭 Hozircha botga sotish uchun bo‘sh kartalaringiz yo‘q.\n\n"
             "<i>Marketda, auksionda, taklifda yoki almashuvda band kartalar ko‘rsatilmaydi.</i>",
             reply_markup=bot_store_sell_list_kb(
-                callback.from_user.id, [], page=1, total=0, page_size=PAGE_SIZE
+                uid, [], page=1, total=0, page_size=PAGE_SIZE
             ),
         )
         return
@@ -106,10 +108,10 @@ async def _show_sell_list(callback: CallbackQuery, db_user: User, page: int = 1)
         lines.append(f"{meta.emoji} <b>{esc(q.card.character_name)}</b>{lv} — <b>{fmt_coins(q.total_price)} 🪙</b>")
     lines.append("\n👇 Botga sotmoqchi bo‘lgan kartani tanlang:")
     await edit_or_answer(
-        callback,
+        target,
         "\n".join(lines),
         reply_markup=bot_store_sell_list_kb(
-            callback.from_user.id, quotes, page=page, total=total, page_size=PAGE_SIZE
+            uid, quotes, page=page, total=total, page_size=PAGE_SIZE
         ),
     )
 

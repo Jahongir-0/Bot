@@ -13,7 +13,6 @@ from utils.callback_data import AdmV2Cb, AdminCb
 class AdminV2States(StatesGroup):
     # Cards
     waiting_zip_cards = State()
-    waiting_batch_text = State()
     waiting_card_search = State()
     waiting_card_edit_val = State()
     waiting_card_give_user_search = State()

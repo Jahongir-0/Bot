@@ -28,8 +28,8 @@ async def _announce_drop_claimed(msg: Message, result) -> None:
         reward_coins=result.reward_coins,
     )
     try:
-        if msg.photo:
-            await msg.edit_caption(caption=claimed_text, reply_markup=None)
+        if msg.photo or msg.animation or msg.video or msg.document:
+            await msg.edit_caption(caption=claimed_text[:1020], reply_markup=None)
         else:
             await msg.edit_text(text=claimed_text, reply_markup=None)
     except TelegramBadRequest as exc:
@@ -167,7 +167,6 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
     success_text = _claim_success_text(result)
     card_deleted = await safe_delete(bot, chat_id, replied.message_id)
     if not card_deleted:
-        # Botda "xabarlarni o'chirish" ruxsati bo'lmasa: karta xabarini yopib qo'yamiz
         await _announce_drop_claimed(replied, result)
     await safe_delete(bot, chat_id, message.message_id)
     await bot.send_message(chat_id, success_text)

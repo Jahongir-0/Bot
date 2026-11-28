@@ -19,7 +19,7 @@ from services.drop_service import DropService
 from utils.callback_data import AdmV2Cb, AdminCb
 from utils.constants import PAGE_SIZE
 from utils.formatting import esc, format_drop_message
-from utils.tg_helpers import show_card_with_prompt, edit_or_answer, get_bot_username, send_card_visual
+from utils.tg_helpers import edit_or_answer, get_bot_username, send_card_visual, show_card_with_prompt
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_v2_groups_drop")
@@ -27,52 +27,73 @@ router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
 
 
-# ===========================================================================
-# 2. GROUPS UNDROPPED DROP PICKER (sec="groups", act="pick_card" / "drop_sel")
-# ===========================================================================
-@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "pick_card")))
-async def cb_v2_group_pick_card(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "groups"):
-        return
-    gid = callback_data.tid
-    page = max(1, callback_data.p)
+async def _render_group_pick_card(target, owner_id: int, gid: int, page: int = 1) -> None:
+    page = max(1, page)
     async with get_session() as session:
         cards, total = await AdminService.get_undropped_cards_paginated(session, page=page, page_size=PAGE_SIZE)
-    back_cb = AdminCb(owner_id=callback.from_user.id, section="groups", action="group_view", target_id=gid).pack()
+    back_cb = AdminCb(owner_id=owner_id, section="groups", action="group_view", target_id=gid).pack()
     txt = (
         f"🎴 <b>GURUHGA TASHLASH UCHUN KARTA TANLANG</b>\nHali tashlanmagan kartalar (<b>{total}</b> ta):"
         if cards
         else "📭 Hozircha hali guruhga tashlanmagan bo‘sh kartalar yo‘q."
     )
     await edit_or_answer(
-        callback,
+        target,
         txt,
         reply_markup=admin_undropped_cards_kb(
-            callback.from_user.id, cards, "groups", "drop_sel", page, total, back_cb, target_ctx_id=gid, page_size=PAGE_SIZE
+            owner_id, cards, "groups", "drop_sel", page, total, back_cb, target_ctx_id=gid, page_size=PAGE_SIZE
         ),
     )
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "drop_sel")))
-async def cb_v2_group_drop_preview(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    """Karta tanlanganda avval rasm va ma'lumot ko'rsatiladi, keyin tasdiqlash so'raladi."""
+# ===========================================================================
+# 2. GROUPS UNDROPPED DROP PICKER (sec="groups", act="pick_card" / "drop_sel" / "drop_go")
+# ===========================================================================
+@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "pick_card")))
+async def cb_v2_group_pick_card(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "groups"):
         return
+    await _render_group_pick_card(callback, callback.from_user.id, callback_data.tid, page=max(1, callback_data.p))
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "groups") & (F.act == "drop_sel")))
+async def cb_v2_group_drop_preview(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "groups"):
+        return
+    card_id = callback_data.tid
+    group_id = int(callback_data.ext) if callback_data.ext.isdigit() else 0
     async with get_session() as session:
-        card = await session.get(Card, callback_data.tid)
-        group = await session.get(Group, int(callback_data.ext)) if callback_data.ext.isdigit() else None
+        card = await session.get(Card, card_id)
+        group = await session.get(Group, group_id)
     if card is None or group is None:
         await callback.answer("Karta yoki guruh topilmadi.", show_alert=True)
         return
-    o = callback.from_user.id
+    if card.is_event_card:
+        await callback.answer("🎯 Event kartasi guruhga tashlanmaydi.", show_alert=True)
+        return
+    owner_id = callback.from_user.id
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Guruhga tashlash", callback_data=AdmV2Cb(owner_id=o, sec="groups", act="drop_go", tid=card.id, ext=str(group.id)).pack())],
-            [InlineKeyboardButton(text="⬅️ Boshqa karta tanlash", callback_data=AdmV2Cb(owner_id=o, sec="groups", act="pick_card", tid=group.id, p=1).pack())],
+            [
+                InlineKeyboardButton(
+                    text="✅ Ha, shu guruhga tashlash",
+                    callback_data=AdmV2Cb(owner_id=owner_id, sec="groups", act="drop_go", tid=card.id, ext=str(group.id)).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Boshqa karta",
+                    callback_data=AdmV2Cb(owner_id=owner_id, sec="groups", act="pick_card", tid=group.id, p=max(1, callback_data.p)).pack(),
+                )
+            ],
         ]
     )
     await show_card_with_prompt(
-        callback, card, f"👥 Guruh: <b>{esc(group.title)}</b>\nShu kartani guruhga tashlaymizmi?", reply_markup=kb, title="🎴 <b>GURUHGA TASHLASH</b>"
+        callback,
+        card,
+        f"👥 Guruh: <b>{esc(group.title)}</b>\n\nShu kartani guruhga tashlaysizmi?",
+        reply_markup=kb,
+        title="📤 <b>GURUHGA DROP YUBORISH</b>",
     )
 
 

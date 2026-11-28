@@ -1,6 +1,7 @@
 """Bot sozlamalari: kunlik bonus, drop qoidalari, mukofotlar, coin yuborish, VIP, ranking."""
 
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -158,20 +159,117 @@ async def _render_drop_rules(target, owner_id: int) -> None:
     await edit_or_answer(target, f"📡 <b>DROP QOIDALARI</b>\n\n🚫 Guruhda <b>{rules['min_members']}</b> tadan kam haqiqiy a’zo bo‘lsa karta tushmaydi.\n\nO‘zgartirish uchun bosing:", reply_markup=b.as_markup())
 
 
+_VIP_FIELD_LABELS = {
+    "name": "✏️ VIP tarif nomi (masalan: Platinum VIP)",
+    "emoji": "😀 VIP belgisi / emoji (masalan: 👑)",
+    "coins": "🪙 Coin narxi (0 = coin bilan sotilmaydi)",
+    "stars": "⭐ Telegram Stars narxi (0 = Stars bilan sotilmaydi)",
+    "days": "⏳ Amal qilish muddati (kun, kamida 1)",
+    "mult": "🎁 Kunlik bonus ko‘paytiruvchisi (masalan: 1.5, 2, 3)",
+}
+
+
+def _slug_vip_key(name: str, existing: dict) -> str:
+    raw = re.sub(r"[^a-z0-9_]+", "_", (name or "").lower()).strip("_")
+    base = (raw[:10] if raw else "vip").strip("_") or "vip"
+    if base not in existing and len(base) <= 12:
+        return base
+    for idx in range(2, 100):
+        suf = str(idx)
+        cand = f"{base[: max(1, 12 - len(suf))]}{suf}"
+        if cand not in existing:
+            return cand
+    return f"vip{len(existing) + 1}"[:12]
+
+
 async def _render_vip_menu(target, owner_id: int) -> None:
     async with get_session() as session:
         vcfg = await CommunityService.get_vip_config(session)
     tiers = vcfg.get("tiers") or {}
-    lines = ["💎 <b>VIP OBUNA NARXLARI</b>\n"]
+    lines = ["💎 <b>VIP TARIFLAR BOSHQARUVI</b>\n━━━━━━━━━━━━━━━"]
     b = InlineKeyboardBuilder()
     for key, t in tiers.items():
-        lines.append(f"{t.get('emoji', '💎')} <b>{esc(t.get('name', key))}</b>: {int(t.get('coins', 0)):,} 🪙 | {int(t.get('stars', 0)):,} ⭐ ({t.get('duration_days', 30)} kun)")
-        b.row(
-            InlineKeyboardButton(text=f"🪙 {key} Coin", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}.coins").pack()),
-            InlineKeyboardButton(text=f"⭐ {key} Stars", callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_ed", extra=f"{key}.stars").pack()),
+        emoji = t.get("emoji", "💎")
+        name = t.get("name", key)
+        coins = int(t.get("coins", 0) or 0)
+        stars = int(t.get("stars", 0) or 0)
+        days = max(1, int(t.get("duration_days", 30) or 30))
+        mult = float(t.get("daily_bonus_mult", 1.0) or 1.0)
+        perks = []
+        if t.get("no_ads", False):
+            perks.append("🚫 Reklamasiz")
+        if t.get("bypass_forced_sub", False):
+            perks.append("🔓 Obunasiz")
+        perk_txt = f" · {', '.join(perks)}" if perks else ""
+        lines.append(
+            f"{emoji} <b>{esc(name)}</b> (<code>{esc(key)}</code>)\n"
+            f"   🪙 {coins:,} | ⭐ {stars:,} | ⏳ {days} kun | 🎁 {mult:g}x{perk_txt}"
         )
+        b.row(
+            InlineKeyboardButton(
+                text=f"{emoji} {name[:24]} — Tahrirlash",
+                callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_det", extra=key).pack(),
+            )
+        )
+    b.row(
+        InlineKeyboardButton(
+            text="➕ Yangi VIP tarif qo‘shish",
+            callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_add").pack(),
+        )
+    )
     b.row(InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="settings").pack()))
     await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
+
+
+async def _render_vip_tier_detail(target, owner_id: int, tier_key: str) -> None:
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+    tiers = vcfg.get("tiers") or {}
+    t = tiers.get(tier_key)
+    if not isinstance(t, dict):
+        await _render_vip_menu(target, owner_id)
+        return
+    emoji = t.get("emoji", "💎")
+    name = t.get("name", tier_key)
+    coins = int(t.get("coins", 0) or 0)
+    stars = int(t.get("stars", 0) or 0)
+    days = max(1, int(t.get("duration_days", 30) or 30))
+    mult = float(t.get("daily_bonus_mult", 1.0) or 1.0)
+    no_ads = bool(t.get("no_ads", False))
+    bypass_sub = bool(t.get("bypass_forced_sub", False))
+
+    text = (
+        f"{emoji} <b>{esc(name)}</b> (<code>{esc(tier_key)}</code>)\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"🪙 Coin narxi: <b>{coins:,}</b>\n"
+        f"⭐ Stars narxi: <b>{stars:,}</b>\n"
+        f"⏳ Muddati: <b>{days} kun</b>\n"
+        f"🎁 Kunlik bonus: <b>{mult:g}x</b>\n"
+        f"🚫 Reklamasiz: <b>{'✅ Ha' if no_ads else '❌ Yo‘q'}</b>\n"
+        f"🔓 Majburiy obunadan ozod: <b>{'✅ Ha' if bypass_sub else '❌ Yo‘q'}</b>"
+    )
+    cb = lambda act, extra="": AdminCb(owner_id=owner_id, section="settings", action=act, extra=extra).pack()  # noqa: E731
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✏️ Nomi", callback_data=cb("vip_ed", f"{tier_key}.name")),
+        InlineKeyboardButton(text="😀 Emoji", callback_data=cb("vip_ed", f"{tier_key}.emoji")),
+    )
+    b.row(
+        InlineKeyboardButton(text=f"🪙 Coin: {coins:,}", callback_data=cb("vip_ed", f"{tier_key}.coins")),
+        InlineKeyboardButton(text=f"⭐ Stars: {stars:,}", callback_data=cb("vip_ed", f"{tier_key}.stars")),
+    )
+    b.row(
+        InlineKeyboardButton(text=f"⏳ Muddat: {days}k", callback_data=cb("vip_ed", f"{tier_key}.days")),
+        InlineKeyboardButton(text=f"🎁 Bonus: {mult:g}x", callback_data=cb("vip_ed", f"{tier_key}.mult")),
+    )
+    b.row(
+        InlineKeyboardButton(text=f"🚫 Reklamasiz: {'✅' if no_ads else '❌'}", callback_data=cb("vip_tog", f"{tier_key}.no_ads")),
+        InlineKeyboardButton(text=f"🔓 Obunasiz: {'✅' if bypass_sub else '❌'}", callback_data=cb("vip_tog", f"{tier_key}.sub")),
+    )
+    if len(tiers) > 1:
+        b.row(InlineKeyboardButton(text="🗑 Tarifni o‘chirish", callback_data=cb("vip_del", tier_key)))
+    b.row(InlineKeyboardButton(text="⬅️ VIP tariflar", callback_data=cb("vip_menu")))
+    await edit_or_answer(target, text, reply_markup=b.as_markup())
 
 
 # ---------------------------------------------------------------------------
@@ -331,15 +429,92 @@ async def cb_admin_settings(callback: CallbackQuery, callback_data: AdminCb, sta
         await _render_vip_menu(callback, owner_id)
         return
 
-    if act == "vip_ed":
-        tier_metric = callback_data.extra or ""
-        await state.set_state(AdminStates.edit_vip_price)
-        await state.update_data(owner_tg_id=owner_id, vip_key=tier_metric)
-        pretty = tier_metric.replace(".coins", " — Coin narxi").replace(".stars", " — Stars narxi")
+    if act == "vip_det":
+        await state.clear()
+        tier_key = callback_data.extra or ""
+        await _render_vip_tier_detail(callback, owner_id, tier_key)
+        return
+
+    if act == "vip_add":
+        await state.set_state(AdminStates.add_vip_name)
+        await state.update_data(owner_tg_id=owner_id)
         await edit_or_answer(
             callback,
-            f"💎 <b>{esc(pretty)}</b>\n\nYangi narxni kiriting (faqat musbat son):",
+            "💎 <b>YANGI VIP TARIF QO‘SHISH</b> (1/4)\n\n"
+            "Tarif nomini kiriting (masalan: <code>Platinum VIP</code>):",
             reply_markup=_settings_cancel_kb(owner_id, "vip_menu"),
+        )
+        return
+
+    if act == "vip_tog":
+        raw_ex = callback_data.extra or ""
+        if "." not in raw_ex:
+            await callback.answer("Tarif topilmadi.", show_alert=True)
+            return
+        tier_key, flag = raw_ex.rsplit(".", 1)
+        field_name = "no_ads" if flag == "no_ads" else ("bypass_forced_sub" if flag == "sub" else "")
+        if not field_name:
+            await callback.answer("Noma’lum parametr.", show_alert=True)
+            return
+        async with get_session() as session:
+            vcfg = await CommunityService.get_vip_config(session)
+            tiers = {k: dict(v) for k, v in (vcfg.get("tiers") or {}).items()}
+            if tier_key not in tiers:
+                await callback.answer("Tarif topilmadi.", show_alert=True)
+                return
+            tiers[tier_key][field_name] = not bool(tiers[tier_key].get(field_name, False))
+            vcfg["tiers"] = tiers
+            await SettingsService.set_value(session, "vip_config", vcfg)
+            await AdminService.log_action(
+                session, owner_id, "toggle_vip_perk", "settings", f"{tier_key}.{field_name}", {"value": tiers[tier_key][field_name]}
+            )
+            await session.commit()
+        await callback.answer("✅ Yangilandi!")
+        await _render_vip_tier_detail(callback, owner_id, tier_key)
+        return
+
+    if act == "vip_del":
+        tier_key = callback_data.extra or ""
+        async with get_session() as session:
+            vcfg = await CommunityService.get_vip_config(session)
+            tiers = {k: dict(v) for k, v in (vcfg.get("tiers") or {}).items()}
+            if len(tiers) <= 1:
+                await callback.answer("⚠️ Kamida 1 ta VIP tarif qolishi shart.", show_alert=True)
+                return
+            if tier_key not in tiers:
+                await callback.answer("Tarif topilmadi.", show_alert=True)
+                return
+            del tiers[tier_key]
+            vcfg["tiers"] = tiers
+            await SettingsService.set_value(session, "vip_config", vcfg)
+            await AdminService.log_action(session, owner_id, "delete_vip_tier", "settings", tier_key, {})
+            await session.commit()
+        await callback.answer("🗑 VIP tarif o‘chirildi!")
+        await _render_vip_menu(callback, owner_id)
+        return
+
+    if act == "vip_ed":
+        tier_metric = callback_data.extra or ""
+        if "." not in tier_metric:
+            await callback.answer("Tarif topilmadi.", show_alert=True)
+            return
+        tier_key, field = tier_metric.rsplit(".", 1)
+        if field not in _VIP_FIELD_LABELS:
+            await callback.answer("Noma’lum maydon.", show_alert=True)
+            return
+        await state.set_state(AdminStates.edit_vip_field)
+        await state.update_data(owner_tg_id=owner_id, vip_tier=tier_key, vip_field=field)
+        await edit_or_answer(
+            callback,
+            f"💎 <b>{esc(tier_key)}</b> — {esc(_VIP_FIELD_LABELS[field])}\n\nYangi qiymatni kiriting:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="❌ Bekor qilish",
+                        callback_data=AdminCb(owner_id=owner_id, section="settings", action="vip_det", extra=tier_key).pack(),
+                    )
+                ]]
+            ),
         )
         return
 
@@ -501,6 +676,167 @@ async def fsm_edit_vip_price(message: Message, state: FSMContext) -> None:
             await session.commit()
     await message.answer(f"✅ {esc(tier_key)} narxi = <b>{int(raw):,}</b> saqlandi!")
     await _render_vip_menu(message, message.from_user.id)
+
+
+@router.message(AdminStates.edit_vip_field, NotCommandFilter())
+async def fsm_edit_vip_field(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    tier_key = str(data.get("vip_tier") or "")
+    field = str(data.get("vip_field") or "")
+    raw_txt = (message.text or "").strip()
+
+    store_key = field
+    parsed_val: object
+    if field == "name":
+        if not raw_txt or len(raw_txt) > 32:
+            await message.answer("⚠️ Nom 1 dan 32 tagacha belgi bo‘lsin.")
+            return
+        parsed_val = raw_txt
+    elif field == "emoji":
+        tok = raw_txt.split()[0] if raw_txt else ""
+        if not tok or len(tok) > 8:
+            await message.answer("⚠️ 1–2 ta emoji kiriting (masalan: 👑).")
+            return
+        parsed_val = tok
+    elif field in ("coins", "stars"):
+        num_str = raw_txt.replace(",", "").replace(" ", "")
+        if not num_str.isdigit() or int(num_str) < 0:
+            await message.answer("⚠️ 0 yoki musbat butun son kiriting.")
+            return
+        parsed_val = int(num_str)
+    elif field == "days":
+        num_str = raw_txt.replace(",", "").replace(" ", "")
+        if not num_str.isdigit() or not (1 <= int(num_str) <= 3650):
+            await message.answer("⚠️ Muddat 1 dan 3650 kungacha bo‘lishi kerak.")
+            return
+        store_key = "duration_days"
+        parsed_val = int(num_str)
+    elif field == "mult":
+        num_str = raw_txt.replace(",", ".").replace(" ", "")
+        try:
+            fval = round(float(num_str), 2)
+        except ValueError:
+            await message.answer("⚠️ Masalan <code>1.5</code> yoki <code>2</code> kabi son kiriting.")
+            return
+        if not (1.0 <= fval <= 20.0):
+            await message.answer("⚠️ Ko‘paytiruvchi 1.0 dan 20.0 gacha bo‘lsin.")
+            return
+        store_key = "daily_bonus_mult"
+        parsed_val = fval
+    else:
+        await state.clear()
+        await _render_vip_menu(message, message.from_user.id)
+        return
+
+    await state.clear()
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+        tiers = {k: dict(v) for k, v in (vcfg.get("tiers") or {}).items()}
+        if tier_key in tiers:
+            tiers[tier_key][store_key] = parsed_val
+            vcfg["tiers"] = tiers
+            await SettingsService.set_value(session, "vip_config", vcfg)
+            await AdminService.log_action(
+                session, message.from_user.id, "edit_vip_tier", "settings", f"{tier_key}.{store_key}", {"value": parsed_val}
+            )
+            await session.commit()
+    await _render_vip_tier_detail(message, message.from_user.id, tier_key)
+
+
+@router.message(AdminStates.add_vip_name, NotCommandFilter())
+async def fsm_add_vip_name(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 32:
+        await message.answer("⚠️ Tarif nomi 1 dan 32 tagacha belgi bo‘lsin.")
+        return
+    await state.update_data(new_vip_name=name)
+    await state.set_state(AdminStates.add_vip_coins)
+    await message.answer(
+        f"💎 <b>{esc(name)}</b> (2/4)\n\n"
+        "Coin narxini kiriting (<code>0</code> — coin bilan sotilmaydi):",
+        reply_markup=_settings_cancel_kb(message.from_user.id, "vip_menu"),
+    )
+
+
+@router.message(AdminStates.add_vip_coins, NotCommandFilter())
+async def fsm_add_vip_coins(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or int(raw) < 0:
+        await message.answer("⚠️ 0 yoki musbat butun son kiriting.")
+        return
+    await state.update_data(new_vip_coins=int(raw))
+    await state.set_state(AdminStates.add_vip_stars)
+    await message.answer(
+        f"💎 <b>{esc(data.get('new_vip_name', 'VIP'))}</b> (3/4)\n\n"
+        "Telegram Stars narxini kiriting (<code>0</code> — Stars bilan sotilmaydi):",
+        reply_markup=_settings_cancel_kb(message.from_user.id, "vip_menu"),
+    )
+
+
+@router.message(AdminStates.add_vip_stars, NotCommandFilter())
+async def fsm_add_vip_stars(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or int(raw) < 0:
+        await message.answer("⚠️ 0 yoki musbat butun son kiriting.")
+        return
+    coins_val = int(data.get("new_vip_coins", 0) or 0)
+    stars_val = int(raw)
+    if coins_val == 0 and stars_val == 0:
+        await message.answer("⚠️ Coin yoki Stars narxidan kamida bittasi 0 dan katta bo‘lishi kerak.")
+        return
+    await state.update_data(new_vip_stars=stars_val)
+    await state.set_state(AdminStates.add_vip_days)
+    await message.answer(
+        f"💎 <b>{esc(data.get('new_vip_name', 'VIP'))}</b> (4/4)\n\n"
+        "Amal qilish muddatini kiriting (kun, masalan: <code>30</code>):",
+        reply_markup=_settings_cancel_kb(message.from_user.id, "vip_menu"),
+    )
+
+
+@router.message(AdminStates.add_vip_days, NotCommandFilter())
+async def fsm_add_vip_days(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip().replace(",", "").replace(" ", "")
+    if not raw.isdigit() or not (1 <= int(raw) <= 3650):
+        await message.answer("⚠️ Muddat 1 dan 3650 kungacha butun son bo‘lsin.")
+        return
+    days = int(raw)
+    name = str(data.get("new_vip_name") or "VIP")
+    coins_val = int(data.get("new_vip_coins", 0) or 0)
+    stars_val = int(data.get("new_vip_stars", 0) or 0)
+    await state.clear()
+    async with get_session() as session:
+        vcfg = await CommunityService.get_vip_config(session)
+        tiers = {k: dict(v) for k, v in (vcfg.get("tiers") or {}).items()}
+        new_key = _slug_vip_key(name, tiers)
+        tiers[new_key] = {
+            "name": name,
+            "emoji": "💎",
+            "stars": stars_val,
+            "coins": coins_val,
+            "duration_days": days,
+            "daily_bonus_mult": 1.5,
+            "no_ads": True,
+            "bypass_forced_sub": False,
+        }
+        vcfg["tiers"] = tiers
+        await SettingsService.set_value(session, "vip_config", vcfg)
+        await AdminService.log_action(session, message.from_user.id, "add_vip_tier", "settings", new_key, tiers[new_key])
+        await session.commit()
+    await _render_vip_tier_detail(message, message.from_user.id, new_key)
 
 
 _CG_LABELS = {

@@ -8,7 +8,7 @@ from models.card import Card
 from models.group import Group
 from models.schedule import DropSchedule
 from models.user import User
-from utils.callback_data import AdmV2Cb, AdminCb, NavCb
+from utils.callback_data import AdmV2Cb, AdminCb, NavCb, PageJumpCb
 from utils.constants import RankingMode, get_rarity_meta
 
 
@@ -56,7 +56,17 @@ def admin_cards_list_kb(
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdminCb(owner_id=owner_id, section="cards", action=mode, extra=filter_mode, page=page - 1).pack()))
-    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdminCb(owner_id=owner_id, section="cards", action=mode, extra=filter_mode, page=page).pack()))
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data=PageJumpCb(
+                owner_id=owner_id,
+                key="av_tab",
+                total=total_pages,
+                ext=(filter_mode or "all").replace(":", " ")[:16],
+            ).pack(),
+        )
+    )
     if page < total_pages:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=AdminCb(owner_id=owner_id, section="cards", action=mode, extra=filter_mode, page=page + 1).pack()))
     builder.row(*nav)
@@ -174,7 +184,12 @@ def admin_users_list_kb(
     nav.append(
         InlineKeyboardButton(
             text=f"{page}/{total_pages}",
-            callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra=filter_mode, page=page).pack(),
+            callback_data=PageJumpCb(
+                owner_id=owner_id,
+                key="ad_ul",
+                total=total_pages,
+                ext=(filter_mode or "all").replace(":", " ")[:12],
+            ).pack(),
         )
     )
     if page < total_pages:
@@ -275,6 +290,7 @@ def admin_pick_card_for_user_kb(
                     action="give_prev",
                     target_id=target_user_id,
                     extra=str(c.id),
+                    page=page,
                 ).pack(),
             )
         )
@@ -282,7 +298,17 @@ def admin_pick_card_for_user_kb(
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdminCb(owner_id=owner_id, section="users", action="give_pick", target_id=target_user_id, page=page - 1).pack()))
-    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdminCb(owner_id=owner_id, section="users", action="give_pick", target_id=target_user_id, page=page).pack()))
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data=PageJumpCb(
+                owner_id=owner_id,
+                key="ad_gp",
+                total=total_pages,
+                tid=target_user_id,
+            ).pack(),
+        )
+    )
     if page < total_pages:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=AdminCb(owner_id=owner_id, section="users", action="give_pick", target_id=target_user_id, page=page + 1).pack()))
     builder.row(*nav)
@@ -377,7 +403,17 @@ def admin_groups_list_kb(
         ext_val = filter_mode if section == "groups" else ""
         if page > 1:
             nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, extra=ext_val, page=page - 1).pack()))
-        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, extra=ext_val, page=page).pack()))
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=PageJumpCb(
+                    owner_id=owner_id,
+                    key="ad_gl",
+                    total=total_pages,
+                    ext=f"{section}|{ext_val}"[:18],
+                ).pack(),
+            )
+        )
         if page < total_pages:
             nav.append(InlineKeyboardButton(text="➡️", callback_data=AdminCb(owner_id=owner_id, section=section, action=act_list, extra=ext_val, page=page + 1).pack()))
         builder.row(*nav)

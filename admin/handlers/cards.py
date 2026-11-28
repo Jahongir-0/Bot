@@ -23,7 +23,6 @@ from services.community_service import CommunityService
 from services.drop_service import DropService
 from services.gameplay_service import GameplayService
 from services.settings_service import SettingsService
-from utils import admin_nav
 from utils.callback_data import AdmV2Cb, AdminCb
 from utils.constants import MEDIA_TYPES
 from utils.formatting import esc, format_card_block, format_drop_message
@@ -32,6 +31,7 @@ from utils.tg_helpers import (
     NotCommandFilter,
     edit_or_answer,
     get_bot_username,
+    safe_delete,
     send_card_message,
     send_card_visual,
 )
@@ -158,8 +158,8 @@ async def cb_admin_card_delete_confirm(callback: CallbackQuery, callback_data: A
             ],
             [
                 InlineKeyboardButton(
-                    text="⬅️ BEKOR (ro‘yxat)",
-                    callback_data=admin_nav.back_callback(callback.from_user.id),
+                    text="⬅️ BEKOR",
+                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="del_list", p=1).pack(),
                 )
             ],
         ]
@@ -183,13 +183,8 @@ async def cb_admin_card_delete_exec(callback: CallbackQuery, callback_data: Admi
     await callback.answer(f"✅ Karta o‘chirildi ({mode}).", show_alert=True)
     await edit_or_answer(
         callback,
-        f"✅ Karta o‘chirildi (rejim: <b>{esc(mode)}</b>).\nO‘chirishni davom ettirish uchun ro‘yxatga qayting 👇",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Ro‘yxatga qaytish", callback_data=admin_nav.back_callback(callback.from_user.id))],
-                [InlineKeyboardButton(text="🎴 Kartalar menyusi", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="v").pack())],
-            ]
-        ),
+        f"✅ Karta o‘chirildi (rejim: <b>{esc(mode)}</b>).",
+        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id),
     )
 
 
@@ -229,6 +224,20 @@ def _media_type_pick_kb(owner_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+async def _cleanup_add_step(bot, chat_id: int, state: FSMContext, *extra_ids: int) -> None:
+    data = await state.get_data()
+    ids = list(data.get("trash_ids") or [])
+    pid = data.get("prompt_id")
+    if pid:
+        ids.append(int(pid))
+    for mid in extra_ids:
+        if mid:
+            ids.append(int(mid))
+    for mid in dict.fromkeys(ids):
+        await safe_delete(bot, chat_id, mid)
+    await state.update_data(trash_ids=[], prompt_id=None)
+
+
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_start")))
 async def cb_admin_add_card_start(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
     if not has_admin_perm(callback.from_user, admin_perms, "cards"):
@@ -245,20 +254,27 @@ async def cb_admin_add_card_start(callback: CallbackQuery, state: FSMContext, ad
         "1/6: <b>Personaj ismini</b> yozing (masalan: <code>Gojo Satoru</code>):",
         reply_markup=kb,
     )
+    if callback.message:
+        await state.update_data(prompt_id=callback.message.message_id, trash_ids=[])
 
 
 @router.message(AdminStates.add_card_character, NotCommandFilter())
 async def fsm_add_card_char(message: Message, state: FSMContext) -> None:
     name = _clean_name(message.text or "")
     if not name or len(name) > 128:
-        await message.answer("⚠️ Personaj ismini matn bilan yozing (1–128 belgi).")
+        w = await message.answer("⚠️ Personaj ismini matn bilan yozing (1–128 belgi).")
+        data = await state.get_data()
+        trash = list(data.get("trash_ids") or []) + [message.message_id, w.message_id]
+        await state.update_data(trash_ids=trash[-20:])
         return
+    await _cleanup_add_step(message.bot, message.chat.id, state, message.message_id)
     await state.update_data(character_name=name)
     await state.set_state(AdminStates.add_card_media_type)
-    await message.answer(
+    sent = await message.answer(
         "2/6: <b>Media turini</b> tanlang:",
         reply_markup=_media_type_pick_kb(message.from_user.id),
     )
+    await state.update_data(prompt_id=sent.message_id)
 
 
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_mtype")))
@@ -271,14 +287,20 @@ async def cb_admin_add_card_mtype(callback: CallbackQuery, callback_data: AdminC
         f"✅ Media turi: <b>{esc(mtype)}</b>\n\n"
         f"3/6: <b>{esc(mtype)} nomini</b> yozing (masalan: <code>Jujutsu Kaisen</code>):",
     )
+    if callback.message:
+        await state.update_data(prompt_id=callback.message.message_id)
 
 
 @router.message(AdminStates.add_card_anime, NotCommandFilter())
 async def fsm_add_card_anime(message: Message, state: FSMContext) -> None:
     anime = _clean_name(message.text or "")
     if not anime or len(anime) > 128:
-        await message.answer("⚠️ Media nomini matn bilan yozing (1–128 belgi).")
+        w = await message.answer("⚠️ Media nomini matn bilan yozing (1–128 belgi).")
+        data = await state.get_data()
+        trash = list(data.get("trash_ids") or []) + [message.message_id, w.message_id]
+        await state.update_data(trash_ids=trash[-20:])
         return
+    await _cleanup_add_step(message.bot, message.chat.id, state, message.message_id)
     await state.update_data(anime_name=anime)
     await state.set_state(AdminStates.add_card_meta)
     skip_kb = InlineKeyboardMarkup(
@@ -291,11 +313,12 @@ async def fsm_add_card_anime(message: Message, state: FSMContext) -> None:
             ]
         ]
     )
-    await message.answer(
+    sent = await message.answer(
         "4/6: <b>Personaj haqida ma’lumot yozing</b> (ixtiyoriy):\n"
         "<i>Qisqacha tavsif yozing yoki O‘tkazib yuborish tugmasini bosing.</i>",
         reply_markup=skip_kb,
     )
+    await state.update_data(prompt_id=sent.message_id)
 
 
 async def _proceed_to_rarity_pick(target, state: FSMContext, owner_id: int) -> None:
@@ -348,8 +371,11 @@ async def _proceed_to_rarity_pick(target, state: FSMContext, owner_id: int) -> N
     )
     if isinstance(target, CallbackQuery):
         await edit_or_answer(target, text, reply_markup=builder.as_markup())
+        if target.message:
+            await state.update_data(prompt_id=target.message.message_id)
     else:
-        await target.answer(text, reply_markup=builder.as_markup())
+        sent = await target.answer(text, reply_markup=builder.as_markup())
+        await state.update_data(prompt_id=sent.message_id)
 
 
 @router.callback_query(AdminCb.filter((F.section == "cards") & (F.action == "add_meta_skip")))
@@ -360,6 +386,7 @@ async def cb_admin_add_meta_skip(callback: CallbackQuery, state: FSMContext) -> 
 
 @router.message(AdminStates.add_card_meta, NotCommandFilter())
 async def fsm_add_card_meta(message: Message, state: FSMContext) -> None:
+    await _cleanup_add_step(message.bot, message.chat.id, state, message.message_id)
     raw = (message.text or "").strip()
     meta_dict = {"description": raw} if raw else {}
     await state.update_data(metadata_json=meta_dict, aliases=[])
@@ -398,19 +425,26 @@ async def cb_admin_add_card_rarity(callback: CallbackQuery, callback_data: Admin
         "• Telegram’da <b>foto</b> sifatida, yoki\n"
         "• to‘g‘ri havola: <code>https://...jpg</code> / png / webp",
     )
+    if callback.message:
+        await state.update_data(prompt_id=callback.message.message_id)
 
 
 @router.message(AdminStates.add_card_image, NotCommandFilter())
 async def fsm_add_card_image(message: Message, state: FSMContext) -> None:
     image_ref, file_id, err = await _extract_image(message)
     if err:
-        await message.answer(err)
+        w = await message.answer(err)
+        data = await state.get_data()
+        trash = list(data.get("trash_ids") or []) + [message.message_id, w.message_id]
+        await state.update_data(trash_ids=trash[-20:])
         return
     data = await state.get_data()
     if not all(k in data for k in ("character_name", "anime_name", "rarity")):
+        await _cleanup_add_step(message.bot, message.chat.id, state, message.message_id)
         await state.clear()
         await message.answer("⚠️ Jarayon eskirgan.", reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
         return
+    await _cleanup_add_step(message.bot, message.chat.id, state, message.message_id)
     await state.clear()
 
     async with get_session() as session:

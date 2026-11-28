@@ -28,7 +28,6 @@ def level_badge(level: int) -> str:
 
 
 # Daraja temalari: daraja oshgani sari karta ko'rinishi (ramka, nishon, bezak) chiroyliroq bo'lib boradi.
-# (nom, ramka belgisi, yuqori/pastki chiziq, nishon matni, nom bezagi)
 _TIERS = (
     (10, "legend", "👑✨", "━━━━━━━━━━━━━━", "👑 <b>A F S O N A   K A R T A</b> 👑", "👑"),
     (9, "crystal", "💠💎", "━━━━━━━━━━━━━━", "💎 <b>KRISTAL KARTA</b> — oltin pog‘onaga bir qadam", "💎"),
@@ -49,7 +48,7 @@ def level_theme(level: int) -> dict:
 
 
 def level_frame(level: int):
-    """(yuqori chiziq, pastki chiziq, nishon matni) — har doim qaytadi (1-daraja uchun oddiy ramka)."""
+    """(yuqori chiziq, pastki chiziq, nishon matni) — har doim qaytadi."""
     th = level_theme(level)
     return th["top"], th["bottom"], th["badge"]
 
@@ -133,7 +132,7 @@ def format_v25_card_caption(
     owner_name: Optional[str] = None,
     status_line: str = "",
 ) -> str:
-    """Karta tafsiloti: daraja oshgani sari ramka, nishon va bezaklar boyib boradi (caption <= 1024)."""
+    """Bot 2.5 karta tafsiloti matni (photo caption <= 1024 belgi)."""
     meta = get_rarity_meta(card.rarity)
     rank_upper = str(meta.name or card.rarity or "BASIC").upper()
     mtype = getattr(card, "media_type", "Anime") or "Anime"
@@ -147,7 +146,11 @@ def format_v25_card_caption(
         price_part = f"💎 {fmt_coins(shown_coins)} 🪙"
 
     id_text = single_id or (card.card_code or f"CRD-{card.id:04d}")
-    owner_line = f"👤 Egasi: <b>{esc(owner_name)}</b>" if owner_name else "👤 Sizning kolleksiyangizda"
+    owner_line = (
+        f"👤 Egasi: <b>{esc(owner_name)}</b>"
+        if owner_name
+        else "👤 Sizning kolleksiyangizda"
+    )
     deco = th["deco"]
     name_line = f"{deco} <b>{esc(card.character_name)}</b> {deco}".strip() if deco else f"🎴 <b>{esc(card.character_name)}</b>"
 
@@ -171,9 +174,10 @@ def format_v25_card_caption(
     ]
     if card.is_event_card:
         total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
-        lines.append(f"🎯 <b>Event karta</b> ({total})")
-    if status_line:
-        lines.extend(["", status_line])
+        lines.append(f"🎯 Event karta ({total})")
+    clean_status = (status_line or "").strip()
+    if clean_status and clean_status != f"🆔 {id_text}" and f"<code>{id_text}</code>" not in clean_status:
+        lines.extend(["", clean_status])
     if th["badge"]:
         lines.extend(["", th["badge"]])
     lines.append(th["bottom"])
@@ -184,8 +188,12 @@ def format_v25_card_caption(
     return out
 
 
-def format_card_about(card: Card) -> str:
-    meta_dict = getattr(card, "metadata_json", None) or {}
+def format_card_about(
+    card: Card,
+    meta_override: Optional[dict] = None,
+    aliases_override: Optional[List[str]] = None,
+) -> str:
+    meta_dict = meta_override if meta_override is not None else (getattr(card, "metadata_json", None) or {})
     lines = [
         f"📖 <b>{esc(card.character_name)}</b> — batafsil ma’lumot",
         f"📺 {esc(getattr(card, 'media_type', 'Anime'))}: {esc(card.anime_name)}",
@@ -207,7 +215,7 @@ def format_card_about(card: Card) -> str:
         if val:
             any_data = True
             lines.append(f"<b>{label}:</b> {esc(val)}")
-    aliases = getattr(card, "aliases", None) or []
+    aliases = aliases_override if aliases_override is not None else (getattr(card, "aliases", None) or [])
     if aliases:
         any_data = True
         lines.append(f"<b>🏷 Aliaslar:</b> {esc(', '.join(str(a) for a in aliases))}")
@@ -507,6 +515,11 @@ def format_card_with_owners(
         t_emoji, t_name = "🌱", ""
     power = power_fn(top_level) if power_fn else None
 
+    id_text = card.card_code or f"CRD-{card.id:04d}"
+    clean_status = (status_line or "").strip()
+    if clean_status == f"🆔 {id_text}" or f"<code>{id_text}</code>" in clean_status:
+        clean_status = ""
+
     lines = [
         f"{frame_top}🎴 <b>{esc(card.character_name)}</b>",
         f"{esc(media_part)}",
@@ -530,12 +543,12 @@ def format_card_with_owners(
         lines.append("")
         lines.append(f"👥 <b>Egalari ({len(owners_sorted)} ta):</b>")
         head = "\n".join(lines)
-        tail = [f"🆔 <code>{esc(card.card_code or f'CRD-{card.id:04d}')}</code>"]
+        tail = [f"🆔 <code>{esc(id_text)}</code>"]
         if card.is_event_card:
             total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
             tail.append(f"🎯 Event karta ({total})")
-        if status_line:
-            tail.append(status_line)
+        if clean_status:
+            tail.append(clean_status)
         budget = 1000 - len(head) - len("\n".join(tail)) - len(frame_bottom) - 40
         owner_lines: List[str] = []
         used = 0
@@ -554,14 +567,15 @@ def format_card_with_owners(
     else:
         lines.append("👤 Hozircha egasi yo‘q — guruhlarda topib oling!")
         lines.append("")
-        lines.append(f"🆔 <code>{esc(card.card_code or f'CRD-{card.id:04d}')}</code>")
+        lines.append(f"🆔 <code>{esc(id_text)}</code>")
         if card.is_event_card:
             total = f"{card.limited_copies} ta" if card.limited_copies else "cheklangan"
             lines.append(f"🎯 Event karta ({total})")
-        if status_line:
-            lines.append(status_line)
+        if clean_status:
+            lines.append(clean_status)
 
     out = ("\n".join(lines) + frame_bottom).strip()
     if len(out) > 1020:
         out = out[:1017] + "..."
     return out
+

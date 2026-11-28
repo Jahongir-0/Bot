@@ -83,7 +83,7 @@ class GroupCleanupMiddleware(BaseMiddleware):
         finally:
             _collector.reset(token)
             try:
+                # Foydalanuvchi yuborgan /buyruq o'chadi, botning javobi guruhda saqlanib qoladi
                 schedule_delete(event.bot, event.chat.id, [event.message_id], delay=USER_CMD_DELAY)
-                schedule_delete(event.bot, event.chat.id, bucket, delay=CLEAN_DELAY)
             except Exception:  # pragma: no cover
                 pass

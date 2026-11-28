@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
-from admin.filters import resolve_admin_perms, IsAdminFilter, has_admin_perm
+from admin.filters import IsAdminFilter, has_admin_perm, resolve_admin_perms
 from admin.v2.common import AdminV2States, _cancel_kb, _deny_if_no_perm
 from database.session import get_session
 from keyboards.v2 import (
@@ -57,12 +57,11 @@ async def cb_v2_cards_menu(callback: CallbackQuery, state: FSMContext, admin_per
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
     await state.clear()
-    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
+    perms = resolve_admin_perms(callback.from_user, admin_perms)
     await edit_or_answer(
         callback,
-        "🎴 <b>KARTALAR MARKAZI</b>\n━━━━━━━━━━━━━━━\n"
-        "Karta bilan bog‘liq hamma narsa shu yerda: boshqarish, drop va ranklar, bot do‘koni, auksion, eventlar, komissiya.",
-        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id, resolve_admin_perms(callback.from_user, admin_perms)),
+        "🎴 <b>KARTALAR MARKAZI</b>\n━━━━━━━━━━━━━━━\nKerakli bo‘limni tanlang:",
+        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id, perms),
     )
 
 
@@ -230,231 +229,6 @@ async def fsm_v2_zip_upload(message: Message, state: FSMContext) -> None:
         )
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "batch")))
-async def cb_v2_batch_prompt(callback: CallbackQuery, state: FSMContext, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "cards"):
-        return
-    from services.card_zip_import import rank_table
-
-    async with get_session() as session:
-        sync_runtime_ranks(await GameplayService.get_rank_definitions(session))
-    await state.set_state(AdminV2States.waiting_batch_text)
-    await state.update_data(owner_tg_id=callback.from_user.id)
-    ranks_hint = ", ".join(f"{rid}={name}" for rid, name in rank_table())
-    await edit_or_answer(
-        callback,
-        "📋 <b>MATN / CSV / JSON ORQALI KARTA QO‘SHISH (ZIP-siz)</b>\n\n"
-        "Quyidagi formatlardan birida matn yuboring yoki <code>.json</code> / <code>.csv</code> / <code>.txt</code> fayl tashlang:\n\n"
-        "1️⃣ <b>Har qator (| bilan):</b>\n"
-        "<code>Personaj | Media turi | Asar nomi | Rank | Rasm URL (yoki file_id)</code>\n"
-        "<i>(yoki 4 ustun: Personaj | Asar nomi | Rank | Rasm URL — turi Anime bo‘ladi)</i>\n\n"
-        "2️⃣ <b>JSON:</b> <code>[{\"character_name\": ..., \"media_type\": \"Anime\", \"media_name\": ..., \"rank_id\": 1, \"image\": \"https://...\"}]</code>\n"
-        "3️⃣ <b>CSV:</b> sarlavhali yoki 5 ustunli CSV\n\n"
-        "💡 <b>JSON da rasm URL yo‘q bo‘lsa</b> — «📄 JSON + rasmlar ketma-ket» usulidan foydalaning: "
-        "JSON ni tashlaysiz, rasmlarni esa botga ketma-ket yuborasiz.\n\n"
-        f"⭐ <b>Ranklar:</b> {esc(ranks_hint)}\n"
-        "<i>Bekor qilish: /cancel</i>",
-        reply_markup=_cancel_kb(callback.from_user.id, "cards", "add_menu"),
-    )
-
-
-def _parse_batch_records(raw_text: str) -> tuple[list[dict], str | None]:
-    import csv
-    import json
-
-    txt = (raw_text or "").strip()
-    if not txt:
-        return [], "Bo‘sh matn yuborildi."
-
-    if txt.startswith("[") or txt.startswith("{"):
-        try:
-            parsed = json.loads(txt)
-            if isinstance(parsed, dict):
-                parsed = parsed.get("cards") if isinstance(parsed.get("cards"), list) else [parsed]
-            if isinstance(parsed, list):
-                return [dict(r) for r in parsed if isinstance(r, dict)], None
-        except Exception as exc:
-            return [], f"JSON o‘qishda xato: {exc}"
-
-    lines = [ln.strip() for ln in txt.splitlines() if ln.strip() and not ln.strip().startswith("#")]
-    if not lines:
-        return [], "Qatorlar topilmadi."
-
-    if any("|" in ln for ln in lines):
-        out: list[dict] = []
-        for idx, ln in enumerate(lines, start=1):
-            parts = [p.strip() for p in ln.split("|")]
-            if len(parts) == 4:
-                out.append({
-                    "_line": idx,
-                    "character_name": parts[0],
-                    "media_type": "Anime",
-                    "media_name": parts[1],
-                    "rank_id": parts[2],
-                    "image": parts[3],
-                })
-            elif len(parts) >= 5:
-                out.append({
-                    "_line": idx,
-                    "character_name": parts[0],
-                    "media_type": parts[1],
-                    "media_name": parts[2],
-                    "rank_id": parts[3],
-                    "image": parts[4],
-                    "description": parts[5] if len(parts) > 5 else "",
-                })
-            else:
-                out.append({"_line": idx, "_err": f"{idx}-qator: kamida 4 ta '|' qismi bo‘lishi kerak."})
-        return out, None
-
-    reader = list(csv.reader(io.StringIO("\n".join(lines))))
-    if not reader:
-        return [], "CSV ma’lumoti topilmadi."
-    first_low = [c.strip().lower() for c in reader[0]]
-    has_header = any(k in first_low for k in ("character_name", "character", "personaj", "anime_name", "media_name", "image"))
-    out = []
-    if has_header:
-        dict_reader = csv.DictReader(io.StringIO("\n".join(lines)))
-        for idx, row in enumerate(dict_reader, start=2):
-            rec = dict(row)
-            rec["_line"] = idx
-            out.append(rec)
-    else:
-        for idx, cols in enumerate(reader, start=1):
-            cols = [c.strip() for c in cols]
-            if len(cols) == 4:
-                out.append({"_line": idx, "character_name": cols[0], "media_type": "Anime", "media_name": cols[1], "rank_id": cols[2], "image": cols[3]})
-            elif len(cols) >= 5:
-                out.append({"_line": idx, "character_name": cols[0], "media_type": cols[1], "media_name": cols[2], "rank_id": cols[3], "image": cols[4]})
-            else:
-                out.append({"_line": idx, "_err": f"{idx}-qator: kamida 4 ustun bo‘lishi kerak."})
-    return out, None
-
-
-@router.message(AdminV2States.waiting_batch_text)
-async def fsm_v2_batch_input(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    if data.get("owner_tg_id") != message.from_user.id:
-        return
-    if message.text and message.text.strip().startswith("/"):
-        return
-
-    raw_text = (message.text or "").strip()
-    if message.document:
-        fname = (message.document.file_name or "").lower()
-        if not fname.endswith((".json", ".csv", ".txt")):
-            await message.answer("⚠️ Faqat <code>.json</code>, <code>.csv</code> yoki <code>.txt</code> fayl yuboring (yoki matn tashlang).")
-            return
-        if (message.document.file_size or 0) > 2 * 1024 * 1024:
-            await message.answer("⚠️ Matn fayl 2 MB dan kichik bo‘lishi kerak.")
-            return
-        buf = io.BytesIO()
-        await message.bot.download(message.document, destination=buf)
-        raw_text = buf.getvalue().decode("utf-8", errors="replace")
-
-    records, parse_err = _parse_batch_records(raw_text)
-    if parse_err:
-        await message.answer(f"❌ {esc(parse_err)}")
-        return
-
-    from services.card_zip_import import _MEDIA_LOOKUP, _pick, resolve_rank
-
-    async with get_session() as session:
-        ranks = await GameplayService.get_rank_definitions(session)
-        sync_runtime_ranks(ranks)
-        rank_by_name = {str(r["name"]).lower(): r for r in ranks}
-        # Takroriy = bir xil RASM (URL / file_id). Bir personajning turli rasmli kartalari ruxsat.
-        existing_keys = {
-            str(v).strip().lower()
-            for row in (await session.execute(select(Card.image, Card.image_file_id).where(Card.is_deleted.is_(False)))).all()
-            for v in row
-            if v
-        }
-
-        added = 0
-        dups = 0
-        failed_reasons: list[str] = []
-        for idx, rec in enumerate(records[:200], start=1):
-            ln = rec.get("_line", idx)
-            if rec.get("_err"):
-                failed_reasons.append(str(rec["_err"]))
-                continue
-            char_name = str(_pick(rec, "character_name") or "").strip()
-            anime_name = str(_pick(rec, "media_name") or "").strip()
-            raw_mtype = str(_pick(rec, "media_type") or "Anime").strip()
-            raw_rank = _pick(rec, "rank_id")
-            img_ref = str(_pick(rec, "image") or "").strip()
-
-            if not char_name or not anime_name or not img_ref:
-                failed_reasons.append(f"#{ln}: personaj, asar nomi yoki rasm yo‘q.")
-                continue
-            mtype = _MEDIA_LOOKUP.get(raw_mtype.lower())
-            if not mtype:
-                failed_reasons.append(f"#{ln} ({char_name}): noma’lum media_type '{raw_mtype}'.")
-                continue
-            rarity = resolve_rank(raw_rank)
-            if not rarity:
-                failed_reasons.append(f"#{ln} ({char_name}): rank topilmadi '{raw_rank}'.")
-                continue
-
-            if img_ref.startswith(("http://", "https://")):
-                ok_img, img_err = await validate_image_url(img_ref)
-                if not ok_img:
-                    failed_reasons.append(f"#{ln} ({char_name}): {img_err}")
-                    continue
-            elif len(img_ref) < 20 or " " in img_ref:
-                failed_reasons.append(f"#{ln} ({char_name}): rasm URL (https://...) yoki Telegram file_id bo‘lishi kerak.")
-                continue
-
-            dup_key = img_ref.strip().lower()
-            if dup_key in existing_keys:
-                dups += 1
-                continue
-
-            r_obj = rank_by_name.get(rarity.lower())
-            meta_r = get_rarity_meta(rarity)
-            base_val = int(rec.get("base_value") or (r_obj.get("base_value") if r_obj else meta_r.default_base_value) or meta_r.default_base_value)
-            drop_lim = int(rec.get("drop_limit") or (r_obj.get("drop_limit") if r_obj else meta_r.default_drop_limit) or meta_r.default_drop_limit)
-            drop_w = int((r_obj.get("drop_probability") if r_obj else meta_r.default_drop_weight) or meta_r.default_drop_weight)
-            desc = str(rec.get("description") or "").strip()
-            meta_json = {"description": desc} if desc else {}
-            card = await CardService.create_card(
-                session,
-                character_name=char_name,
-                anime_name=anime_name,
-                image=img_ref,
-                rarity=rarity,
-                base_value=base_val,
-                drop_weight=drop_w,
-                drop_limit=drop_lim,
-                media_type=mtype,
-                metadata_json=meta_json,
-            )
-            if not img_ref.startswith(("http://", "https://")):
-                card.image_file_id = img_ref
-            existing_keys.add(dup_key)
-            added += 1
-
-        if added:
-            await CommunityService.log_audit(session, message.from_user.id, "batch_add_cards", "card", str(added))
-        await session.commit()
-
-    await state.clear()
-    lines = [
-        "📋 <b>OMMAVIY QO‘SHISH NATIJASI</b>",
-        f"✅ Qo‘shildi: <b>{added}</b> ta",
-        f"♻️ Takroriy (o‘tkazildi): <b>{dups}</b> ta",
-        f"❌ Xato: <b>{len(failed_reasons)}</b> ta",
-    ]
-    if failed_reasons and any("rasm" in fr for fr in failed_reasons):
-        lines.append("\n💡 Rasm URL siz JSON uchun: Karta qo‘shish → «📄 JSON + rasmlar ketma-ket».")
-    if failed_reasons:
-        lines.append("\n<b>Sabablar:</b>")
-        for fr in failed_reasons[:8]:
-            lines.append(f"• {esc(fr[:120])}")
-    await message.answer("\n".join(lines), reply_markup=admin_v2_cards_menu_kb(message.from_user.id))
-
-
 _TAB_TITLES = {
     "sent_group": "GURUHGA TUSHGANLAR (oxirgi yuborilganlar yuqorida)",
     "not_sent": "HALI TUSHMAGANLAR (guruhga tashlanmagan)",
@@ -471,8 +245,7 @@ _TAB_TITLES = {
 }
 
 
-async def _render_cards_tab(callback: CallbackQuery, tab: str, page: int) -> None:
-    owner = callback.from_user.id
+async def _render_v2_cards_tab(target, owner_id: int, tab: str = "all", page: int = 1) -> None:
     page = max(1, page)
     async with get_session() as session:
         cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=page, page_size=PAGE_SIZE)
@@ -480,115 +253,108 @@ async def _render_cards_tab(callback: CallbackQuery, tab: str, page: int) -> Non
         page = 1
         async with get_session() as session:
             cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=1, page_size=PAGE_SIZE)
-    admin_nav.remember(owner, "view_tabs", ext=tab, p=page)
-    mode = admin_nav.get_mode(owner)
-    txt = (
-        f"{admin_nav.MODE_TITLES[mode]}\n"
-        f"📂 <b>{_TAB_TITLES.get(tab, tab.upper())}</b>\n"
-        f"Jami: <b>{total}</b> ta | sahifa {page} | 20/sahifa"
-    )
-    if mode == admin_nav.MODE_EDIT:
-        txt += "\n\n👇 Tahrirlash uchun kartani tanlang:"
-    elif mode == admin_nav.MODE_DEL:
-        txt += "\n\n👇 O‘chirish uchun kartani tanlang:"
+    admin_nav.remember(owner_id, "view_tabs", ext=tab, p=page)
+    mode = admin_nav.MODE_VIEW if tab == "deleted" else admin_nav.get_mode(owner_id)
+    mode_tag = "" if mode == admin_nav.MODE_VIEW else f"{admin_nav.MODE_TITLES.get(mode, '')} · "
+    txt = f"👁 <b>{mode_tag}{_TAB_TITLES.get(tab, tab.upper())}</b> (Jami: <b>{total}</b> ta | 20/sahifa)"
     if not cards:
         txt += "\n\n📭 Bu bo‘limda kartalar yo‘q."
     await edit_or_answer(
-        callback,
+        target,
         txt,
-        reply_markup=admin_v2_view_cards_kb(owner, cards, tab, page, total, page_size=PAGE_SIZE),
+        reply_markup=admin_v2_view_cards_kb(owner_id, cards, tab, page, total, page_size=PAGE_SIZE),
     )
+
+
+async def _render_v2_media_titles(target, owner_id: int, mgroup: str = "anime", page: int = 1) -> None:
+    page = max(1, page)
+    async with get_session() as session:
+        titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
+    admin_nav.remember(owner_id, "titles", ext=mgroup, p=page)
+    txt = f"📁 <b>{esc(mgroup.upper())} NOMLARI</b> (Karta soni bo‘yicha | Jami: <b>{total}</b> ta)\n\nIchiga kirish uchun nomni tanlang:"
+    if not titles:
+        txt = f"📁 <b>{esc(mgroup.upper())} NOMLARI</b>\n\n📭 Hozircha kartalar yo‘q."
+    await edit_or_answer(
+        target,
+        txt,
+        reply_markup=admin_v2_media_titles_kb(owner_id, titles, mgroup, page, total, page_size=PAGE_SIZE),
+    )
+
+
+async def _render_v2_title_cards(target, owner_id: int, rep_card_id: int, mgroup: str = "anime", page: int = 1) -> None:
+    page = max(1, page)
+    async with get_session() as session:
+        title, cards, total = await AdminService.get_v2_cards_by_media_title(
+            session, media_group=mgroup, rep_card_id=rep_card_id, page=page, page_size=PAGE_SIZE
+        )
+    admin_nav.remember(owner_id, "mtitle", tid=rep_card_id, ext=mgroup, p=page)
+    txt = f"🎬 <b>{esc(title or mgroup.upper())}</b> (Jami: <b>{total}</b> ta karta)\n\nTahrirlash yoki ko‘rish uchun kartani tanlang:"
+    if not cards:
+        txt += "\n\n📭 Topilmadi."
+    await edit_or_answer(
+        target,
+        txt,
+        reply_markup=admin_v2_title_cards_kb(owner_id, cards, rep_card_id, mgroup, page, total, page_size=PAGE_SIZE),
+    )
+
+
+async def _render_v2_action_list(target, owner_id: int, mode: str, page: int = 1) -> None:
+    page = max(1, page)
+    expected = admin_nav.MODE_EDIT if mode == "edit_list" else admin_nav.MODE_DEL
+    if admin_nav.get_mode(owner_id) != expected:
+        admin_nav.set_mode(owner_id, expected)
+    admin_nav.remember(owner_id, mode, p=page)
+    async with get_session() as session:
+        cards, total = await AdminService.get_v2_cards_by_tab(session, tab="all", page=page, page_size=PAGE_SIZE)
+    hdr = "✏️ <b>KARTA TAHRIRLASH</b>" if mode == "edit_list" else "🗑 <b>KARTA O‘CHIRISH</b>"
+    txt = f"{hdr} (Jami: <b>{total}</b> ta | 20/sahifa)\n\nKerakli kartani tanlang yoki qidiring:"
+    if not cards:
+        txt += "\n\n📭 Kartalar yo‘q."
+    await edit_or_answer(
+        target,
+        txt,
+        reply_markup=admin_v2_cards_action_list_kb(owner_id, cards, mode, page, total, page_size=PAGE_SIZE),
+    )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_start")))
+async def cb_v2_view_start(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
+    await _render_v2_cards_tab(callback, callback.from_user.id, tab=callback_data.ext or "sent_group", page=max(1, callback_data.p))
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_tabs")))
 async def cb_v2_view_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    await _render_cards_tab(callback, callback_data.ext or "all", callback_data.p)
+    await _render_v2_cards_tab(callback, callback.from_user.id, tab=callback_data.ext or "all", page=max(1, callback_data.p))
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "view_start")))
-async def cb_v2_view_start(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    """Menyudan «Kartalarni ko‘rish» / «O‘chirilganlar» — ko‘rish rejimini boshlaydi."""
-    if await _deny_if_no_perm(callback, admin_perms, "cards"):
-        return
-    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
-    await _render_cards_tab(callback, callback_data.ext or "sent_group", 1)
-
-
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "titles_start")))
-async def cb_v2_titles_start(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "cards"):
-        return
-    admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
-    await _render_media_titles(callback, callback_data.ext or "anime", 1)
-
-
-async def _render_media_titles(callback: CallbackQuery, mgroup: str, page: int) -> None:
-    owner = callback.from_user.id
-    page = max(1, page)
-    async with get_session() as session:
-        titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
-    admin_nav.remember(owner, "titles", ext=mgroup, p=page)
-    mode = admin_nav.get_mode(owner)
-    txt = (
-        f"{admin_nav.MODE_TITLES[mode]}\n"
-        f"📁 <b>{esc(mgroup.upper())} NOMLARI</b> (karta soni bo‘yicha | Jami: <b>{total}</b> ta)\n\n"
-        "Ichiga kirish uchun nomni tanlang:"
-    )
-    if not titles:
-        txt = f"{admin_nav.MODE_TITLES[mode]}\n📁 <b>{esc(mgroup.upper())} NOMLARI</b>\n\n📭 Hozircha kartalar yo‘q."
-    await edit_or_answer(
-        callback,
-        txt,
-        reply_markup=admin_v2_media_titles_kb(owner, titles, mgroup, page, total, page_size=PAGE_SIZE),
-    )
-
-
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "titles")))
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"titles", "titles_v"}))))
 async def cb_v2_media_titles(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    await _render_media_titles(callback, callback_data.ext or "anime", callback_data.p)
+    if callback_data.act == "titles_v":
+        admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
+    await _render_v2_media_titles(callback, callback.from_user.id, mgroup=callback_data.ext or "anime", page=max(1, callback_data.p))
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "mtitle")))
 async def cb_v2_media_title_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    owner = callback.from_user.id
-    mgroup = callback_data.ext or "anime"
-    page = max(1, callback_data.p)
-    async with get_session() as session:
-        title, cards, total = await AdminService.get_v2_cards_by_media_title(
-            session, media_group=mgroup, rep_card_id=callback_data.tid, page=page, page_size=PAGE_SIZE
-        )
-    # Sarlavha ichidagi sahifa eslab qolinadi: kartadan orqaga qaytganda shu sarlavhada davom etamiz
-    admin_nav.remember(owner, "mtitle", tid=callback_data.tid, ext=mgroup, p=page)
-    mode = admin_nav.get_mode(owner)
-    hint = {
-        admin_nav.MODE_VIEW: "Ko‘rish uchun kartani tanlang:",
-        admin_nav.MODE_EDIT: "Tahrirlash uchun kartani tanlang:",
-        admin_nav.MODE_DEL: "O‘chirish uchun kartani tanlang:",
-    }[mode]
-    txt = f"{admin_nav.MODE_TITLES[mode]}\n🎬 <b>{esc(title or mgroup.upper())}</b> (Jami: <b>{total}</b> ta karta)\n\n{hint}"
-    if not cards:
-        txt += "\n\n📭 Topilmadi."
-    await edit_or_answer(
-        callback,
-        txt,
-        reply_markup=admin_v2_title_cards_kb(owner, cards, callback_data.tid, mgroup, page, total, page_size=PAGE_SIZE),
+    await _render_v2_title_cards(
+        callback, callback.from_user.id, rep_card_id=callback_data.tid, mgroup=callback_data.ext or "anime", page=max(1, callback_data.p)
     )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"edit_list", "del_list"}))))
 async def cb_v2_cards_action_list(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    """Tahrirlash / o‘chirish: «Kartalarni ko‘rish» dagi bir xil filtrli (tab, sarlavha) ro‘yxat ochiladi."""
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    mode = admin_nav.MODE_EDIT if callback_data.act == "edit_list" else admin_nav.MODE_DEL
-    admin_nav.set_mode(callback.from_user.id, mode)
-    await _render_cards_tab(callback, callback_data.ext or "all", callback_data.p)
+    await _render_v2_action_list(callback, callback.from_user.id, mode=callback_data.act, page=max(1, callback_data.p))
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "del_one")))
@@ -614,8 +380,11 @@ async def cb_v2_delete_one_confirm(callback: CallbackQuery, callback_data: AdmV2
             ],
             [
                 InlineKeyboardButton(
-                    text="⬅️ ORQAGA (ro‘yxat)",
-                    callback_data=admin_nav.back_callback(callback.from_user.id),
+                    text="⬅️ ORQAGA",
+                    callback_data=admin_nav.back_callback(
+                        callback.from_user.id,
+                        fallback=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="del_list", p=max(1, callback_data.p)).pack(),
+                    ),
                 )
             ],
         ]
@@ -701,32 +470,55 @@ async def _build_v2_card_detail_text(session, card: Card) -> str:
         return f"🎴 <b>{esc(card.character_name)}</b>\n📺 {esc(card.anime_name)}{preset_line}\n🆔 Card DB ID: <code>{card.id}</code>"
 
 
+async def open_admin_card_detail(
+    target: CallbackQuery | Message,
+    owner_id: int,
+    card_id: int,
+    tab: str = "all",
+    page: int = 1,
+) -> None:
+    async with get_session() as session:
+        card = await session.get(Card, card_id)
+        if card is None:
+            if isinstance(target, CallbackQuery):
+                await target.answer("Karta topilmadi.", show_alert=True)
+            else:
+                await target.answer("❌ Karta topilmadi.")
+            return
+        text = await _build_v2_card_detail_text(session, card)
+    kb = admin_v2_card_detail_kb(
+        owner_id,
+        card,
+        tab=tab or "all",
+        page=max(1, page),
+        is_super=is_super_admin(target.from_user),
+    )
+    msg_chat_id = target.message.chat.id if isinstance(target, CallbackQuery) and target.message else (
+        target.chat.id if isinstance(target, Message) else None
+    )
+    if msg_chat_id is not None and card.image and (card.image.startswith("http") or len(card.image) > 20):
+        try:
+            await send_card_message(target.bot, msg_chat_id, card, text, kb)
+            if isinstance(target, CallbackQuery) and target.message:
+                await safe_delete(target.bot, target.message.chat.id, target.message.message_id)
+                await target.answer()
+            return
+        except Exception:
+            logger.exception("card_det: rasm yuborilmadi (card %s)", card.id)
+    await edit_or_answer(target, text, reply_markup=kb)
+
+
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "card_det")))
 async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    async with get_session() as session:
-        card = await session.get(Card, callback_data.tid)
-        if card is None:
-            await callback.answer("Karta topilmadi.", show_alert=True)
-            return
-        text = await _build_v2_card_detail_text(session, card)
-    kb = admin_v2_card_detail_kb(
+    await open_admin_card_detail(
+        callback,
         callback.from_user.id,
-        card,
+        callback_data.tid,
         tab=callback_data.ext or "all",
         page=callback_data.p,
-        is_super=is_super_admin(callback.from_user),
     )
-    if callback.message and card.image and (card.image.startswith("http") or len(card.image) > 20):
-        try:
-            await send_card_message(callback.bot, callback.message.chat.id, card, text, kb)
-            await safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
-            await callback.answer()
-            return
-        except Exception:
-            logger.exception("card_det: rasm yuborilmadi (card %s)", card.id)
-    await edit_or_answer(callback, text, reply_markup=kb)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "lvl_info")))
@@ -826,28 +618,27 @@ async def cb_v2_card_to_event(callback: CallbackQuery, callback_data: AdmV2Cb, s
     )
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "give_u")))
-async def cb_v2_card_give_users_list(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "cards"):
-        return
-    back_tab = callback_data.ext or "all"
-    page = max(1, callback_data.p)
+async def _render_v2_give_users(target, owner_id: int, card_id: int, back_tab: str = "all", page: int = 1) -> None:
+    page = max(1, page)
     async with get_session() as session:
-        card = await session.get(Card, callback_data.tid)
+        card = await session.get(Card, card_id)
         if card is None or card.is_deleted:
-            await callback.answer("Karta topilmadi.", show_alert=True)
+            if isinstance(target, CallbackQuery):
+                await target.answer("Karta topilmadi.", show_alert=True)
+            else:
+                await target.answer("❌ Karta topilmadi.")
             return
         users, total = await AdminService.get_users_for_card_grant(
-            session, callback.from_user.id, page=page, page_size=12
+            session, owner_id, page=page, page_size=12
         )
     preset_lvl = max(1, int(getattr(card, "preset_level", 1) or 1))
     kb = admin_card_give_users_kb(
-        callback.from_user.id,
+        owner_id,
         card.id,
         users,
         page=page,
         total=total,
-        current_admin_tg_id=callback.from_user.id,
+        current_admin_tg_id=owner_id,
         back_tab=back_tab,
         page_size=12,
     )
@@ -856,7 +647,16 @@ async def cb_v2_card_give_users_list(callback: CallbackQuery, callback_data: Adm
         f"🎴 Karta: <b>{esc(card.character_name)}</b> (Lvl {preset_lvl})\n"
         f"👥 Faol userlar: <b>{total}</b> ta — kimga beramiz?"
     )
-    await edit_or_answer(callback, txt, reply_markup=kb)
+    await edit_or_answer(target, txt, reply_markup=kb)
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "give_u")))
+async def cb_v2_card_give_users_list(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    await _render_v2_give_users(
+        callback, callback.from_user.id, callback_data.tid, back_tab=callback_data.ext or "all", page=max(1, callback_data.p)
+    )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "give_us")))
@@ -974,7 +774,8 @@ async def cb_v2_card_sub_actions(callback: CallbackQuery, callback_data: AdmV2Cb
             await callback.answer("Karta topilmadi.", show_alert=True)
             return
         if act == "about":
-            text = format_card_about(card)
+            eff_meta, eff_aliases = await CardService.get_effective_about(session, card)
+            text = format_card_about(card, meta_override=eff_meta, aliases_override=eff_aliases)
         elif act == "owners":
             owners, drops = await AdminService.get_card_ownership_and_drops(session, card.id)
             lines = [f"👤 <b>{esc(card.character_name)} EGALARI</b> (Tashlangan: {drops})\n"]
@@ -1017,9 +818,7 @@ async def cb_v2_card_search_prompt(callback: CallbackQuery, callback_data: AdmV2
     await edit_or_answer(
         callback,
         "🔍 <b>KARTA QIDIRISH</b>\n\nPersonaj ismi, anime/media nomi, <code>CRD-...</code> yoki DB ID yozing:\n<i>Bekor qilish: /cancel</i>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="❌ Bekor", callback_data=admin_nav.back_callback(callback.from_user.id))]]
-        ),
+        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
     )
 
 
@@ -1045,34 +844,56 @@ async def fsm_v2_card_search(message: Message, state: FSMContext) -> None:
                 callback_data=AdmV2Cb(owner_id=message.from_user.id, sec="cards", act=next_act, tid=c.id).pack(),
             )
         )
-    b.row(InlineKeyboardButton(text="⬅️ ORQAGA (ro‘yxat)", callback_data=admin_nav.back_callback(message.from_user.id)))
+    b.row(
+        InlineKeyboardButton(
+            text="⬅️ ORQAGA",
+            callback_data=admin_nav.back_callback(
+                message.from_user.id, fallback=AdmV2Cb(owner_id=message.from_user.id, sec="cards", act="v").pack()
+            ),
+        )
+    )
     await message.answer(f"🔍 Topildi: <b>{total}</b> ta karta (20 tagacha ko‘rsatilmoqda):", reply_markup=b.as_markup())
+
+
+async def open_admin_card_edit(
+    target: CallbackQuery | Message,
+    owner_id: int,
+    card_id: int,
+) -> None:
+    async with get_session() as session:
+        card = await session.get(Card, card_id)
+    if card is None and isinstance(target, Message):
+        await target.answer("❌ Karta topilmadi.")
+        return
+    kb = admin_v2_edit_fields_kb(owner_id, card_id)
+    msg_chat_id = target.message.chat.id if isinstance(target, CallbackQuery) and target.message else (
+        target.chat.id if isinstance(target, Message) else None
+    )
+    if card is not None and card.image and (card.image.startswith("http") or len(card.image) > 20) and msg_chat_id is not None:
+        cap = (
+            f"{format_card_block(card, show_status=True)}\n\n"
+            f"✏️ <b>KARTA #{card.id} TAHRIRLASH</b>\nQaysi maydonni o‘zgartirasiz?"
+        )[:1000]
+        try:
+            await send_card_message(target.bot, msg_chat_id, card, cap, kb)
+            if isinstance(target, CallbackQuery) and target.message:
+                await safe_delete(target.bot, target.message.chat.id, target.message.message_id)
+                await target.answer()
+            return
+        except Exception:
+            pass
+    await edit_or_answer(
+        target,
+        f"✏️ <b>KARTA #{card_id} TAHRIRLASH</b>\n\nQaysi maydonni o‘zgartirasiz?",
+        reply_markup=kb,
+    )
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "edit_pick")))
 async def cb_v2_edit_fields(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "cards"):
         return
-    async with get_session() as session:
-        card = await session.get(Card, callback_data.tid)
-    kb = admin_v2_edit_fields_kb(callback.from_user.id, callback_data.tid)
-    if card is not None and card.image and (card.image.startswith("http") or len(card.image) > 20) and callback.message:
-        cap = (
-            f"{format_card_block(card, show_status=True)}\n\n"
-            f"✏️ <b>KARTA #{card.id} TAHRIRLASH</b>\nQaysi maydonni o‘zgartirasiz?"
-        )[:1000]
-        try:
-            await send_card_message(callback.bot, callback.message.chat.id, card, cap, kb)
-            await safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
-            await callback.answer()
-            return
-        except Exception:
-            pass
-    await edit_or_answer(
-        callback,
-        f"✏️ <b>KARTA #{callback_data.tid} TAHRIRLASH</b>\n\nQaysi maydonni o‘zgartirasiz?",
-        reply_markup=kb,
-    )
+    await open_admin_card_edit(callback, callback.from_user.id, callback_data.tid)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "edit_f")))
@@ -1117,12 +938,7 @@ async def cb_v2_edit_field_start(callback: CallbackQuery, callback_data: AdmV2Cb
     await edit_or_answer(
         callback,
         prompts.get(field, "Yangi qiymatni yozing:") + "\n<i>Bekor: /cancel</i>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(
-                text="❌ Bekor (kartaga qaytish)",
-                callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="edit_pick", tid=cid).pack(),
-            )]]
-        ),
+        reply_markup=_cancel_kb(callback.from_user.id, "cards", "v"),
     )
 
 
@@ -1201,9 +1017,18 @@ async def fsm_v2_edit_card_val(message: Message, state: FSMContext) -> None:
         elif field == "anime":
             card.anime_name = " ".join((message.text or "").split())[:128]
         elif field == "desc":
-            meta = dict(card.metadata_json or {})
-            meta["description"] = (message.text or "").strip()
-            card.metadata_json = meta
+            canonical = await CardService.get_canonical_character_card(session, card)
+            desc_txt = (message.text or "").strip()
+            c_meta = dict(canonical.metadata_json or {})
+            if desc_txt:
+                c_meta["description"] = desc_txt
+            else:
+                c_meta.pop("description", None)
+            canonical.metadata_json = c_meta
+            if canonical.id != card.id and isinstance(card.metadata_json, dict) and "description" in card.metadata_json:
+                sub_meta = dict(card.metadata_json)
+                sub_meta.pop("description", None)
+                card.metadata_json = sub_meta
         elif field == "alias":
             card.aliases = [a.strip() for a in (message.text or "").split(",") if a.strip()]
         elif field == "limit":

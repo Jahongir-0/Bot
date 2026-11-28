@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from models.card import Card
 from models.user_card import UserCard
 from services.collection_service import AnimeSection, CardVariant, CharacterSection, CharacterStack
-from utils.callback_data import AucCb, CollectionCb, GiveCb, NavCb, SearchCb
+from utils.callback_data import AucCb, CollectionCb, GiveCb, NavCb, PageJumpCb, SearchCb
 from utils.constants import get_rarity_meta, list_rarities
 from utils.formatting import event_tag, level_badge
 
@@ -29,11 +29,17 @@ def _view_back(owner_id: int) -> str:
     return CollectionCb(owner_id=owner_id, action="view").pack()
 
 
-def _pager(builder: InlineKeyboardBuilder, page: int, total_pages: int, make_cb) -> None:
+def _pager(
+    builder: InlineKeyboardBuilder,
+    page: int,
+    total_pages: int,
+    make_cb,
+    jump_cb: str | None = None,
+) -> None:
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text="⬅️", callback_data=make_cb(page - 1)))
-    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=make_cb(page)))
+    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=jump_cb or make_cb(page)))
     if page < total_pages:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=make_cb(page + 1)))
     builder.row(*nav)
@@ -133,6 +139,7 @@ def collection_my_search_results_kb(
             page,
             total_pages,
             lambda p: CollectionCb(owner_id=owner_id, action="my_search_p", page=p).pack(),
+            jump_cb=PageJumpCb(owner_id=owner_id, key="c_ms", total=total_pages).pack(),
         )
     builder.row(
         InlineKeyboardButton(
@@ -215,6 +222,9 @@ def v2_collection_list_kb(
         lambda p: CollectionCb(
             owner_id=owner_id, action="v2_list", filter_val=filter_tab, sort_by=sort_by, page=p
         ).pack(),
+        jump_cb=PageJumpCb(
+            owner_id=owner_id, key="c_v2", total=total_pages, ext=f"{filter_tab}|{sort_by}"[:20]
+        ).pack(),
     )
     _footer(builder, owner_id, _view_back(owner_id))
     return builder.as_markup()
@@ -247,6 +257,7 @@ def anime_sections_kb(
         page,
         total_pages,
         lambda p: CollectionCb(owner_id=owner_id, action="anime_list", page=p).pack(),
+        jump_cb=PageJumpCb(owner_id=owner_id, key="c_an", total=total_pages).pack(),
     )
     _footer(builder, owner_id, _view_back(owner_id))
     return builder.as_markup()
@@ -288,6 +299,9 @@ def anime_characters_kb(
             item_id=anime_rep_id,
             filter_val=str(anime_page),
             page=p,
+        ).pack(),
+        jump_cb=PageJumpCb(
+            owner_id=owner_id, key="c_ch", total=total_pages, tid=anime_rep_id, ext=str(anime_page)
         ).pack(),
     )
     _footer(
@@ -384,6 +398,9 @@ def collection_list_kb(
         page,
         total_pages,
         lambda p: CollectionCb(owner_id=owner_id, action="char_list", filter_val=filter_val, page=p).pack(),
+        jump_cb=PageJumpCb(
+            owner_id=owner_id, key="c_rl", total=total_pages, ext=filter_val.replace(":", " ")[:18]
+        ).pack(),
     )
     _footer(builder, owner_id, CollectionCb(owner_id=owner_id, action="by_rarity").pack())
     return builder.as_markup()

@@ -209,6 +209,39 @@ async def cmd_start(
                     )
 
     is_admin = is_bot_admin or is_admin_user(message.from_user)
+    if args.startswith(("adm_card_", "adm_cedit_", "adm_user_")):
+        async with get_session() as s_perm:
+            is_adm_db, perms = await CommunityService.get_admin_permissions(
+                s_perm, message.from_user.id, message.from_user.username
+            )
+        if not (is_admin or is_adm_db):
+            await message.answer("⛔ Bu havola faqat adminlar uchun.")
+            return
+        if args.startswith("adm_user_") and args[9:].isdigit():
+            if is_admin_user(message.from_user) or "users" in perms:
+                from admin.handlers.users import _render_admin_user
+
+                await _render_admin_user(message, message.from_user.id, int(args[9:]))
+                return
+            await message.answer("⛔ Foydalanuvchilar bo‘limiga ruxsatingiz yo‘q.")
+            return
+        if args.startswith("adm_card_") and args[9:].isdigit():
+            if is_admin_user(message.from_user) or "cards" in perms:
+                from admin.v2.cards import open_admin_card_detail
+
+                await open_admin_card_detail(message, message.from_user.id, int(args[9:]))
+                return
+            await message.answer("⛔ Kartalar bo‘limiga ruxsatingiz yo‘q.")
+            return
+        if args.startswith("adm_cedit_") and args[10:].isdigit():
+            if is_admin_user(message.from_user) or "cards" in perms:
+                from admin.v2.cards import open_admin_card_edit
+
+                await open_admin_card_edit(message, message.from_user.id, int(args[10:]))
+                return
+            await message.answer("⛔ Kartalar bo‘limiga ruxsatingiz yo‘q.")
+            return
+
     text = f"{ref_notice}{_home_text(fresh_user, welcome_txt)}"
     text = await append_private_ad(text, message.bot, fresh_user)
     await message.answer(
@@ -274,7 +307,7 @@ async def cb_help(callback: CallbackQuery) -> None:
 
 
 ADMIN_HOWTO = (
-    "📌 <b>Botni qanday admin qilasiz?</b>\n"
+    "⚙️ <b>Qanday admin qilasiz?</b>\n"
     "Guruh sozlamalari → <b>Administratorlar</b> → <b>Administrator qo‘shish</b> → botni tanlang → tasdiqlang."
 )
 
