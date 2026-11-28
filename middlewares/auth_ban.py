@@ -66,11 +66,9 @@ class GlobalAuthAndBanMiddleware(BaseMiddleware):
             return None
 
         is_payment = isinstance(event, Message) and event.successful_payment is not None
-        # Albom (bir nechta rasm bir yo'la) xabarlari bir vaqtda keladi — spam deb tashlab yubormaymiz
-        is_album_part = isinstance(event, Message) and bool(getattr(event, "media_group_id", None))
         is_support_cb = isinstance(event, CallbackQuery) and (event.data or "").startswith("sup:")
 
-        if isinstance(event, (Message, CallbackQuery)) and not is_payment and not is_album_part:
+        if isinstance(event, (Message, CallbackQuery)) and not is_payment:
             limiter = get_lock_manager()
             cd_key = f"spam:{tg_user.id}:{'cb' if isinstance(event, CallbackQuery) else 'msg'}"
             allowed = await limiter.check_and_set_cooldown(cd_key, seconds=0.35)

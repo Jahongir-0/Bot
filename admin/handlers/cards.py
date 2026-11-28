@@ -23,7 +23,6 @@ from services.community_service import CommunityService
 from services.drop_service import DropService
 from services.gameplay_service import GameplayService
 from services.settings_service import SettingsService
-from utils import admin_nav
 from utils.callback_data import AdmV2Cb, AdminCb
 from utils.constants import MEDIA_TYPES
 from utils.formatting import esc, format_card_block, format_drop_message
@@ -158,8 +157,8 @@ async def cb_admin_card_delete_confirm(callback: CallbackQuery, callback_data: A
             ],
             [
                 InlineKeyboardButton(
-                    text="⬅️ BEKOR (ro‘yxat)",
-                    callback_data=admin_nav.back_callback(callback.from_user.id),
+                    text="⬅️ BEKOR",
+                    callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="del_list", p=1).pack(),
                 )
             ],
         ]
@@ -183,13 +182,8 @@ async def cb_admin_card_delete_exec(callback: CallbackQuery, callback_data: Admi
     await callback.answer(f"✅ Karta o‘chirildi ({mode}).", show_alert=True)
     await edit_or_answer(
         callback,
-        f"✅ Karta o‘chirildi (rejim: <b>{esc(mode)}</b>).\nO‘chirishni davom ettirish uchun ro‘yxatga qayting 👇",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Ro‘yxatga qaytish", callback_data=admin_nav.back_callback(callback.from_user.id))],
-                [InlineKeyboardButton(text="🎴 Kartalar menyusi", callback_data=AdmV2Cb(owner_id=callback.from_user.id, sec="cards", act="v").pack())],
-            ]
-        ),
+        f"✅ Karta o‘chirildi (rejim: <b>{esc(mode)}</b>).",
+        reply_markup=admin_v2_cards_menu_kb(callback.from_user.id),
     )
 
 

@@ -22,7 +22,7 @@ from services.auction_wishlist_service import AuctionWishlistService
 from utils.callback_data import AdmV2Cb
 from utils.constants import PAGE_SIZE
 from utils.formatting import esc
-from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
+from utils.tg_helpers import NotCommandFilter, edit_or_answer
 from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
@@ -195,19 +195,12 @@ async def cb_v2_auction(callback: CallbackQuery, callback_data: AdmV2Cb, state: 
         return
 
     if act == "new_card":
-        async with get_session() as session:
-            auc_card = await session.get(Card, callback_data.tid)
-        if auc_card is None or auc_card.is_deleted:
-            await callback.answer("Karta topilmadi.", show_alert=True)
-            return
         await state.set_state(AdminV2States.waiting_auc_price)
         await state.update_data(owner_tg_id=owner_id, auc_card_id=callback_data.tid)
-        await show_card_with_prompt(
+        await edit_or_answer(
             callback,
-            auc_card,
-            "Eng kam (boshlang‘ich) coin narxini yozing (masalan: <code>2000</code>):\n<i>Bekor: /cancel</i>",
+            f"🔨 <b>YANGI AUKSION (1/3)</b>\nKarta ID: <code>{callback_data.tid}</code>\n\nEng kam (boshlang‘ich) coin narxini yozing (masalan: <code>2000</code>):",
             reply_markup=_cancel_kb(owner_id, "auction", "v"),
-            title="🔨 <b>YANGI AUKSION (1/3)</b>",
         )
         return
 

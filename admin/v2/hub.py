@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from admin.filters import IsAdminFilter, resolve_admin_perms
-from keyboards.v2 import ADMIN_HUB_CATEGORIES, admin_v2_cards_menu_kb, admin_v2_hub_kb
+from keyboards.v2 import ADMIN_HUB_CATEGORIES, admin_v2_hub_kb
 from utils.callback_data import AdmV2Cb
 from utils.formatting import esc
 from utils.tg_helpers import edit_or_answer
@@ -31,18 +31,6 @@ async def cb_v2_hub(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMC
         await callback.answer("⛔ Bu toifaga ruxsatingiz yo‘q.", show_alert=True)
         return
     title, desc, _secs = cat_info
-    if cat_key == "cards_evt" and "cards" in perms:
-        await edit_or_answer(
-            callback,
-            "🎴 <b>KARTALAR MARKAZI</b>\n━━━━━━━━━━━━━━━\n"
-            "Karta bilan bog‘liq hamma narsa shu yerda:\n"
-            "• Boshqarish — qo‘shish, ko‘rish, tahrirlash, o‘chirish\n"
-            "• Drop va ranklar — qoidalar, narx, daraja\n"
-            "• Savdo — bot do‘koni, auksion, eventlar, komissiya\n"
-            "• Kunlik bonus va paketlar",
-            reply_markup=admin_v2_cards_menu_kb(callback.from_user.id, perms),
-        )
-        return
     await edit_or_answer(
         callback,
         f"<b>{esc(title)}</b>\n━━━━━━━━━━━━━━━\n{esc(desc)}\n\n👇 Kerakli bo‘limni tanlang:",

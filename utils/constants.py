@@ -51,7 +51,6 @@ ADMIN_PERMISSION_SECTIONS: List[Tuple[str, str]] = [
     ("settings", "⚙️ Sozlamalar"),
     ("message", "📨 Xabar yuborish"),
     ("report", "📈 Faollik hisoboti"),
-    ("history", "📜 Tarix va hisobot"),
     ("auction", "🔨 Auksionlar"),
     ("season", "🏆 Mavsum"),
     ("reklama", "📣 Reklama"),

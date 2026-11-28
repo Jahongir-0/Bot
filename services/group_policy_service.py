@@ -186,8 +186,6 @@ class GroupPolicyService:
         stats: Optional[MemberStats],
         decision: Optional[RewardDecision],
         already_rewarded: bool = False,
-        phase: str = "admin",
-        just_added: bool = True,
     ) -> None:
         link = await GroupPolicyService.resolve_link(bot, session, group.telegram_chat_id, chat_username, try_create=True)
         admin_ids = await GroupPolicyService.admin_chat_ids(session)
@@ -208,9 +206,7 @@ class GroupPolicyService:
         else:
             members_line = "📊 A‘zolar soni: aniqlanmadi"
 
-        if phase == "added":
-            reward_line = "⏳ Mukofot: bot <b>admin qilinmaguncha berilmaydi</b> (foydalanuvchiga ogohlantirish yuborildi)"
-        elif already_rewarded:
+        if already_rewarded:
             reward_line = "🎁 Mukofot: bu guruh uchun avval berilgan"
         elif decision is None:
             reward_line = "🎁 Mukofot: —"
@@ -219,14 +215,8 @@ class GroupPolicyService:
         else:
             reward_line = f"🎁 Mukofot: <b>berilmadi</b> — {esc(decision.reason)}"
 
-        if phase == "added":
-            title_line = "🆕 <b>BOT YANGI GURUHGA QO‘SHILDI</b> (hali admin emas)"
-        elif just_added:
-            title_line = "🆕 <b>BOT YANGI GURUHGA QO‘SHILDI VA ADMIN QILINDI</b> ✅"
-        else:
-            title_line = "🛡 <b>BOT GURUHDA ADMIN QILINDI</b> ✅"
         text = (
-            f"{title_line}\n"
+            "🆕 <b>BOT YANGI GURUHGA QO‘SHILDI</b>\n"
             "━━━━━━━━━━━━━━━\n"
             f"👤 Kim qo‘shdi: {who}\n"
             f"🕒 Vaqt: <b>{fmt_tashkent(utcnow(), '%d.%m.%Y %H:%M')}</b> (Toshkent vaqti)\n"

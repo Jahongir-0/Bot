@@ -32,14 +32,7 @@ from services.search_service import SearchService
 from services.settings_service import SettingsService
 from utils.callback_data import NavCb, SearchCb
 from utils.constants import PAGE_SIZE, get_rarity_meta, sync_runtime_ranks
-from utils.formatting import (
-    esc,
-    event_tag,
-    fmt_coins,
-    format_card_with_owners,
-    format_v25_card_caption,
-    header,
-)
+from utils.formatting import esc, event_tag, fmt_coins, format_v25_card_caption, header
 from utils.tg_helpers import NotCommandFilter, edit_or_answer, safe_delete, send_card_message
 
 logger = logging.getLogger(__name__)
@@ -50,29 +43,6 @@ class SearchStates(StatesGroup):
     waiting_query = State()
 
 
-SEARCH_GUIDE = (
-    "📖 <b>QANDAY QIDIRILADI?</b>\n"
-    "• <b>Personaj ismi</b> — <code>Gojo</code>, <code>Naruto</code>\n"
-    "• <b>Anime / asar nomi</b> — <code>Jujutsu Kaisen</code>\n"
-    "• <b>Rank</b> — tugmadan tanlang (masalan Epic, Legendary)\n"
-    "• <b>Karta kodi / ID</b> — <code>CRD-0001</code> yoki <code>12</code>\n"
-    "• <b>Tez qidirish</b> — <code>/search Gojo</code>\n"
-    "• <b>Inline qidirish</b> — istalgan chatda <code>@bot_username Gojo</code> deb yozing\n"
-    "  (nom, anime, rank yoki kod bo‘yicha; bo‘sh qoldirsangiz tasodifiy kartalar chiqadi)\n\n"
-    "ℹ️ Natijada kartaning <b>barcha egalari</b> va <b>eng yuqori daraja</b> ko‘rsatiladi."
-)
-
-
-def _owners_brief(owners: list) -> str:
-    """Qidiruv ro'yxati uchun qisqa egalar qatori."""
-    if not owners:
-        return "👤 Egasi: yo‘q"
-    top = max(int(lv or 1) for _n, lv in owners)
-    top_names = [n for n, lv in owners if int(lv or 1) == top]
-    names = ", ".join(esc(n) for n in top_names[:3]) + (f" +{len(top_names) - 3}" if len(top_names) > 3 else "")
-    return f"👥 Egalari: <b>{len(owners)}</b> ta · 🏅 Lvl <b>{top}</b>: {names}"
-
-
 async def _render_results(
     target,
     owner_id: int,
@@ -81,11 +51,52 @@ async def _render_results(
     page: int,
 ) -> None:
     if mode == "unowned":
-        # Hali hech kimda yo'q kartalar ro'yxati foydalanuvchiga ko'rsatilmaydi (faqat qidirilgan karta chiqadi)
+        async with get_session() as session:
+            catalog_cards, catalog_total = await SearchService.search_catalog_cards(
+                session=session,
+                mode="unowned",
+                query=query,
+                page=page,
+                page_size=PAGE_SIZE,
+                only_unowned=True,
+            )
+        if not catalog_cards:
+            await edit_or_answer(
+                target,
+                f"{header('📖 <b>HALI HECH KIMDA YO‘Q KARTALAR</b>')}\n📭 Barcha mavjud kartalar allaqachon olingan.",
+                reply_markup=search_catalog_results_kb(
+                    owner_id=owner_id,
+                    cards=[],
+                    mode=mode,
+                    query=query,
+                    page=1,
+                    total=0,
+                    page_size=PAGE_SIZE,
+                ),
+            )
+            return
+        lines = [
+            f"📖 <b>HALI HECH KIMDA YO‘Q KARTALAR</b> (Jami: {catalog_total})\n"
+            "<i>Guruhlarda drop bo‘lishi mumkin bo‘lgan, hali egasi yo‘q kartalar:</i>\n"
+        ]
+        for card in catalog_cards:
+            meta = get_rarity_meta(card.rarity)
+            lines.append(
+                f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(meta.name)}\n"
+                f"📺 {esc(card.anime_name)} · 💰 {fmt_coins(card.base_value)} 🪙 · <code>{esc(card.card_code)}</code>\n"
+            )
         await edit_or_answer(
             target,
-            f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\nKarta nomini yozib qidiring.",
-            reply_markup=search_menu_kb(owner_id),
+            "\n".join(lines),
+            reply_markup=search_catalog_results_kb(
+                owner_id=owner_id,
+                cards=catalog_cards,
+                mode=mode,
+                query=query,
+                page=page,
+                total=catalog_total,
+                page_size=PAGE_SIZE,
+            ),
         )
         return
 
@@ -99,7 +110,6 @@ async def _render_results(
         )
         catalog_cards = []
         catalog_total = 0
-        owners_map: dict = {}
         if total == 0:
             catalog_cards, catalog_total = await SearchService.search_catalog_cards(
                 session=session,
@@ -108,7 +118,6 @@ async def _render_results(
                 page=page,
                 page_size=PAGE_SIZE,
             )
-            owners_map = await SearchService.get_card_owners_map(session, [c.id for c in catalog_cards])
 
     if total > 0:
         lines = [header("🔍 <b>QIDIRUV NATIJALARI</b>"), f"📌 Topildi: <b>{total}</b> ta\n"]
@@ -149,7 +158,6 @@ async def _render_results(
             lines.append(
                 f"🎴 {event_tag(card)}<b>{esc(card.character_name)}</b> — {meta.emoji} {esc(meta.name)}\n"
                 f"📺 {esc(card.anime_name)} · 💰 {fmt_coins(card.base_value)} 🪙 · <code>{esc(card.card_code)}</code>\n"
-                f"{_owners_brief(owners_map.get(card.id, []))}\n"
             )
         await edit_or_answer(
             target,
@@ -194,7 +202,7 @@ async def cmd_search(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\n"
         "Hamma foydalanuvchilar kartalari va umumiy katalog bo‘yicha qidiring.\n\n"
-        + SEARCH_GUIDE,
+        "💡 Tez qidirish: <code>/search Gojo</code>",
         reply_markup=search_menu_kb(message.from_user.id),
     )
 
@@ -205,7 +213,7 @@ async def cb_search_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await edit_or_answer(
         callback,
-        f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\n{SEARCH_GUIDE}",
+        f"{header('🔍 <b>KARTA QIDIRUVI</b>')}\nQanday qidiramiz?",
         reply_markup=search_menu_kb(callback.from_user.id),
     )
 
@@ -218,7 +226,7 @@ async def cb_search_mode(
 ) -> None:
     if callback_data.mode == "unowned":
         await state.clear()
-        await callback.answer("Karta nomini yozib qidiring.", show_alert=False)
+        await _render_results(callback, callback.from_user.id, "unowned", "", 1)
         return
     if callback_data.mode == "rarity":
         async with get_session() as session:
@@ -346,7 +354,6 @@ async def cb_search_catalog_inspect(
         w = await AuctionWishlistService.is_wishlisted(session, db_user.id, card.id)
         lvl_cfg = await CardLevelService.get_config(session)
         rcfg = await SettingsService.get_rarity_config(session)
-        owners = (await SearchService.get_card_owners_map(session, [card.id])).get(card.id, [])
 
     extra = (
         "🎯 Limitli event kartasi"
@@ -354,12 +361,17 @@ async def cb_search_catalog_inspect(
         else f"🔁 Guruhlarga tashlanishi: <b>{card.dropped_count}/{card.drop_limit}</b>"
     )
     rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-    caption = format_card_with_owners(
+    power = CardLevelService.power(card.rarity, 1, lvl_cfg)
+    l_emoji, l_name = CardLevelService.title(1)
+    caption = format_v25_card_caption(
         card,
-        owners,
+        level=1,
         max_level=int(lvl_cfg.get("max_level", 10)),
-        power_fn=lambda lv: CardLevelService.power(card.rarity, lv, lvl_cfg),
+        power=power,
+        level_title_emoji=l_emoji,
+        level_title_name=l_name,
         rank_price_coins=rank_val,
+        owner_name="Katalog (hali olinmagan)" if card.dropped_count == 0 else "Umumiy katalog",
         status_line=f"📖 {extra}",
     )
     kb = search_catalog_inspect_kb(
@@ -378,7 +390,7 @@ async def cb_search_catalog_inspect(
 
 @router.inline_query()
 async def inline_card_search(inline_query: InlineQuery) -> None:
-    """Inline qidiruv: @botusername <so'rov>. Natijada karta egalari va eng yuqori daraja ko'rinadi."""
+    """Inline qidiruv: @botusername <so'rov>."""
     q = (inline_query.query or "").strip()
     try:
         async with get_session() as session:
@@ -391,57 +403,37 @@ async def inline_card_search(inline_query: InlineQuery) -> None:
                 page=1,
                 page_size=15,
             )
-            owners_map = await SearchService.get_card_owners_map(session, [c.id for c in cards])
     except Exception as exc:
         logger.debug("Inline query error: %s", exc)
         await inline_query.answer([], cache_time=5)
         return
 
     results = []
-    guide_text = (
-        "🔍 Qanday qidiriladi?\n"
-        "• @bot_username Gojo — personaj ismi\n"
-        "• @bot_username Jujutsu Kaisen — anime nomi\n"
-        "• @bot_username Epic — rank\n"
-        "• @bot_username CRD-0001 — karta kodi\n"
-        "Bo‘sh qoldirsangiz — tasodifiy kartalar chiqadi."
-    )
-    results.append(
-        InlineQueryResultArticle(
-            id="help_search",
-            title="❓ Qanday qidiriladi?",
-            description="Ism · anime · rank · karta kodi bo‘yicha qidiring",
-            input_message_content=InputTextMessageContent(message_text=guide_text),
-        )
-    )
     for card in cards:
         meta = get_rarity_meta(card.rarity)
         rank_val = CardLevelService.rank_value_for_card(card, rcfg)
-        owners = owners_map.get(card.id, [])
-        caption = format_card_with_owners(
+        power = CardLevelService.power(card.rarity, 1, lvl_cfg)
+        l_emoji, l_name = CardLevelService.title(1)
+        caption = format_v25_card_caption(
             card,
-            owners,
+            level=1,
             max_level=int(lvl_cfg.get("max_level", 10)),
-            power_fn=lambda lv, c=card: CardLevelService.power(c.rarity, lv, lvl_cfg),
+            power=power,
+            level_title_emoji=l_emoji,
+            level_title_name=l_name,
             rank_price_coins=rank_val,
-            status_line="",
+            owner_name="Karta katalogi",
+            status_line=f"🆔 {card.card_code}",
         )
-        top = max((int(lv or 1) for _n, lv in owners), default=0)
-        top_names = ", ".join(n for n, lv in owners if int(lv or 1) == top)[:40]
-        owners_desc = (
-            f"👥 {len(owners)} ta egasi · 🏅 Lvl {top}: {top_names}" if owners else "👤 Egasi yo‘q"
-        )
-        desc = f"{card.anime_name} · {meta.name} · {rank_val:,} 🪙 | {owners_desc}"[:250]
         fid = (getattr(card, "image_file_id", None) or "").strip()
         img = (card.image or "").strip()
-        title = f"{meta.emoji} {card.character_name}" + (f" 🏅Lvl {top}" if top else "")
         if fid:
             results.append(
                 InlineQueryResultCachedPhoto(
                     id=f"card_{card.id}",
                     photo_file_id=fid,
-                    title=title,
-                    description=desc,
+                    title=f"{meta.emoji} {card.character_name}",
+                    description=f"{card.anime_name} · {meta.name} · {rank_val:,} 🪙",
                     caption=caption,
                 )
             )
@@ -451,8 +443,8 @@ async def inline_card_search(inline_query: InlineQuery) -> None:
                     id=f"card_{card.id}",
                     photo_url=img,
                     thumbnail_url=img,
-                    title=title,
-                    description=desc,
+                    title=f"{meta.emoji} {card.character_name}",
+                    description=f"{card.anime_name} · {meta.name} · {rank_val:,} 🪙",
                     caption=caption,
                 )
             )
@@ -460,8 +452,8 @@ async def inline_card_search(inline_query: InlineQuery) -> None:
             results.append(
                 InlineQueryResultArticle(
                     id=f"card_{card.id}",
-                    title=f"{title} ({meta.name})",
-                    description=desc,
+                    title=f"{meta.emoji} {card.character_name} ({meta.name})",
+                    description=f"{card.anime_name} · {rank_val:,} 🪙",
                     input_message_content=InputTextMessageContent(message_text=caption),
                 )
             )

@@ -32,7 +32,7 @@ from services.settings_service import SettingsService
 from utils.callback_data import AdminCb
 from utils.constants import EVENT_DURATION_HOURS, get_rarity_meta
 from utils.formatting import esc
-from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
+from utils.tg_helpers import NotCommandFilter, edit_or_answer
 from utils.timeutils import to_tashkent
 
 logger = logging.getLogger(__name__)
@@ -279,12 +279,7 @@ async def cb_admin_evt(callback: CallbackQuery, callback_data: AdminCb, state: F
             return
         await state.set_state(AdminStates.evt_copies)
         await state.update_data(card_id=card.id, card_name=card.character_name, anime_name=card.anime_name, rarity=card.rarity)
-        await show_card_with_prompt(
-            callback,
-            card,
-            "📦 Necha nusxa sotiladi? Sonni kiriting:",
-            title="🎁 <b>YANGI EVENT</b>",
-        )
+        await edit_or_answer(callback, f"🎴 <b>{esc(card.character_name)}</b>\n\n📦 Necha nusxa sotiladi? Sonni kiriting:")
         return
 
     if action == "ptype":

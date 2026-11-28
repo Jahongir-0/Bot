@@ -5,7 +5,7 @@ from typing import Optional
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
@@ -19,7 +19,6 @@ from keyboards.admin import (
     admin_users_list_kb,
     admin_users_menu_kb,
 )
-from models.card import Card
 from models.group import Group, GroupMember
 from models.transaction import CoinTransaction
 from models.user import User
@@ -29,7 +28,7 @@ from services.security_backup_service import SecurityBackupService
 from utils.callback_data import AdminCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc, fmt_coins
-from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
+from utils.tg_helpers import NotCommandFilter, edit_or_answer
 from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
@@ -362,28 +361,6 @@ async def cb_admin_give_card_pick(callback: CallbackQuery, callback_data: AdminC
         reply_markup=admin_pick_card_for_user_kb(
             callback.from_user.id, callback_data.target_id, cards, callback_data.page, total, page_size=PAGE_SIZE
         ),
-    )
-
-
-@router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "give_prev")))
-async def cb_admin_give_card_preview(callback: CallbackQuery, callback_data: AdminCb) -> None:
-    """Berishdan oldin karta rasmi va ma'lumotini ko'rsatadi."""
-    card_id = int(callback_data.extra) if callback_data.extra.isdigit() else 0
-    async with get_session() as session:
-        card = await session.get(Card, card_id)
-        u = await session.get(User, callback_data.target_id)
-    if card is None or u is None:
-        await callback.answer("Karta yoki foydalanuvchi topilmadi.", show_alert=True)
-        return
-    o = callback.from_user.id
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Karta berish", callback_data=AdminCb(owner_id=o, section="users", action="give_exec", target_id=u.id, extra=str(card.id)).pack())],
-            [InlineKeyboardButton(text="⬅️ Boshqa karta", callback_data=AdminCb(owner_id=o, section="users", action="give_pick", target_id=u.id, page=1).pack())],
-        ]
-    )
-    await show_card_with_prompt(
-        callback, card, f"👤 Kimga: <b>{esc(u.display_name)}</b>\nShu kartani berasizmi?", reply_markup=kb, title="➕ <b>KARTA BERISH</b>"
     )
 
 

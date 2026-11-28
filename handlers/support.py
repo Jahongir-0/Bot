@@ -52,8 +52,7 @@ async def _notify_admins_support_msg(
         f"{prefix} <b>#{ticket_id}</b>\n"
         f"👤 {esc(sender_user.display_name)} (<code>{sender_tg_id}</code>)\n"
         f"📝 Mavzu: <b>{esc(subject)}</b>\n\n"
-        f"{esc(body[:900])}\n\n"
-        "↩️ <i>Javob berish uchun shu xabarga <b>REPLY</b> qiling.</i>"
+        f"{esc(body[:900])}"
     )
     for aid in admin_ids:
         try:
