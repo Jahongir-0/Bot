@@ -20,6 +20,9 @@ from utils.tg_helpers import safe_delete, schedule_delete
 logger = logging.getLogger(__name__)
 router = Router(name="drop")
 
+# (chat_id, drop xabari ID) -> shu dropga yozilgan noto'g'ri urinishlar va bot javoblari ID lari
+_WRONG_MSGS: dict = {}
+
 
 async def _announce_drop_claimed(msg: Message, result) -> None:
     claimed_text = format_drop_claimed_message(
@@ -150,6 +153,11 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
     # ---- noto'g'ri ism ----
     if not guessed_ok:
         wrong = await message.reply("❌ <b>Noto‘g‘ri!</b> Qayta urinib ko‘ring.")
+        bucket = _WRONG_MSGS.setdefault((chat_id, replied.message_id), [])
+        bucket.extend([message.message_id, wrong.message_id])
+        if len(_WRONG_MSGS) > 500:  # xotira to'lib ketmasligi uchun eng eskilarini tashlaymiz
+            for k in list(_WRONG_MSGS.keys())[:250]:
+                _WRONG_MSGS.pop(k, None)
         schedule_delete(bot, chat_id, [message.message_id, wrong.message_id], delay=6)
         return
 
@@ -163,11 +171,19 @@ async def msg_reply_claim_drop(message: Message, db_user: User) -> None:
             schedule_delete(bot, chat_id, [message.message_id, note.message_id], delay=6)
         return
 
-    # ---- muvaffaqiyat: karta rasmi va javobni o'chirib, faqat natijani qoldiramiz ----
-    success_text = _claim_success_text(result)
-    card_deleted = await safe_delete(bot, chat_id, replied.message_id)
-    if not card_deleted:
-        # Botda "xabarlarni o'chirish" ruxsati bo'lmasa: karta xabarini yopib qo'yamiz
-        await _announce_drop_claimed(replied, result)
-    await safe_delete(bot, chat_id, message.message_id)
-    await bot.send_message(chat_id, success_text)
+    # ---- muvaffaqiyat: karta rasmi va ma'lumoti QOLADI, tagidagi matn "kim topdi, nima oldi" ga almashadi ----
+    result_text = format_drop_claimed_message(card=result.card, winner=result.winner, reward_coins=result.reward_coins)
+    detail = _claim_success_text(result).split("\n", 3)[-1]  # daraja/XP qismi
+    final_text = f"{result_text}\n\n{detail}"[:1020]
+    # Foydalanuvchining to'g'ri yozuvi va oldingi noto'g'ri urinishlar + bot javoblari o'chadi
+    stale = _WRONG_MSGS.pop((chat_id, replied.message_id), [])
+    for mid in [message.message_id, *stale]:
+        await safe_delete(bot, chat_id, mid)
+    try:
+        if replied.photo:
+            await replied.edit_caption(caption=final_text, reply_markup=None)
+        else:
+            await replied.edit_text(text=final_text, reply_markup=None)
+    except TelegramBadRequest as exc:
+        logger.debug("Drop xabarini tahrirlab bo'lmadi: %s", exc)
+        await replied.reply(final_text)

@@ -424,21 +424,28 @@ class DropService:
         mults = await CardLevelService.get_drop_mults(session)
         active_event = await CardService.get_active_event(session)
 
-        # Oxirgi tashlangan animeni olamiz — ketma-ket bir xil animedan tashlamaslik uchun
-        last_anime_row = (
+        # Shu guruhda oxirgi tashlangan kartalar: anime va personajlar takrorlanmasligi uchun
+        recent_rows = (
             await session.execute(
-                select(Card.anime_id, Card.anime_name)
+                select(Card.anime_id, Card.anime_name, Card.character_id)
                 .join(ActiveDrop, ActiveDrop.card_id == Card.id)
                 .where(ActiveDrop.group_id == group.id)
                 .order_by(ActiveDrop.id.desc())
-                .limit(1)
+                .limit(12)
             )
-        ).first()
-        last_anime_key = (
-            (last_anime_row[0] or (last_anime_row[1] or "").strip().casefold())
-            if last_anime_row is not None
-            else None
-        )
+        ).all()
+
+        def _akey(anime_id, anime_name) -> str:
+            return anime_id or (anime_name or "").strip().casefold()
+
+        recent_animes: List[str] = []
+        recent_chars: List[str] = []
+        for r_aid, r_aname, r_cid in recent_rows:
+            ak = _akey(r_aid, r_aname)
+            if ak not in recent_animes:
+                recent_animes.append(ak)
+            if r_cid and r_cid not in recent_chars:
+                recent_chars.append(r_cid)
 
         def _card_weight(card: Card) -> float:
             w = float(card.drop_weight) * CardLevelService.rarity_mult(mults, card.rarity)
@@ -457,35 +464,35 @@ class DropService:
             if not cards:
                 continue
 
-            # DB qo'shilgan tartib (id) ta'sir qilmasligi uchun avval aralashtiramiz
             random.shuffle(cards)
 
-            # Boshqa animelardan karta bo'lsa, ketma-ket bir xil animedan tashlamaymiz
+            # 1) ANIME: oxirgi tashlangan animelar (avval 3 tasi, bo'lmasa 1 tasi) chetda qoladi
             pool = cards
-            if last_anime_key:
-                other_anime_cards = [
-                    c for c in cards
-                    if (c.anime_id or (c.anime_name or "").strip().casefold()) != last_anime_key
-                ]
-                if other_anime_cards:
-                    pool = other_anime_cards
+            for keep_n in (3, 1):
+                blocked = set(recent_animes[:keep_n])
+                filtered = [c for c in cards if _akey(c.anime_id, c.anime_name) not in blocked]
+                if filtered:
+                    pool = filtered
+                    break
 
-            # Har bir anime bo'yicha tengroq aralashtirish (ko'p kartali anime birinchi tugab ketmasin)
             by_anime: Dict[str, List[Card]] = {}
             for card in pool:
-                akey = card.anime_id or (card.anime_name or "").strip().casefold()
-                by_anime.setdefault(akey, []).append(card)
+                by_anime.setdefault(_akey(card.anime_id, card.anime_name), []).append(card)
+            # Har bir anime TENG ehtimol bilan (kartasi ko'p anime ustun bo'lib ketmaydi)
+            anime_cards = random.choice(list(by_anime.values()))
 
-            anime_groups = list(by_anime.values())
-            random.shuffle(anime_groups)
-            anime_weights = [
-                max(0.01, sum(_card_weight(c) for c in grp_cards) / len(grp_cards))
-                for grp_cards in anime_groups
-            ]
-            chosen_group = random.choices(anime_groups, weights=anime_weights, k=1)[0]
-            random.shuffle(chosen_group)
-            card_weights = [_card_weight(c) for c in chosen_group]
-            return random.choices(chosen_group, weights=card_weights, k=1)[0], False
+            # 2) PERSONAJ: shu animening oxirgi tashlangan personajlari chetda qoladi
+            by_char: Dict[str, List[Card]] = {}
+            for card in anime_cards:
+                by_char.setdefault(card.character_id or card.character_name.strip().casefold(), []).append(card)
+            char_keys = list(by_char.keys())
+            fresh = [k for k in char_keys if k not in recent_chars]
+            chosen_char = random.choice(fresh or char_keys)
+
+            # 3) KARTA: shu personajning kartalaridan rank og'irligi bo'yicha (nusxasi tugamaganlari)
+            char_cards = by_char[chosen_char]
+            card_weights = [_card_weight(c) for c in char_cards]
+            return random.choices(char_cards, weights=card_weights, k=1)[0], False
         return None, False
 
     @staticmethod

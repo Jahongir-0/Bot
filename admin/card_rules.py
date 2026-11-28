@@ -55,85 +55,111 @@ def _pct(m: float) -> str:
     return "🚫 tushmaydi" if m <= 0 else f"{m * 100:g}%"
 
 
-async def _render(target, owner: int) -> None:
+_VIEW: dict = {}  # admin -> oxirgi ochilgan ko'rinish (drop | level | merge), tahrirdan keyin shunga qaytiladi
+
+LEVEL_KEYS = ("max_level", "coin_cost_factor", "dup_refund_percent", "bot_sell_level_bonus_pct", "stars_per_level", "stars_max_level", "power_step")
+MERGE_KEYS = ("merge_count", "merge_daily_limit", "merge_cost_4", "merge_cost_5")
+VIEW_TITLES = {
+    "drop": "🎲 RANK BO‘YICHA TUSHISH",
+    "level": "📈 DARAJA VA NARX SOZLAMALARI",
+    "merge": "🔮 BIRLASHTIRISH SOZLAMALARI",
+}
+VIEW_PARENT = {"drop": "drop", "level": "card_set", "merge": "card_set"}
+
+
+async def _render(target, owner: int, view: Optional[str] = None) -> None:
+    view = view or _VIEW.get(owner) or "level"
+    _VIEW[owner] = view
     async with get_session() as session:
         ranks = await GameplayService.get_rank_definitions(session)
         mults = await CardLevelService.get_drop_mults(session)
         cfg = await CardLevelService.get_config(session)
 
-    lines = [
-        header("🎯 <b>DROP, NARX VA DARAJA SOZLAMALARI</b>"),
-        "<b>Guruhga tasodifiy tushish ehtimoli</b> (rank bo‘yicha ko‘paytiruvchi):",
-    ]
+    lines = [header(f"<b>{VIEW_TITLES[view]}</b>")]
     b = InlineKeyboardBuilder()
-    for r in ranks:
-        order = int(r.get("order", 0))
-        m = CardLevelService.mult_for(mults, order)
-        lines.append(f"{r.get('emoji', '⭐')} {esc(r['name'])} — {_pct(m)}")
-        b.row(
-            InlineKeyboardButton(
-                text=f"{r.get('emoji', '⭐')} {r['name']}: {_pct(m)}"[:60],
-                callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mult", tid=order).pack(),
-            )
-        )
-    lines += ["", "<i>Tugmani bossangiz qiymat almashadi: 🚫 → 5% → 15% → 50% → 100%.</i>", "", "<b>Karta darajasi va botga sotish narxlari</b>"]
-    for key, (label, options, fmt) in CFG_FIELDS.items():
-        lines.append(f"{label}: <b>{fmt(cfg[key])}</b>")
-        b.row(
-            InlineKeyboardButton(
-                text=f"{label}: {fmt(cfg[key])}"[:60],
-                callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="cfg", ext=key).pack(),
-            )
-        )
-    b.row(
-        InlineKeyboardButton(
-            text=f"🔮 Birlashtirish: {'🟢 YOQILGAN' if cfg.get('merge_enabled', True) else '🔴 O‘CHIQ'}",
-            callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mtog").pack(),
-        )
-    )
-    pairs = cfg.get("merge_pairs") or {}
-    ranks_by_ord = {int(r.get("order", 0)): r for r in ranks}
-    pair_btns = []
-    for ord_num in sorted(ranks_by_ord):
-        if ord_num + 1 in ranks_by_ord:
-            r_from = ranks_by_ord[ord_num]
-            r_to = ranks_by_ord[ord_num + 1]
-            on = bool(pairs.get(str(ord_num), True))
-            pair_btns.append(
+    if view == "drop":
+        lines.append("Guruhga <b>tasodifiy</b> tushishda har bir rankning ehtimol ko‘paytiruvchisi:\n")
+        for r in ranks:
+            order = int(r.get("order", 0))
+            m = CardLevelService.mult_for(mults, order)
+            lines.append(f"{r.get('emoji', '⭐')} {esc(r['name'])} — {_pct(m)}")
+            b.row(
                 InlineKeyboardButton(
-                    text=f"{'✅' if on else '🚫'} {r_from.get('emoji', '')}{ord_num}→{r_to.get('emoji', '')}{ord_num + 1}",
-                    callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mpair", tid=ord_num).pack(),
+                    text=f"{r.get('emoji', '⭐')} {r['name']}: {_pct(m)}"[:60],
+                    callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mult", tid=order).pack(),
                 )
             )
-    for i in range(0, len(pair_btns), 3):
-        b.row(*pair_btns[i : i + 3])
+        lines += ["", "<i>Tugmani bossangiz qiymat almashadi: 🚫 tushmaydi → 5% → 15% → 50% → 100%.</i>"]
+    elif view == "level":
+        lines.append("Karta darajasi, ko‘tarish narxi va botga sotish:\n")
+        for key in LEVEL_KEYS:
+            label, options, fmt = CFG_FIELDS[key]
+            lines.append(f"{label}: <b>{fmt(cfg[key])}</b>")
+            b.row(
+                InlineKeyboardButton(
+                    text=f"{label}: {fmt(cfg[key])}"[:60],
+                    callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="cfg", ext=key).pack(),
+                )
+            )
+        b.row(
+            InlineKeyboardButton(text="✏️ Lvl narxi omili", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="coin_cost_factor").pack()),
+            InlineKeyboardButton(text="✏️ Stars/lvl", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="stars_per_level").pack()),
+        )
+        b.row(InlineKeyboardButton(text="✏️ Botga sotish Lvl %", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="bot_sell_level_bonus_pct").pack()))
+    else:  # merge
+        on = bool(cfg.get("merge_enabled", True))
+        lines.append(f"Holat: {'🟢 YOQILGAN' if on else '🔴 O‘CHIQ'}\n")
+        for key in MERGE_KEYS:
+            label, options, fmt = CFG_FIELDS[key]
+            lines.append(f"{label}: <b>{fmt(cfg[key])}</b>")
+            b.row(
+                InlineKeyboardButton(
+                    text=f"{label}: {fmt(cfg[key])}"[:60],
+                    callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="cfg", ext=key).pack(),
+                )
+            )
+        b.row(
+            InlineKeyboardButton(
+                text=f"🔮 Birlashtirish: {'🟢 YOQILGAN' if on else '🔴 O‘CHIQ'}",
+                callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mtog").pack(),
+            )
+        )
+        pairs = cfg.get("merge_pairs") or {}
+        ranks_by_ord = {int(r.get("order", 0)): r for r in ranks}
+        lines.append("\n<b>Qaysi rank juftliklari birlashtiriladi:</b> (tugma bilan yoqish/o‘chirish)")
+        pair_btns = []
+        for ord_num in sorted(ranks_by_ord):
+            if ord_num + 1 in ranks_by_ord:
+                r_from, r_to = ranks_by_ord[ord_num], ranks_by_ord[ord_num + 1]
+                pon = bool(pairs.get(str(ord_num), True))
+                pair_btns.append(
+                    InlineKeyboardButton(
+                        text=f"{'✅' if pon else '🚫'} {r_from.get('emoji', '')}{ord_num}→{r_to.get('emoji', '')}{ord_num + 1}",
+                        callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="mpair", tid=ord_num).pack(),
+                    )
+                )
+        for i in range(0, len(pair_btns), 3):
+            b.row(*pair_btns[i : i + 3])
     b.row(
-        InlineKeyboardButton(text="✏️ Lvl narxi omili", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="coin_cost_factor").pack()),
-        InlineKeyboardButton(text="✏️ Stars/lvl", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="stars_per_level").pack()),
-        InlineKeyboardButton(text="✏️ Bot Lvl %", callback_data=AdmV2Cb(owner_id=owner, sec=SEC, act="ed", ext="bot_sell_level_bonus_pct").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="💎 Rank narxlarini o‘zgartirish", callback_data=AdmV2Cb(owner_id=owner, sec="ranks", act="v").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="⬅️ Ranklar", callback_data=AdmV2Cb(owner_id=owner, sec="ranks", act="v").pack()),
+        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner, sec="hub", act="v", ext=VIEW_PARENT[view]).pack()),
         InlineKeyboardButton(text="🛡 Admin Panel", callback_data=AdminCb(owner_id=owner, section="home").pack()),
     )
     await edit_or_answer(target, "\n".join(lines), reply_markup=b.as_markup())
 
 
 async def _perm(callback: CallbackQuery, admin_perms: Optional[set]) -> bool:
-    if not has_admin_perm(callback.from_user, admin_perms, "ranks"):
+    if not any(has_admin_perm(callback.from_user, admin_perms, sec) for sec in ("ranks", "cards", "settings")):
         await callback.answer("⛔ Bu bo‘limga ruxsatingiz yo‘q.", show_alert=True)
         return False
     return True
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "v")))
-async def cb_rules_home(callback: CallbackQuery, state: FSMContext, admin_perms: Optional[set] = None) -> None:
+async def cb_rules_home(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: Optional[set] = None) -> None:
     await state.clear()
     if await _perm(callback, admin_perms):
-        await _render(callback, callback.from_user.id)
+        view = callback_data.ext if callback_data.ext in VIEW_TITLES else None
+        await _render(callback, callback.from_user.id, view)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == SEC) & (F.act == "mult")))

@@ -395,10 +395,9 @@ async def _process_v2_periodic_jobs(bot: Bot, tick: int) -> None:
                 await asyncio.gather(*[_send_one(c) for c in targets])
 
             async with get_session() as s_done:
-                for old_cid, new_cid in migrated_msgs:
-                    await s_done.execute(
-                        update(Group).where(Group.telegram_chat_id == old_cid).values(telegram_chat_id=new_cid)
-                    )
+                from services.group_migration import apply_group_migrations
+
+                await apply_group_migrations(s_done, migrated_msgs)
                 row = await s_done.get(ScheduledMessage, sm.id)
                 if row is not None:
                     row.status = "sent"

@@ -62,3 +62,17 @@ def back_callback(owner_id: int) -> str:
     return AdmV2Cb(
         owner_id=owner_id, sec="cards", act=last["act"], tid=last["tid"], ext=last["ext"], p=last["p"]
     ).pack()
+
+
+# ---- Foydalanuvchilar ro'yxati: oxirgi filtr va sahifa (profildan orqaga qaytish uchun) ----
+_USERS_CTX: Dict[int, tuple] = {}
+
+
+def remember_users_list(owner_id: int, mode: str, page: int) -> None:
+    if len(_USERS_CTX) > _MAX_ENTRIES:
+        _USERS_CTX.clear()
+    _USERS_CTX[int(owner_id)] = (mode or "all", max(1, int(page)))
+
+
+def users_list_ctx(owner_id: int) -> tuple:
+    return _USERS_CTX.get(int(owner_id), ("all", 1))

@@ -50,7 +50,7 @@ def _period_row(b: InlineKeyboardBuilder, owner: int, act: str, active: str, ext
         *[
             InlineKeyboardButton(
                 text=("✅ " if key == active else "") + label,
-                callback_data=_cb(owner, act, ext=f"{key}:{extra}" if extra else key, tid=tid),
+                callback_data=_cb(owner, act, ext=f"{key}-{extra}" if extra else key, tid=tid),
             )
             for key, label in PERIODS
         ]
@@ -93,14 +93,14 @@ async def cb_hist_menu(callback: CallbackQuery, state: FSMContext, admin_perms: 
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(text="📊 Umumiy hisobot", callback_data=_cb(o, "rep", ext="d7")),
-        InlineKeyboardButton(text="🧾 Barcha harakatlar", callback_data=_cb(o, "tx", ext="d7:all")),
+        InlineKeyboardButton(text="🧾 Barcha harakatlar", callback_data=_cb(o, "tx", ext="d7-all")),
     )
     b.row(
         InlineKeyboardButton(text="🛒 Bozor savdolari", callback_data=_cb(o, "mk", ext="d7")),
         InlineKeyboardButton(text="💸 Komissiya", callback_data=_cb(o, "comm", ext="d7")),
     )
     b.row(
-        InlineKeyboardButton(text="🏆 Top foydalanuvchilar", callback_data=_cb(o, "top", ext="d7:seller")),
+        InlineKeyboardButton(text="🏆 Top foydalanuvchilar", callback_data=_cb(o, "top", ext="d7-seller")),
         InlineKeyboardButton(text="🎴 Olingan kartalar", callback_data=_cb(o, "claims", ext="d7")),
     )
     b.row(InlineKeyboardButton(text="👤 Foydalanuvchi tarixi (qidirish)", callback_data=_cb(o, "usr_s")))
@@ -131,7 +131,7 @@ async def cb_hist_menu(callback: CallbackQuery, state: FSMContext, admin_perms: 
 async def cb_hist_report(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    period = (callback_data.ext or "d7").split(":")[0]
+    period = (callback_data.ext or "d7").split("-")[0]
     async with get_session() as session:
         r = await HistoryService.overview(session, period_since(period))
     via_names = {"drop": "guruhda topildi", "market": "bozordan", "auction": "auksiondan", "transfer": "sovg‘a/transfer", "pack": "paketdan", "group_reward": "guruh mukofoti", "admin": "admin bergan", "event": "eventdan", "store": "do‘kondan"}
@@ -158,7 +158,7 @@ async def cb_hist_report(callback: CallbackQuery, callback_data: AdmV2Cb, admin_
     b = InlineKeyboardBuilder()
     _period_row(b, o, "rep", period)
     b.row(
-        InlineKeyboardButton(text="🧾 Harakatlar", callback_data=_cb(o, "tx", ext=f"{period}:all")),
+        InlineKeyboardButton(text="🧾 Harakatlar", callback_data=_cb(o, "tx", ext=f"{period}-all")),
         InlineKeyboardButton(text="🛒 Savdolar", callback_data=_cb(o, "mk", ext=period)),
     )
     _menu_btn(b, o)
@@ -172,7 +172,7 @@ async def cb_hist_report(callback: CallbackQuery, callback_data: AdmV2Cb, admin_
 async def cb_hist_tx(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    parts = (callback_data.ext or "d7:all").split(":")
+    parts = (callback_data.ext or "d7-all").split("-")
     period = parts[0]
     category = parts[1] if len(parts) > 1 and parts[1] in TX_CATEGORIES else "all"
     page = max(1, callback_data.p)
@@ -195,12 +195,12 @@ async def cb_hist_tx(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perm
             *[
                 InlineKeyboardButton(
                     text=("✅ " if key == category else "") + _short_cat(key, label),
-                    callback_data=_cb(o, "tx", ext=f"{period}:{key}"),
+                    callback_data=_cb(o, "tx", ext=f"{period}-{key}"),
                 )
                 for key, (label, _t) in cats[i : i + 3]
             ]
         )
-    _nav_row(b, o, "tx", f"{period}:{category}", page, total, PER_PAGE_TX)
+    _nav_row(b, o, "tx", f"{period}-{category}", page, total, PER_PAGE_TX)
     _menu_btn(b, o)
     await edit_or_answer(callback, "\n".join(lines)[:4000], reply_markup=b.as_markup())
 
@@ -212,7 +212,7 @@ async def cb_hist_tx(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perm
 async def cb_hist_market(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    period = (callback_data.ext or "d7").split(":")[0]
+    period = (callback_data.ext or "d7").split("-")[0]
     page = max(1, callback_data.p)
     per_page = 8
     async with get_session() as session:
@@ -244,12 +244,13 @@ async def cb_hist_market(callback: CallbackQuery, callback_data: AdmV2Cb, admin_
 async def cb_hist_commission(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    period = (callback_data.ext or "d7").split(":")[0]
+    period = (callback_data.ext or "d7").split("-")[0]
     names = {
         "market_sell": "🛒 Bozor savdosi",
         "offer_accepted_sale": "🤝 Qabul qilingan takliflar",
         "paid_transfer_sell": "🎁 Pullik sovg‘alar",
         "auction_sale": "🔨 Auksion sotuvlari",
+        "coin_gift_sent": "💸 Coin yuborish",
     }
     async with get_session() as session:
         total, by_type = await HistoryService.commission(session, period_since(period))
@@ -275,7 +276,7 @@ _TOP_KINDS = [("seller", "💰 Sotuvchilar"), ("buyer", "🛒 Xaridorlar"), ("sp
 async def cb_hist_top(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    parts = (callback_data.ext or "d7:seller").split(":")
+    parts = (callback_data.ext or "d7-seller").split("-")
     period = parts[0]
     kind = parts[1] if len(parts) > 1 and parts[1] in dict(_TOP_KINDS) else "seller"
     async with get_session() as session:
@@ -289,8 +290,8 @@ async def cb_hist_top(callback: CallbackQuery, callback_data: AdmV2Cb, admin_per
     if not rows:
         lines.append("📭 Ma’lumot yo‘q.")
     _period_row(b, o, "top", period, extra=kind)
-    b.row(*[InlineKeyboardButton(text=("✅ " if k == kind else "") + lbl, callback_data=_cb(o, "top", ext=f"{period}:{k}")) for k, lbl in _TOP_KINDS[:2]])
-    b.row(*[InlineKeyboardButton(text=("✅ " if k == kind else "") + lbl, callback_data=_cb(o, "top", ext=f"{period}:{k}")) for k, lbl in _TOP_KINDS[2:]])
+    b.row(*[InlineKeyboardButton(text=("✅ " if k == kind else "") + lbl, callback_data=_cb(o, "top", ext=f"{period}-{k}")) for k, lbl in _TOP_KINDS[:2]])
+    b.row(*[InlineKeyboardButton(text=("✅ " if k == kind else "") + lbl, callback_data=_cb(o, "top", ext=f"{period}-{k}")) for k, lbl in _TOP_KINDS[2:]])
     _menu_btn(b, o)
     await edit_or_answer(callback, "\n".join(lines), reply_markup=b.as_markup())
 
@@ -302,7 +303,7 @@ async def cb_hist_top(callback: CallbackQuery, callback_data: AdmV2Cb, admin_per
 async def cb_hist_claims(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    period = (callback_data.ext or "d7").split(":")[0]
+    period = (callback_data.ext or "d7").split("-")[0]
     page = max(1, callback_data.p)
     per_page = 10
     async with get_session() as session:
@@ -366,7 +367,7 @@ async def fsm_hist_user_search(message: Message, state: FSMContext) -> None:
 async def cb_hist_user(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
     if await _deny_if_no_perm(callback, admin_perms, "history"):
         return
-    period = (callback_data.ext or "all").split(":")[0]
+    period = (callback_data.ext or "all").split("-")[0]
     page = max(1, callback_data.p)
     async with get_session() as session:
         user = await session.get(User, callback_data.tid)

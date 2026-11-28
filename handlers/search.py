@@ -1,4 +1,5 @@
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -376,10 +377,80 @@ async def cb_search_catalog_inspect(
     await callback.answer()
 
 
+async def _admin_inline(inline_query: InlineQuery, rest: str) -> bool:
+    """Admin uchun inline qidiruv. Natijani tanlasa admin chatida /ac <id> yoki /au <id> yuboriladi va
+    bot admin boshqaruv oynasini (tahrirlash, o'chirish, event, auksion, daraja...) ochadi.
+    Admin bo'lmaganlar uchun False qaytaradi (oddiy qidiruv ishlaydi)."""
+    from services.community_service import CommunityService
+    from services.history_service import HistoryService
+    from utils.tg_helpers import is_super_admin
+
+    tg = inline_query.from_user
+    try:
+        async with get_session() as session:
+            is_adm, perms = await CommunityService.get_admin_permissions(session, tg.id, tg.username)
+            if not (is_adm or is_super_admin(tg)):
+                return False
+            results = []
+            hint = InlineQueryResultArticle(
+                id="adm_help",
+                title="🛠 Admin qidiruv",
+                description="admin <karta> · admin user <foydalanuvchi>",
+                input_message_content=InputTextMessageContent(
+                    message_text="🛠 Admin inline: <code>@bot admin Gojo</code> (karta) yoki <code>@bot admin user @username</code>",
+                ),
+            )
+            m_user = re.match(r"^(?:user|u|foydalanuvchi)\b\s*(.*)$", rest, re.I)
+            if m_user:
+                if "users" not in perms and not is_super_admin(tg):
+                    return False
+                users = await HistoryService.find_users(session, m_user.group(1).strip() or "a", limit=20)
+                for u in users:
+                    status = "🚫 ban" if u.is_banned else "✅ faol"
+                    results.append(
+                        InlineQueryResultArticle(
+                            id=f"adm_u_{u.id}",
+                            title=f"👤 {u.display_name}",
+                            description=f"ID {u.telegram_id} · 🪙 {u.coins:,} · 🎴 {u.total_cards} · {status}",
+                            input_message_content=InputTextMessageContent(message_text=f"/au {u.id}"),
+                        )
+                    )
+            else:
+                if "cards" not in perms and not is_super_admin(tg):
+                    return False
+                cards, _t = await SearchService.search_catalog_cards(
+                    session=session, mode="any" if rest else "random", query=rest, page=1, page_size=20
+                )
+                owners_map = await SearchService.get_card_owners_map(session, [c.id for c in cards])
+                for c in cards:
+                    meta = get_rarity_meta(c.rarity)
+                    owners = owners_map.get(c.id, [])
+                    state = "🟢 faol" if c.is_available else "🔴 o‘chiq"
+                    results.append(
+                        InlineQueryResultArticle(
+                            id=f"adm_c_{c.id}",
+                            title=f"🛠 {meta.emoji} {c.character_name} · {c.card_code}",
+                            description=f"{c.anime_name} · {meta.name} · {state} · 👥 {len(owners)} ega · drop {c.dropped_count}/{c.drop_limit}",
+                            input_message_content=InputTextMessageContent(message_text=f"/ac {c.id}"),
+                        )
+                    )
+        await inline_query.answer([hint] + results, cache_time=2, is_personal=True)
+    except Exception as exc:
+        logger.debug("Admin inline xatosi: %s", exc)
+        return False
+    return True
+
+
 @router.inline_query()
 async def inline_card_search(inline_query: InlineQuery) -> None:
     """Inline qidiruv: @botusername <so'rov>. Natijada karta egalari va eng yuqori daraja ko'rinadi."""
     q = (inline_query.query or "").strip()
+    # 🛠 ADMIN rejimi: «admin <so'rov>» (kartalar) yoki «admin user <so'rov>» (foydalanuvchilar)
+    m_adm = re.match(r"^(?:admin|adm)\b\s*(.*)$", q, re.I)
+    if m_adm:
+        handled = await _admin_inline(inline_query, m_adm.group(1).strip())
+        if handled:
+            return
     try:
         async with get_session() as session:
             lvl_cfg = await CardLevelService.get_config(session)

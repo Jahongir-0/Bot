@@ -11,6 +11,7 @@ from admin.filters import has_admin_perm
 from utils.callback_data import AdmV2Cb, AdminCb
 
 class AdminV2States(StatesGroup):
+    waiting_page_jump = State()
     # Cards
     waiting_zip_cards = State()
     waiting_batch_text = State()

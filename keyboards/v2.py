@@ -70,7 +70,9 @@ def admin_v2_home_kb(owner_id: int, allowed_sections: Set[str]) -> InlineKeyboar
     """Admin Panel asosiy markazi: ixcham 5 ta toifa (RBAC ruxsatlariga mos)."""
     builder = InlineKeyboardBuilder()
     cat_btns: List[InlineKeyboardButton] = []
-    for cat_key, title, _desc, secs in ADMIN_HUB_CATEGORIES:
+    from keyboards.panel import ROOT_CATEGORIES
+
+    for cat_key, title, _desc, secs in ROOT_CATEGORIES:
         if any(s in allowed_sections for s in secs):
             cat_btns.append(
                 InlineKeyboardButton(
@@ -118,60 +120,10 @@ def admin_v2_hub_kb(owner_id: int, cat_key: str, allowed_sections: Set[str]) -> 
 
 
 def admin_v2_cards_menu_kb(owner_id: int, allowed: Optional[Set[str]] = None) -> InlineKeyboardMarkup:
-    """🎴 KARTALAR MARKAZI: karta bilan bog'liq hamma narsa shu yerda (boshqarish, drop, savdo, eventlar, sozlamalar)."""
-    b = InlineKeyboardBuilder()
+    """🎴 Karta bo'limi menyusi (keyboards/panel.py dagi yagona PANEL tavsifidan)."""
+    from keyboards.panel import panel_kb
 
-    def ok(sec: str) -> bool:
-        return allowed is None or sec in allowed
-
-    def adm(act: str, sec: str = "cards", **kw) -> str:
-        return AdmV2Cb(owner_id=owner_id, sec=sec, act=act, **kw).pack()
-
-    def legacy(section: str, action: str) -> str:
-        return AdminCb(owner_id=owner_id, section=section, action=action).pack()
-
-    def rows(items: List[Tuple[str, str, str]]) -> None:
-        btns = [InlineKeyboardButton(text=t, callback_data=cb) for t, cb, sec in items if ok(sec)]
-        for i in range(0, len(btns), 2):
-            b.row(*btns[i : i + 2])
-
-    # 1. Boshqarish
-    rows([
-        ("➕ Karta qo‘shish", adm("add_menu"), "cards"),
-        ("👁 Kartalarni ko‘rish", adm("view_start", ext="sent_group", p=1), "cards"),
-        ("✏️ Tahrirlash", adm("edit_list", p=1), "cards"),
-        ("🗑 O‘chirish", adm("del_list", p=1), "cards"),
-        ("🎬 Anime bo‘limi", adm("titles_start", ext="anime", p=1), "cards"),
-        ("📖 Manga bo‘limi", adm("titles_start", ext="manga", p=1), "cards"),
-        ("🔍 Qidirish", adm("search"), "cards"),
-        ("♻️ O‘chirilganlar", adm("view_start", ext="deleted", p=1), "cards"),
-    ])
-    # 2. Drop va ranklar
-    rows([
-        ("⭐ Ranklar", adm("v", sec="ranks"), "ranks"),
-        ("🎯 Drop, narx, daraja", adm("v", sec="crules"), "cards"),
-        ("📡 Drop qoidalari", legacy("settings", "drop_rules"), "settings"),
-        ("🎯 Navbatdagi karta", legacy("priority", "view"), "settings"),
-    ])
-    # 3. Savdo va tadbirlar
-    rows([
-        ("🏛 Bot do‘koni", adm("bs", sec="econ"), "settings"),
-        ("🔨 Auksion", adm("v", sec="auction"), "auction"),
-        ("🎯 Eventlar", AdminCb(owner_id=owner_id, section="evt", action="menu").pack(), "events"),
-        ("💸 Komissiyalar", adm("comm", sec="econ"), "settings"),
-        ("🛒 Bozor savdolari", adm("mk", sec="hist", ext="d7"), "history"),
-        ("💡 Karta takliflari", SuggestCb(owner_id=owner_id, act="adm", p=1).pack(), "cards"),
-    ])
-    # 4. Kartaga bog'liq mukofotlar
-    rows([
-        ("🎁 Kunlik bonus (karta)", legacy("settings", "daily_menu"), "settings"),
-        ("🎁 Paket limiti", legacy("settings", "pack_limit"), "settings"),
-    ])
-    b.row(
-        InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
-        InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
-    )
-    return b.as_markup()
+    return panel_kb(owner_id, "cards_evt", allowed)
 
 
 def admin_v2_add_choice_kb(owner_id: int) -> InlineKeyboardMarkup:
@@ -184,10 +136,7 @@ def admin_v2_add_choice_kb(owner_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📦 ZIP yuklash", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="zip").pack()),
     )
     b.row(
-        InlineKeyboardButton(text="📄 JSON + rasmlar ketma-ket (tavsiya)", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="jsonq").pack()),
-    )
-    b.row(
-        InlineKeyboardButton(text="📋 Matn / CSV / JSON (URL bilan)", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="batch").pack()),
+        InlineKeyboardButton(text="📄 JSON qo‘shish (rasmlar ketma-ket)", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="jsonq").pack()),
     )
     b.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()),
@@ -220,6 +169,32 @@ def _view_tabs_rows(builder: InlineKeyboardBuilder, owner_id: int, active_tab: s
         builder.row(*row_btns)
 
 
+def _cards_pager(b, owner_id: int, page: int, total_pages: int, act: str, tid: int = 0, ext: str = "") -> None:
+    """Kartalar ro'yxati uchun sahifalash: ⏮ ⬅️ [📄 raqam → yozib o'tish] ➡️ ⏭ va ±5 sakrash."""
+
+    def mk(p: int) -> str:
+        return AdmV2Cb(owner_id=owner_id, sec="cards", act=act, tid=tid, ext=ext, p=max(1, min(p, total_pages))).pack()
+
+    jump = AdmV2Cb(owner_id=owner_id, sec="cards", act="jump", tid=tid, ext=f"{act}.{ext}", p=page).pack()
+    row = []
+    if page > 2:
+        row.append(InlineKeyboardButton(text="⏮", callback_data=mk(1)))
+    if page > 1:
+        row.append(InlineKeyboardButton(text="⬅️", callback_data=mk(page - 1)))
+    row.append(InlineKeyboardButton(text=f"📄 {page} / {total_pages}", callback_data=jump if total_pages > 1 else mk(page)))
+    if page < total_pages:
+        row.append(InlineKeyboardButton(text="➡️", callback_data=mk(page + 1)))
+    if page < total_pages - 1:
+        row.append(InlineKeyboardButton(text="⏭", callback_data=mk(total_pages)))
+    b.row(*row)
+    if total_pages > 5:
+        b.row(
+            InlineKeyboardButton(text="⏪ −5", callback_data=mk(page - 5)),
+            InlineKeyboardButton(text="🔢 Sahifaga o‘tish", callback_data=jump),
+            InlineKeyboardButton(text="+5 ⏩", callback_data=mk(page + 5)),
+        )
+
+
 def admin_v2_view_cards_kb(
     owner_id: int, cards: List[Card], tab: str, page: int, total: int, page_size: int = 20
 ) -> InlineKeyboardMarkup:
@@ -236,13 +211,7 @@ def admin_v2_view_cards_kb(
             )
         )
     total_pages = max(1, math.ceil(total / page_size))
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext=tab, p=page - 1).pack()))
-    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext=tab, p=page).pack()))
-    if page < total_pages:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext=tab, p=page + 1).pack()))
-    b.row(*nav)
+    _cards_pager(b, owner_id, page, total_pages, "view_tabs", 0, tab)
     b.row(
         InlineKeyboardButton(text="🔍 Qidirish", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="search").pack()),
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()),
@@ -269,13 +238,7 @@ def admin_v2_media_titles_kb(
             )
         )
     total_pages = max(1, math.ceil(total / page_size))
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext=mgroup, p=page - 1).pack()))
-    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext=mgroup, p=page).pack()))
-    if page < total_pages:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext=mgroup, p=page + 1).pack()))
-    b.row(*nav)
+    _cards_pager(b, owner_id, page, total_pages, "titles", 0, mgroup)
     b.row(
         InlineKeyboardButton(text="📋 Barcha kartalar", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="view_tabs", ext=mgroup, p=1).pack()),
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="v").pack()),
@@ -304,13 +267,7 @@ def admin_v2_title_cards_kb(
             )
         )
     total_pages = max(1, math.ceil(total / page_size))
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="mtitle", tid=rep_card_id, ext=mgroup, p=page - 1).pack()))
-    nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="mtitle", tid=rep_card_id, ext=mgroup, p=page).pack()))
-    if page < total_pages:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="mtitle", tid=rep_card_id, ext=mgroup, p=page + 1).pack()))
-    b.row(*nav)
+    _cards_pager(b, owner_id, page, total_pages, "mtitle", rep_card_id, mgroup)
     b.row(
         InlineKeyboardButton(text="⬅️ Nomlar ro‘yxati", callback_data=AdmV2Cb(owner_id=owner_id, sec="cards", act="titles", ext=mgroup, p=1).pack()),
         InlineKeyboardButton(text="🏠 Bosh menu", callback_data=NavCb(owner_id=owner_id, target="home").pack()),

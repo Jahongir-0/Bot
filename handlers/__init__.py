@@ -27,6 +27,7 @@ from handlers.stars import router as stars_router
 from handlers.start import router as start_router
 from handlers.support import router as support_router
 from handlers.trade import router as trade_router
+from handlers.coin_gift import router as coin_gift_router
 from handlers.transfer import router as transfer_router
 from handlers.vip import router as vip_router
 from handlers.wishlist import router as wishlist_router
@@ -46,6 +47,7 @@ def register_all_routers(dp: Dispatcher) -> None:
     dp.include_router(daily_router)
     dp.include_router(market_router)
     dp.include_router(bot_store_router)
+    dp.include_router(coin_gift_router)
     dp.include_router(transfer_router)
     dp.include_router(offer_router)
     dp.include_router(search_router)

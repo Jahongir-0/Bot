@@ -213,10 +213,9 @@ async def fsm_v2_msg_content(message: Message, state: FSMContext) -> None:
 
     if migrated:
         async with get_session() as session:
-            for old_cid, new_cid in migrated:
-                await session.execute(
-                    update(Group).where(Group.telegram_chat_id == old_cid).values(telegram_chat_id=new_cid)
-                )
+            from services.group_migration import apply_group_migrations
+
+            await apply_group_migrations(session, migrated)
             await session.commit()
 
     total_sent = sent_users + sent_groups

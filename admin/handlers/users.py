@@ -4,12 +4,13 @@ import logging
 from typing import Optional
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
-from admin.filters import IsAdminFilter
+from admin.filters import has_admin_perm, IsAdminFilter
 from admin.handlers.common import AdminStates, _AdminRbacCallbackMiddleware
 from database.session import get_session
 from keyboards.admin import (
@@ -29,7 +30,7 @@ from services.security_backup_service import SecurityBackupService
 from utils.callback_data import AdminCb
 from utils.constants import PAGE_SIZE, get_rarity_meta
 from utils.formatting import esc, fmt_coins
-from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer
+from utils.tg_helpers import show_card_with_prompt, NotCommandFilter, edit_or_answer, safe_delete
 from utils.timeutils import fmt_tashkent
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,8 @@ async def cb_admin_users_menu(callback: CallbackQuery, state: FSMContext) -> Non
     await state.clear()
     await edit_or_answer(
         callback,
-        "👤 <b>USERLAR BO‘LIMI</b>\n\nKerakli amalni tanlang:",
+        "👤 <b>FOYDALANUVCHILAR</b>\n━━━━━━━━━━━━━━━\nRo‘yxatdan foydalanuvchini tanlang yoki qidiring.\n"
+        "🔎 Inline qidiruv: <code>@bot admin user ism</code>",
         reply_markup=admin_users_menu_kb(callback.from_user.id),
     )
 
@@ -57,10 +59,13 @@ async def _show_admin_users_list(callback: CallbackQuery, filter_mode: str, page
         users, total = await AdminService.get_users_paginated(
             session, filter_mode=filter_mode, page=page, page_size=PAGE_SIZE
         )
+    from utils import admin_nav
+
+    admin_nav.remember_users_list(callback.from_user.id, filter_mode, page)
     titles = {
-        "active": f"🚫 <b>BAN QILISH</b> (Faol userlar: {total})",
-        "banned": f"🔓 <b>BANDAN CHIQARISH</b> (Banlanganlar: {total})",
-        "all": f"👥 <b>USERLAR RO‘YXATI</b> (Jami: {total} | 20/sahifa)",
+        "active": f"🟢 <b>FAOL FOYDALANUVCHILAR</b> (Jami: {total} | sahifa {page})",
+        "banned": f"🚫 <b>BANLANGANLAR</b> (Jami: {total} | sahifa {page})",
+        "all": f"👥 <b>FOYDALANUVCHILAR</b> (Jami: {total} | sahifa {page})",
     }
     text = titles.get(filter_mode, titles["all"])
     if not users:
@@ -166,6 +171,19 @@ async def _render_admin_user(target, admin_tg_id: int, target_user_id: int) -> N
         f"{tx_block}"
     )
     await edit_or_answer(target, text, reply_markup=admin_user_detail_kb(admin_tg_id, user))
+
+
+@router.message(Command("au"))
+async def cmd_admin_open_user(message: Message, admin_perms: set | None = None) -> None:
+    """Admin inline qidiruvdan kelgan /au <id>: foydalanuvchi boshqaruv oynasini ochadi."""
+    if not has_admin_perm(message.from_user, admin_perms, "users"):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("ℹ️ Foydalanish: <code>/au FOYDALANUVCHI_ID</code>")
+        return
+    await safe_delete(message.bot, message.chat.id, message.message_id)
+    await _render_admin_user(message, message.from_user.id, int(parts[1]))
 
 
 @router.callback_query(AdminCb.filter((F.section == "users") & (F.action == "detail")))

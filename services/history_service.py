@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 PERIODS = [("d1", "24 soat"), ("d7", "7 kun"), ("d30", "30 kun"), ("all", "Hammasi")]
 
-COMMISSION_TYPES = ("market_sell", "offer_accepted_sale", "paid_transfer_sell", "auction_sale")
+COMMISSION_TYPES = ("market_sell", "offer_accepted_sale", "paid_transfer_sell", "auction_sale", "coin_gift_sent")
 
 TX_CATEGORIES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "all": ("Hammasi", ()),
@@ -37,6 +37,7 @@ TX_CATEGORIES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "auction": ("🔨 Auksion", ("auction_win", "auction_sale", "auction_bid", "auction_refund")),
     "store": ("🏛 Do‘kon/Event", ("bot_store_buy", "bot_market_sell", "event_buy", "card_migration_refund")),
     "reward": ("🎁 Mukofotlar", ("daily_bonus", "quest_reward", "group_add_reward", "referral_bonus", "referral_welcome", "card_drop_reward")),
+    "gift": ("💸 Coin sovg‘a", ("coin_gift_sent", "coin_gift_received")),
     "admin": ("🛡 Admin", ("admin_grant", "admin_deduct")),
     "stars": ("⭐ Stars", ("telegram_stars_purchase",)),
     "other": ("📦 Boshqa", ()),
@@ -62,6 +63,8 @@ TX_LABELS = {
     "referral_bonus": "👥 Referal bonusi",
     "referral_welcome": "👋 Referal xush kelibsiz",
     "card_drop_reward": "🎴 Karta topish mukofoti",
+    "coin_gift_sent": "💸 Coin yubordi",
+    "coin_gift_received": "💸 Coin oldi",
     "admin_grant": "🛡 Admin coin berdi",
     "admin_deduct": "🛡 Admin coin oldi",
     "telegram_stars_purchase": "⭐ Stars bilan coin sotib oldi",
@@ -187,7 +190,7 @@ class HistoryService:
         total = 0
         for tx_type, meta in rows:
             try:
-                fee = int((meta or {}).get("commission") or 0)
+                fee = int((meta or {}).get("commission") or (meta or {}).get("fee") or 0)
             except (TypeError, ValueError):
                 fee = 0
             if fee > 0:

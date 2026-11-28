@@ -112,6 +112,31 @@ JAVOB: faqat .json fayl (yoki bitta ```json bloki), boshqa matn yo'q:
 # yordamchilar
 # --------------------------------------------------------------------------
 _BUF: Dict[int, List[tuple]] = {}
+# Oqim davomida yuborilgan oraliq xabarlar (bot xabarlari + admin rasmlari) — yakunda o'chiriladi
+_TRASH: Dict[int, List[tuple]] = {}
+
+
+def _track(uid: int, msg: Optional[Message]) -> Optional[Message]:
+    if msg is not None:
+        _TRASH.setdefault(uid, []).append((msg.chat.id, msg.message_id))
+    return msg
+
+
+async def _say(message: Message, uid: int, text: str, **kw) -> Message:
+    """Xabar yuboradi va oqim oxirida o'chirish uchun eslab qoladi."""
+    sent = await message.answer(text, **kw)
+    _track(uid, sent)
+    return sent
+
+
+async def _sweep(bot, uid: int) -> None:
+    """Oraliq xabarlarni o'chiradi (xabar to'lib ketmasligi uchun)."""
+    for chat_id, mid in _TRASH.pop(uid, []):
+        try:
+            await bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
 _TASKS: Dict[int, "asyncio.Task"] = {}
 _LOCKS: Dict[int, asyncio.Lock] = {}
 
@@ -256,30 +281,31 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
+    _track(message.from_user.id, message)
     raw = (message.text or "").strip()
     if message.document:
         fname = (message.document.file_name or "").lower()
         if not fname.endswith((".json", ".txt")):
-            await message.answer("⚠️ Faqat <code>.json</code> fayl (yoki JSON matni) yuboring.")
+            await _say(message, message.from_user.id, "⚠️ Faqat <code>.json</code> fayl (yoki JSON matni) yuboring.")
             return
         if (message.document.file_size or 0) > 3 * 1024 * 1024:
-            await message.answer("⚠️ Fayl 3 MB dan kichik bo‘lishi kerak.")
+            await _say(message, message.from_user.id, "⚠️ Fayl 3 MB dan kichik bo‘lishi kerak.")
             return
         buf = io.BytesIO()
         await message.bot.download(message.document, destination=buf)
         raw = buf.getvalue().decode("utf-8-sig", errors="replace")
     if not raw:
-        await message.answer("⚠️ JSON fayl yoki matn yuboring.")
+        await _say(message, message.from_user.id, "⚠️ JSON fayl yoki matn yuboring.")
         return
     try:
         parsed = _extract_json_payload(raw)
     except Exception as exc:
-        await message.answer(f"❌ JSON o‘qilmadi: <code>{esc(str(exc)[:200])}</code>\nAI ga «faqat to‘g‘ri JSON ber» deb ayting.")
+        await _say(message, message.from_user.id, f"❌ JSON o‘qilmadi: <code>{esc(str(exc)[:200])}</code>\nAI ga «faqat to‘g‘ri JSON ber» deb ayting.")
         return
     if isinstance(parsed, dict):
         parsed = parsed.get("cards") if isinstance(parsed.get("cards"), list) else [parsed]
     if not isinstance(parsed, list) or not parsed:
-        await message.answer("❌ JSON ichida kartalar ro‘yxati topilmadi.")
+        await _say(message, message.from_user.id, "❌ JSON ichida kartalar ro‘yxati topilmadi.")
         return
 
     from services.card_zip_import import _MEDIA_LOOKUP, _pick, resolve_rank
@@ -328,7 +354,7 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
     if not records:
         await state.clear()
         extra = ("\n" + "\n".join(f"• {p}" for p in problems[:10])) if problems else ""
-        await message.answer(
+        await _say(message, message.from_user.id,
             f"❌ Qo‘shiladigan karta topilmadi.{extra}",
             reply_markup=admin_v2_cards_menu_kb(message.from_user.id),
         )
@@ -349,10 +375,10 @@ async def fsm_jsonq_input(message: Message, state: FSMContext) -> None:
     )
     if problems:
         head += "\n⚠️ Bu kartalar ro‘yxatda YO‘Q (ularning rasmini yubormang):\n" + "\n".join(f"• {p}" for p in problems[:8])
-    await message.answer(head)
+    await _say(message, message.from_user.id, head)
     for chunk in _chunks(_numbered_lines(records, [None] * len(records), set())):
-        await message.answer(chunk)
-    await message.answer(
+        await _say(message, message.from_user.id, chunk)
+    await _say(message, message.from_user.id,
         f"🖼 <b>Endi rasmlarni shu tartibda yuboring</b> (1 → {len(records)}).\n\n"
         "• Bir yo‘la ko‘p rasm belgilab yuborishingiz mumkin (albom) — bot ularni yuborilgan ketma-ketlikda "
         "1, 2, 3… kartalarga joylaydi.\n"
@@ -383,8 +409,9 @@ async def fsm_jsonq_photo(message: Message, state: FSMContext) -> None:
     elif _is_image_doc(message):
         item = (message.message_id, "doc", message.document, message.caption)
     else:
-        await message.answer("⚠️ Rasm (foto yoki rasm fayli) yuboring.")
+        await _say(message, message.from_user.id, "⚠️ Rasm (foto yoki rasm fayli) yuboring.")
         return
+    _track(uid, message)
     _BUF.setdefault(uid, []).append(item)
     old = _TASKS.get(uid)
     if old and not old.done():
@@ -397,7 +424,7 @@ async def fsm_jsonq_text_hint(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("owner_tg_id") != message.from_user.id:
         return
-    await message.answer(
+    await _say(message, message.from_user.id,
         "🖼 Hozir <b>rasm</b> yuborish kerak (foto yoki rasm fayli). Holatni ko‘rish uchun «📋 Holat / ro‘yxat» ni bosing.",
         reply_markup=_photos_kb(message.from_user.id),
     )
@@ -413,7 +440,7 @@ async def _flush_later(message: Message, state: FSMContext) -> None:
     except Exception as exc:
         logger.exception("json_import flush xatosi")
         try:
-            await message.answer(
+            await _say(message, message.from_user.id,
                 f"❌ <b>Xatolik:</b> <code>{esc(type(exc).__name__)}: {esc(str(exc)[:300])}</code>\n"
                 "Rasmlar saqlanib turibdi. «✅ Tugatish va saqlash» ni qayta bosib ko‘ring.",
                 reply_markup=_photos_kb(message.from_user.id),
@@ -485,11 +512,11 @@ async def _flush(message: Message, state: FSMContext) -> None:
         txt += f"\n\n📊 To‘ldi: <b>{filled}/{len(records)}</b>"
         if nxt is None:
             txt += "\n🎉 Hamma kartaga rasm joylandi — saqlayapman…"
-            await message.answer(txt)
+            await _say(message, message.from_user.id, txt)
             await _finish(message, state)
             return
         txt += f"\n👉 Navbatdagi: <b>{nxt + 1}. {esc(records[nxt]['character_name'])}</b>"
-        await message.answer(txt, reply_markup=_photos_kb(uid))
+        await _say(message, message.from_user.id, txt, reply_markup=_photos_kb(uid))
 
 
 # --------------------------------------------------------------------------
@@ -557,13 +584,14 @@ async def cb_jq_list(callback: CallbackQuery, state: FSMContext) -> None:
     head = f"📋 <b>Holat:</b> {filled}/{len(records)} rasm joylangan\n✅ rasm bor · ⬜ kutilmoqda · ⏭ o‘tkazilgan"
     chunks = _chunks(_numbered_lines(records, slots, skipped))
     for i, ch in enumerate(chunks):
-        await callback.message.answer((head + "\n\n" if i == 0 else "") + ch, reply_markup=_photos_kb(callback.from_user.id) if i == len(chunks) - 1 else None)
+        await _say(callback.message, callback.from_user.id, (head + "\n\n" if i == 0 else "") + ch, reply_markup=_photos_kb(callback.from_user.id) if i == len(chunks) - 1 else None)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "jq_cancel")))
 async def cb_jq_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     _BUF.pop(callback.from_user.id, None)
     await state.clear()
+    await _sweep(callback.bot, callback.from_user.id)
     await callback.answer("Bekor qilindi.")
     await edit_or_answer(callback, "❌ JSON import bekor qilindi.", reply_markup=admin_v2_cards_menu_kb(callback.from_user.id))
 
@@ -594,7 +622,7 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
     missing: List[str] = []
     dup_imgs: List[str] = []
     failed: List[str] = []
-    progress = await message.answer(f"⏳ Saqlanmoqda… (0/{len(records)})")
+    progress = await _say(message, uid_tg, f"⏳ Saqlanmoqda… (0/{len(records)})")
     try:
         async with get_session() as session:
             ranks = await GameplayService.get_rank_definitions(session)
@@ -652,7 +680,7 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
             await session.commit()
     except Exception as exc:
         logger.exception("json_import: saqlash xatosi")
-        await message.answer(
+        await _say(message, uid_tg,
             f"❌ <b>Saqlashda xatolik:</b> <code>{esc(type(exc).__name__)}: {esc(str(exc)[:300])}</code>\n"
             "Rasmlar yo‘qolmadi — «✅ Tugatish va saqlash» ni qayta bosib ko‘ring.",
             reply_markup=_photos_kb(uid_tg),
@@ -664,6 +692,7 @@ async def _finish(message: Message, state: FSMContext, user_id: Optional[int] = 
         pass
     _BUF.pop(uid_tg, None)
     await state.clear()
+    await _sweep(message.bot, uid_tg)  # oraliq xabarlar o'chiriladi — faqat yakuniy hisobot qoladi
 
     lines = [
         "✅ <b>JSON IMPORT YAKUNLANDI</b>" if added else "⚠️ <b>Hech narsa qo‘shilmadi</b>",

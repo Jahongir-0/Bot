@@ -4,6 +4,7 @@ import io
 import logging
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from admin.filters import resolve_admin_perms, IsAdminFilter, has_admin_perm
 from admin.v2.common import AdminV2States, _cancel_kb, _deny_if_no_perm
 from database.session import get_session
+from keyboards.panel import panel_text
 from keyboards.v2 import (
     admin_card_give_users_kb,
     admin_v2_add_choice_kb,
@@ -60,8 +62,7 @@ async def cb_v2_cards_menu(callback: CallbackQuery, state: FSMContext, admin_per
     admin_nav.set_mode(callback.from_user.id, admin_nav.MODE_VIEW)
     await edit_or_answer(
         callback,
-        "🎴 <b>KARTALAR MARKAZI</b>\n━━━━━━━━━━━━━━━\n"
-        "Karta bilan bog‘liq hamma narsa shu yerda: boshqarish, drop va ranklar, bot do‘koni, auksion, eventlar, komissiya.",
+        panel_text("cards_evt"),
         reply_markup=admin_v2_cards_menu_kb(callback.from_user.id, resolve_admin_perms(callback.from_user, admin_perms)),
     )
 
@@ -477,9 +478,9 @@ async def _render_cards_tab(callback: CallbackQuery, tab: str, page: int) -> Non
     async with get_session() as session:
         cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=page, page_size=PAGE_SIZE)
     if not cards and total > 0 and page > 1:
-        page = 1
+        page = max(1, -(-total // PAGE_SIZE))  # oxirgi sahifa
         async with get_session() as session:
-            cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=1, page_size=PAGE_SIZE)
+            cards, total = await AdminService.get_v2_cards_by_tab(session, tab=tab, page=page, page_size=PAGE_SIZE)
     admin_nav.remember(owner, "view_tabs", ext=tab, p=page)
     mode = admin_nav.get_mode(owner)
     txt = (
@@ -529,6 +530,9 @@ async def _render_media_titles(callback: CallbackQuery, mgroup: str, page: int) 
     page = max(1, page)
     async with get_session() as session:
         titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
+        if not titles and total > 0 and page > 1:
+            page = max(1, -(-total // PAGE_SIZE))
+            titles, total = await AdminService.get_v2_media_titles(session, media_group=mgroup, page=page, page_size=PAGE_SIZE)
     admin_nav.remember(owner, "titles", ext=mgroup, p=page)
     mode = admin_nav.get_mode(owner)
     txt = (
@@ -552,19 +556,19 @@ async def cb_v2_media_titles(callback: CallbackQuery, callback_data: AdmV2Cb, ad
     await _render_media_titles(callback, callback_data.ext or "anime", callback_data.p)
 
 
-@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "mtitle")))
-async def cb_v2_media_title_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
-    if await _deny_if_no_perm(callback, admin_perms, "cards"):
-        return
-    owner = callback.from_user.id
-    mgroup = callback_data.ext or "anime"
-    page = max(1, callback_data.p)
+async def _render_mtitle(target, owner: int, tid: int, mgroup: str, page: int) -> None:
+    page = max(1, page)
     async with get_session() as session:
         title, cards, total = await AdminService.get_v2_cards_by_media_title(
-            session, media_group=mgroup, rep_card_id=callback_data.tid, page=page, page_size=PAGE_SIZE
+            session, media_group=mgroup, rep_card_id=tid, page=page, page_size=PAGE_SIZE
         )
+        if not cards and total > 0 and page > 1:
+            page = max(1, -(-total // PAGE_SIZE))
+            title, cards, total = await AdminService.get_v2_cards_by_media_title(
+                session, media_group=mgroup, rep_card_id=tid, page=page, page_size=PAGE_SIZE
+            )
     # Sarlavha ichidagi sahifa eslab qolinadi: kartadan orqaga qaytganda shu sarlavhada davom etamiz
-    admin_nav.remember(owner, "mtitle", tid=callback_data.tid, ext=mgroup, p=page)
+    admin_nav.remember(owner, "mtitle", tid=tid, ext=mgroup, p=page)
     mode = admin_nav.get_mode(owner)
     hint = {
         admin_nav.MODE_VIEW: "Ko‘rish uchun kartani tanlang:",
@@ -575,10 +579,63 @@ async def cb_v2_media_title_cards(callback: CallbackQuery, callback_data: AdmV2C
     if not cards:
         txt += "\n\n📭 Topilmadi."
     await edit_or_answer(
-        callback,
+        target,
         txt,
-        reply_markup=admin_v2_title_cards_kb(owner, cards, callback_data.tid, mgroup, page, total, page_size=PAGE_SIZE),
+        reply_markup=admin_v2_title_cards_kb(owner, cards, tid, mgroup, page, total, page_size=PAGE_SIZE),
     )
+
+
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "mtitle")))
+async def cb_v2_media_title_cards(callback: CallbackQuery, callback_data: AdmV2Cb, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    await _render_mtitle(callback, callback.from_user.id, callback_data.tid, callback_data.ext or "anime", callback_data.p)
+
+
+# ---- Sahifaga o'tish: raqamni yozib yuborish ----
+@router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "jump")))
+async def cb_v2_page_jump(callback: CallbackQuery, callback_data: AdmV2Cb, state: FSMContext, admin_perms: set | None = None) -> None:
+    if await _deny_if_no_perm(callback, admin_perms, "cards"):
+        return
+    list_act, _, list_ext = (callback_data.ext or "").partition(".")
+    await state.set_state(AdminV2States.waiting_page_jump)
+    await state.update_data(
+        owner_tg_id=callback.from_user.id, jump_act=list_act, jump_ext=list_ext, jump_tid=callback_data.tid,
+        jump_prompt_id=callback.message.message_id if callback.message else 0,
+    )
+    await callback.answer()
+    if callback.message:
+        prompt = await callback.message.answer(
+            f"🔢 Nechanchi sahifaga o‘tamiz? Raqamni yozing.\n<i>Hozir: {callback_data.p}-sahifa. Bekor: /cancel</i>"
+        )
+        await state.update_data(jump_ask_id=prompt.message_id)
+
+
+@router.message(AdminV2States.waiting_page_jump, NotCommandFilter())
+async def fsm_v2_page_jump(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("owner_tg_id") != message.from_user.id:
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        await message.answer("⚠️ Sahifa raqamini yozing (masalan: <code>19</code>).")
+        return
+    page = int(raw)
+    act, ext, tid = data.get("jump_act"), data.get("jump_ext") or "", int(data.get("jump_tid") or 0)
+    await state.clear()
+    owner = message.from_user.id
+    for mid in (message.message_id, data.get("jump_ask_id")):  # yozilgan raqam va so'rov xabarini tozalaymiz
+        if mid:
+            await safe_delete(message.bot, message.chat.id, mid)
+    old_list = data.get("jump_prompt_id")
+    if old_list:
+        await safe_delete(message.bot, message.chat.id, old_list)
+    if act == "view_tabs":
+        await _render_cards_tab(message, ext or "all", page)
+    elif act == "titles":
+        await _render_media_titles(message, ext or "anime", page)
+    elif act == "mtitle":
+        await _render_mtitle(message, owner, tid, ext or "anime", page)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act.in_({"edit_list", "del_list"}))))
@@ -727,6 +784,30 @@ async def cb_v2_card_detail(callback: CallbackQuery, callback_data: AdmV2Cb, adm
         except Exception:
             logger.exception("card_det: rasm yuborilmadi (card %s)", card.id)
     await edit_or_answer(callback, text, reply_markup=kb)
+
+
+@router.message(Command("ac"))
+async def cmd_admin_open_card(message: Message, admin_perms: set | None = None) -> None:
+    """Admin inline qidiruvdan kelgan /ac <id>: admin karta boshqaruv oynasini ochadi."""
+    if not has_admin_perm(message.from_user, admin_perms, "cards"):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("ℹ️ Foydalanish: <code>/ac KARTA_ID</code>")
+        return
+    async with get_session() as session:
+        card = await session.get(Card, int(parts[1]))
+        if card is None:
+            await message.answer("❌ Karta topilmadi.")
+            return
+        text = await _build_v2_card_detail_text(session, card)
+    admin_nav.remember(message.from_user.id, "v")
+    kb = admin_v2_card_detail_kb(message.from_user.id, card, tab="all", page=1, is_super=is_super_admin(message.from_user))
+    await safe_delete(message.bot, message.chat.id, message.message_id)
+    try:
+        await send_card_message(message.bot, message.chat.id, card, text, kb)
+    except Exception:
+        await message.answer(text, reply_markup=kb)
 
 
 @router.callback_query(AdmV2Cb.filter((F.sec == "cards") & (F.act == "lvl_info")))

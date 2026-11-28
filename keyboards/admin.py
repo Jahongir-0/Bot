@@ -112,16 +112,6 @@ def admin_users_menu_kb(owner_id: int) -> InlineKeyboardMarkup:
         ),
     )
     builder.row(
-        InlineKeyboardButton(
-            text="🚫 Ban qilish",
-            callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra="active", page=1).pack(),
-        ),
-        InlineKeyboardButton(
-            text="🔓 Bandan chiqarish",
-            callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra="banned", page=1).pack(),
-        ),
-    )
-    builder.row(
         InlineKeyboardButton(text="⬅️ ORQAGA", callback_data=AdminCb(owner_id=owner_id, section="home").pack()),
         InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
@@ -137,17 +127,19 @@ def admin_users_list_kb(
     page_size: int = 20,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=("✅ " if filter_mode == key else "") + label,
+                callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra=key, page=1).pack(),
+            )
+            for key, label in (("all", "👥 Hammasi"), ("active", "🟢 Faol"), ("banned", "🚫 Banlangan"))
+        ]
+    )
     for u in users:
         st = "🚫" if u.is_banned else "👤"
-        if filter_mode == "active":
-            btn_text = f"🚫 Ban: {u.display_name} (🎴{u.total_cards})"
-            action_name = "quick_ban"
-        elif filter_mode == "banned":
-            btn_text = f"🔓 Unban: {u.display_name} ({u.telegram_id})"
-            action_name = "quick_unban"
-        else:
-            btn_text = f"{st} {u.display_name} · 🪙{u.coins:,} · 🎴{u.total_cards}"
-            action_name = "detail"
+        btn_text = f"{st} {u.display_name} · 🪙{u.coins:,} · 🎴{u.total_cards}"
+        action_name = "detail"
         builder.row(
             InlineKeyboardButton(
                 text=btn_text[:60],
@@ -247,8 +239,17 @@ def admin_user_detail_kb(owner_id: int, target_user: User) -> InlineKeyboardMark
     builder.row(ban_btn)
     builder.row(
         InlineKeyboardButton(
-            text="⬅️ ORQAGA",
-            callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra="all", page=1).pack(),
+            text="📜 Tarixi va hisobot",
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="hist", act="usr", tid=target_user.id, ext="all").pack(),
+        ),
+    )
+    from utils.admin_nav import users_list_ctx
+
+    _mode, _page = users_list_ctx(owner_id)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ ORQAGA (ro‘yxat)",
+            callback_data=AdminCb(owner_id=owner_id, section="users", action="list", extra=_mode, page=_page).pack(),
         ),
         InlineKeyboardButton(text="🏠 BOSH MENU", callback_data=NavCb(owner_id=owner_id, target="home").pack()),
     )
@@ -521,7 +522,7 @@ def admin_settings_kb(
         ),
         InlineKeyboardButton(
             text="🔮 Birlashtirish",
-            callback_data=AdmV2Cb(owner_id=owner_id, sec="crules", act="v").pack(),
+            callback_data=AdmV2Cb(owner_id=owner_id, sec="crules", act="v", ext="merge").pack(),
         ),
     )
     builder.row(

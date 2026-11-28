@@ -218,7 +218,7 @@ async def cmd_give(message: Message, state: FSMContext, db_user: User) -> None:
     )
 
 
-@router.callback_query(NavCb.filter(F.target == "give"))
+@router.callback_query(NavCb.filter(F.target == "give_card"))
 async def cb_give_start(callback: CallbackQuery, state: FSMContext, db_user: User) -> None:
     await state.clear()
     await state.set_state(GiveStates.waiting_recipient)

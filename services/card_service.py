@@ -30,6 +30,11 @@ def _slugify(value: str, prefix: str) -> str:
     return f"{prefix}_{digest}"
 
 
+# Bir personajning HAMMA kartalarida bir xil bo'ladigan (umumiy) profil maydonlari.
+# Rasm, rank, narx, drop kabi har bir kartaga xos maydonlar bu yerga kirmaydi.
+SHARED_PROFILE_KEYS = ("description", "birthday", "age", "height", "weight", "personality", "history", "abilities")
+
+
 class CardService:
     @staticmethod
     async def generate_next_card_code(session: AsyncSession) -> str:
@@ -107,7 +112,56 @@ class CardService:
         )
         session.add(card)
         await session.flush()
+        await CardService.sync_character_profile(session, card, aliases or [], metadata_json or {})
         return card
+
+    @staticmethod
+    async def sync_character_profile(
+        session: AsyncSession, card: Card, incoming_aliases: List[str], incoming_meta: dict
+    ) -> None:
+        """Bir personaj (bir asar + bir ism) uchun umumiy ma'lumotni yagona qiladi.
+
+        • Yangi karta qo'shilganda uning umumiy ma'lumoti (tavsif, tug'ilgan kun, aliaslar va h.k.) bo'lsa —
+          shu personajning BARCHA kartalarida eskisini yangisiga almashtiradi.
+        • Yangi kartada ma'lumot bo'lmasa — oldingi ma'lumot saqlanib qoladi va yangi kartaga ham beriladi.
+        • Rasm, rank, narx va drop sozlamalari har kartada alohida qoladi.
+        """
+        siblings = (
+            await session.execute(
+                select(Card)
+                .where(
+                    Card.anime_id == card.anime_id,
+                    Card.character_id == card.character_id,
+                    Card.id != card.id,
+                    Card.is_deleted.is_(False),
+                )
+                .order_by(Card.id.desc())
+            )
+        ).scalars().all()
+        base_meta: dict = {}
+        base_aliases: list = []
+        for sib in siblings:  # eng yangisidan boshlab
+            sm = sib.metadata_json if isinstance(sib.metadata_json, dict) else {}
+            for k in SHARED_PROFILE_KEYS:
+                if k not in base_meta and sm.get(k) not in (None, ""):
+                    base_meta[k] = sm[k]
+            if not base_aliases and sib.aliases:
+                base_aliases = list(sib.aliases)
+        new_shared = {k: v for k, v in (incoming_meta or {}).items() if k in SHARED_PROFILE_KEYS and v not in (None, "")}
+        merged_meta = {**base_meta, **new_shared}
+        merged_aliases = [a for a in (incoming_aliases or []) if str(a).strip()] or base_aliases
+        per_card = {k: v for k, v in (incoming_meta or {}).items() if k not in SHARED_PROFILE_KEYS}
+        card.metadata_json = {**per_card, **merged_meta}
+        card.aliases = merged_aliases
+        for sib in siblings:
+            sm = sib.metadata_json if isinstance(sib.metadata_json, dict) else {}
+            own = {k: v for k, v in sm.items() if k not in SHARED_PROFILE_KEYS}
+            new_sm = {**own, **merged_meta}
+            if new_sm != sm:
+                sib.metadata_json = new_sm
+            if list(sib.aliases or []) != list(merged_aliases):
+                sib.aliases = list(merged_aliases)
+        await session.flush()
 
     @staticmethod
     async def restore_card(session: AsyncSession, card_id: int) -> Optional[Card]:

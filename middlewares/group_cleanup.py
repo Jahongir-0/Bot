@@ -21,8 +21,8 @@ from utils.tg_helpers import schedule_delete
 
 logger = logging.getLogger(__name__)
 
-CLEAN_DELAY = 120.0     # bot javobi necha soniyadan keyin o'chadi
-USER_CMD_DELAY = 4.0    # foydalanuvchi buyrug'i necha soniyadan keyin o'chadi
+CLEAN_DELAY = None      # bot javoblari O'CHIRILMAYDI (menyu va natijalar guruhda qoladi)
+USER_CMD_DELAY = 1.5    # foydalanuvchi yozgan buyruq xabari shuncha soniyadan keyin o'chadi
 
 CLEAN_COMMANDS = {
     "daily", "me", "profil", "profilim", "cards", "collection", "top", "help", "menu",
@@ -72,7 +72,7 @@ class GroupCleanupMiddleware(BaseMiddleware):
         if (
             not isinstance(event, Message)
             or event.chat.type not in ("group", "supergroup")
-            or _command_name(event.text or "") not in CLEAN_COMMANDS
+            or not _command_name(event.text or "")  # faqat /buyruq xabarlari
         ):
             return await handler(event, data)
 
@@ -84,6 +84,7 @@ class GroupCleanupMiddleware(BaseMiddleware):
             _collector.reset(token)
             try:
                 schedule_delete(event.bot, event.chat.id, [event.message_id], delay=USER_CMD_DELAY)
-                schedule_delete(event.bot, event.chat.id, bucket, delay=CLEAN_DELAY)
+                if CLEAN_DELAY and bucket:
+                    schedule_delete(event.bot, event.chat.id, bucket, delay=CLEAN_DELAY)
             except Exception:  # pragma: no cover
                 pass
